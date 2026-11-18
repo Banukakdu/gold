@@ -1,6 +1,6 @@
 import { Component, OnInit, inject, signal, computed } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { DatePipe } from '@angular/common';
+import { AppDatePipe } from '../../core/app-date.pipe';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
 
@@ -16,7 +16,7 @@ interface Dash {
 
 @Component({
   standalone: true,
-  imports: [MoneyPipe, DatePipe],
+  imports: [MoneyPipe, AppDatePipe],
   template: `
     <h1>{{ auth.isAllBranches() ? 'All branches' : auth.activeBranch()?.name }} <small class="muted">this month</small></h1>
     @if (d(); as d) {
@@ -61,7 +61,7 @@ interface Dash {
           <table>
             @for (t of d.recent; track t.id) {
               <tr [class.struck]="t.status !== 'posted'">
-                <td>{{ t.txn_date | date: 'd MMM' }}</td><td>{{ t.branch.code }}</td><td>{{ label(t.type) }}</td>
+                <td>{{ t.txn_date | appDate }}</td><td>{{ t.branch.code }}</td><td>{{ label(t.type) }}</td>
                 <td class="num">{{ t.amount | money }}</td>
               </tr>
             } @empty { <tr><td class="muted">Nothing recorded yet.</td></tr> }

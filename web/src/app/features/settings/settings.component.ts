@@ -169,6 +169,9 @@ export class SettingsComponent implements OnInit {
   async save() {
     const body = this.changes();
     if (!Object.keys(body).length || this.busy()) return;
+    // R4 / S1 (QA Q2): a new fiscal-year start moves every year boundary.
+    if (body.fiscal_year_start_month !== undefined
+      && !confirm(`Change the fiscal year start to ${MONTH_NAMES[Number(body.fiscal_year_start_month) - 1]}? Trial balances will use the new year boundaries.`)) return;
     this.busy.set(true);
     this.msg.set(''); this.ok.set(''); this.err.set({});
     try {

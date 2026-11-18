@@ -10,7 +10,7 @@ import {
   currentMonth, fieldErrors, readQuery, reportError, toHttpParams, writeQuery,
 } from './report-common';
 
-interface TbAccount { id: number; code: string | null; name: string; class: string; type: string; group: string; status: string }
+interface TbAccount { id: number | null; code: string | null; name: string; class: string; type: string; group: string; status: string }
 interface Amounts { opening_dr: string; opening_cr: string; period_dr: string; period_cr: string; closing_dr: string; closing_cr: string }
 interface Section { branch: ReportBranch; rows: (Amounts & { account: TbAccount })[]; totals: Amounts; balanced: boolean; difference: string }
 interface ConsRow {
@@ -98,7 +98,7 @@ const CLASS_NAMES: Record<string, string> = { asset: 'Asset', liability: 'Liabil
                     @if (rowsOf(s, g[0]); as rows) {
                       @if (rows.length) {
                         <tr class="sub"><td colspan="9"><b>{{ g[1] }}</b></td></tr>
-                        @for (x of rows; track x.account.id ?? x.account.name) {
+                        @for (x of rows; track rowKey(x)) {
                           <tr>
                             <td class="mono">{{ x.account.code }}</td>
                             <td>{{ x.account.name }} @if (x.account.status !== 'active') { <span class="tag" data-s="inactive">{{ x.account.status }}</span> }</td>
@@ -125,7 +125,7 @@ const CLASS_NAMES: Record<string, string> = { asset: 'Asset', liability: 'Liabil
         }
       } @else {
         <div class="card section">
-          <p class="muted">Branch columns show the closing balance at {{ r.to }}: debit positive, credit negative.</p>
+          <p class="muted">Branch columns show the closing balance at {{ settings.date(r.to) }}: debit positive, credit negative.</p>
           <table class="list">
             <thead>
               <tr><th>Account</th>
@@ -217,6 +217,12 @@ export class TrialBalanceComponent implements OnInit {
     this.f = { ...r };
     this.load();
   }
+
+  /**
+   * Track key of a branch row: the virtual "earlier years" row has no account id. A method, not an inline `??`:
+   * Angular compiled `track a ?? b` to an undeclared temporary and the branch view rendered no rows (QA Q1).
+   */
+  rowKey(x: { account: TbAccount }): string { return x.account.id === null ? `v:${x.account.type}` : `a:${x.account.id}`; }
 
   rowsOf(s: Section, group: string) { return s.rows.filter(x => x.account.group === group); }
   consOf(r: TrialBalance, group: string) { return (r.rows ?? []).filter(x => x.group === group); }
