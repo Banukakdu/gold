@@ -75,12 +75,12 @@ Responses:
 - cash-book: `{from,to,accounts:[{account:{id,name,type,branch_code,status},opening,receipts,payments,closing,days:[{date,opening,receipts,payments,closing,lines:[{ref_no,type,description,receipt,payment}]}]}]}`.
 - export: 200 file, `Content-Disposition: attachment; filename="<name>_<from>_<to>.<pdf|xlsx>"`.
 
-Errors: 400 no branch header (normal user); 403 missing permission; 403 "You do not have access to branch <code>." when `branches[]` holds a branch other than the active one in branch mode; 422 unknown branch/account, bad dates, range too long, cash book without branches in All mode; 422 over cap: "This export has N rows; the limit is 5,000. Narrow the date range or branches."
+Errors: 400 no branch header (normal user); 403 missing permission; 403 "You do not have access to branch <code>." when `branches[]` holds a branch other than the active one in branch mode; 422 unknown branch/account, bad dates, range too long, cash book without branches in All mode; 422 over cap: Excel "This export has N rows; the limit is 5,000. Narrow the date range or branches."; PDF "This export has N rows; the limit for PDF is 1,000. Use Excel or narrow the date range or branches."; cash book screen over 5,000 lines: 422 "This cash book has N lines; the limit is 5,000. Narrow the date range, branches or accounts." Server errors (500) never show raw PHP text; the UI shows a friendly message.
 
 Change to existing endpoint:
 - **E1 `GET /transactions`**: add `branches[]` (All mode only; same 403 rule in branch mode) and `category_only=1` (exact `category_id`, no children). Web transaction list reads `from,to,type,category_id,category_only,branches` from URL query params on load (today it reads none).
 
-Export: composer `maatwebsite/excel` ^3.1 (xlsx) and `barryvdh/laravel-dompdf` ^3 (PDF from Blade views). **Synchronous** in the request for now (no queue); cap 5,000 detail rows (I&E: category lines; comparison: branches; transfers: movements, matrix not counted; cash book: detail lines). Each export writes `AuditLog::record('report.exported', null, null, ['name','format','params','rows'])`.
+Export: composer `maatwebsite/excel` ^3.1 (xlsx) and `barryvdh/laravel-dompdf` ^3 (PDF from Blade views). **Synchronous** in the request for now (no queue); cap 5,000 detail rows for Excel and 1,000 for PDF (dompdf needs about 115 MB for 1,000 cash book lines; the PDF request runs with up to 120 s and 512M as a safety margin) (I&E: category lines; comparison: branches; transfers: movements, matrix not counted; cash book: detail lines). Each export writes `AuditLog::record('report.exported', null, null, ['name','format','params','rows'])`.
 PDF/Excel header: company name `Setting::get('company_name', config('app.name'))`, logo if `Setting::get('company_logo')` set (AG-092 later), title, period, branches ("All branches" or codes), generated at + by. Excel: one sheet per section (transfers: "Movements", "Matrix"); amounts numeric cells `#,##0.00`; dates as date cells; text starting with `= + - @` prefixed with `'` (formula injection).
 
 ## 6. Business rules
@@ -134,7 +134,7 @@ October 2026: (1) 10-01 Income KDY Cash Retail 50,000.00 (2) 10-02 Income KDY Ca
 19. Given a 32-day range, When cash-book runs, Then 422; Given a 367-day range on any other report, Then 422.
 20. Given All mode and no branches, When cash-book runs, Then 422 "Select at least one branch".
 21. Given an Accountant, When exporting each report as xlsx and pdf for October, Then a file named `<name>_2026-10-01_2026-10-31.<ext>` downloads, totals equal the screen, the PDF header shows company name, period, branches and generated-by, and an audit log row `report.exported` exists.
-22. Given filters producing 5,001 detail rows, When exporting, Then 422 with the cap message and no file; Given exactly 5,000, Then the file downloads.
+22. Given filters producing 5,001 detail rows, When exporting to Excel, Then 422 with the cap message and no file; Given exactly 5,000, Then the Excel file downloads. Given 1,001 detail rows, When exporting to PDF, Then 422 "This export has 1,001 rows; the limit for PDF is 1,000. Use Excel or narrow the date range or branches." and no file; Given exactly 1,000, Then the PDF downloads.
 23. Given a payee "=HYPERLINK(\"x\")", When exported to Excel, Then the cell holds the literal text, not a formula.
 24. Given the cash book page, When printing, Then menu and filters are hidden and each account starts on a new page.
 25. Given incomes 0.10 and 0.20 in one sub-category, When the report runs, Then the total is exactly 0.30 on screen and in both exports.
@@ -146,7 +146,7 @@ October 2026: (1) 10-01 Income KDY Cash Retail 50,000.00 (2) 10-02 Income KDY Ca
 - Q4 Main branch "Funds received" includes Capital. Assumed yes, so the Total row reconciles (Funds + In - Out = Capital in period).
 - Q5 Year and quarter use the calendar year until the fiscal-year setting (AG-092) exists.
 - Q6 Mixed currencies: assumed all accounts are LKR; no conversion.
-- Q7 Exports are synchronous with a 5,000-row cap; above it the user narrows filters until AG-087 (queued exports) ships.
+- Q7 Exports are synchronous with a 5,000-row cap for Excel and a 1,000-row cap for PDF (PDF rendering is memory-heavy); above it the user switches to Excel or narrows filters until AG-087 (queued exports) ships.
 
 ## Accounting review
 Reviewed by the accountant against `LedgerService` as it stands (reversal = transaction type `reversal` with `reversal_of_id`, entries mirrored with debit/credit swapped; void deletes the entries and keeps the transaction row).

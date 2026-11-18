@@ -58,7 +58,8 @@ abstract class ReportTestCase extends AccountingTestCase
         preg_match_all('/stream\r?\n(.*?)endstream/s', $pdf, $m);
         foreach ($m[1] as $raw) {
             $content = @gzuncompress(rtrim($raw, "\r\n"));
-            if ($content === false || ! str_contains($content, 'Tj') && ! str_contains($content, 'TJ')) {
+            // Page content streams are text operators; embedded font programs (DejaVu) are binary.
+            if ($content === false || str_contains($content, "\0") || ! str_contains($content, ' Tf')) {
                 continue;
             }
             preg_match_all('/\((?:[^()\\\\]|\\\\.)*\)/s', $content, $s);

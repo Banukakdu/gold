@@ -48,13 +48,21 @@ class ReportExporter
 
     public function download(string $name, ReportParams $p, string $format, User $user): Response
     {
-        $rows = $this->countRows($name, $p);
-        if ($rows > ReportService::EXPORT_CAP) {
-            abort(response()->json(['message' => 'This export has '.number_format($rows).' rows; the limit is '.number_format(ReportService::EXPORT_CAP).'. Narrow the date range or branches.'], 422));
+        // Income & Expense counts lines from the built report: build it once and reuse it.
+        $data = $name === 'income-expense' ? $this->reports->incomeExpense($p) : null;
+        $rows = $this->countRows($name, $p, $data);
+        $cap = $format === 'pdf' ? ReportService::PDF_EXPORT_CAP : ReportService::EXPORT_CAP;
+        if ($rows > $cap) {
+            $message = $format === 'pdf'
+                ? 'This export has '.number_format($rows).' rows; the limit for PDF is '.number_format($cap).'. Use Excel or narrow the date range or branches.'
+                : 'This export has '.number_format($rows).' rows; the limit is '.number_format($cap).'. Narrow the date range or branches.';
+            abort(response()->json(['message' => $message], 422));
+        }
+        if ($format === 'pdf') {
+            self::raisePdfLimits();
         }
 
-        $data = match ($name) {
-            'income-expense' => $this->reports->incomeExpense($p),
+        $data ??= match ($name) {
             'branch-comparison' => $this->reports->branchComparison($p),
             'transfers' => $this->reports->transfers($p, all: true),
             'cash-book' => $this->reports->cashBook($p),
@@ -71,6 +79,28 @@ class ReportExporter
             $p->branches->count() === 1 ? $p->branches->first()->id : null);
 
         return $response;
+    }
+
+    /** Safety margin for dompdf at the PDF cap (about 1,000 lines). Never lowers a higher limit. */
+    public static function raisePdfLimits(): void
+    {
+        @set_time_limit(120);
+        $current = ini_get('memory_limit');
+        if ($current !== '-1' && self::bytes((string) $current) < 512 * 1024 * 1024) {
+            @ini_set('memory_limit', '512M');
+        }
+    }
+
+    private static function bytes(string $v): int
+    {
+        $n = (int) $v;
+
+        return match (strtolower(substr(trim($v), -1))) {
+            'g' => $n * 1024 ** 3,
+            'm' => $n * 1024 ** 2,
+            'k' => $n * 1024,
+            default => $n,
+        };
     }
 
     /** Header block (finding 4): identical lines at the top of every PDF page and every Excel sheet. */
@@ -92,8 +122,8 @@ class ReportExporter
 
         return [
             'company' => $company,
-            // Only embedded images (data URIs) are used: dompdf does not fetch remote files.
-            'logo' => str_starts_with($logo, 'data:image/') ? $logo : null,
+            // Only embedded PNG/JPEG (data URIs): dompdf does not fetch remote files, and no SVG.
+            'logo' => preg_match('#^data:image/(png|jpeg);base64,[A-Za-z0-9+/=\s]+$#', $logo) ? $logo : null,
             'title' => self::TITLES[$name],
             'branches' => $p->branchLabel(),
             'period' => self::periodLabel($p->from, $p->to),
@@ -251,9 +281,9 @@ class ReportExporter
                 $rows = [$row(['', 'Opening balance', '', '', '', '', $a['opening']], true)];
                 foreach ($a['days'] as $day) {
                     foreach ($day['lines'] as $l) {
-                        $rows[] = $row([$day['date'], $l['ref_no'], $l['type'], $l['description'], $l['receipt'], $l['payment'], null]);
+                        $rows[] = $row([$day['date'], $l['ref_no'], ReportService::typeLabel($l['type']), $l['description'], $l['receipt'], $l['payment'], null]);
                     }
-                    $rows[] = $row([$day['date'], 'Day total (opening '.$day['opening'].')', '', '', $day['receipts'], $day['payments'], $day['closing']], true);
+                    $rows[] = $row([$day['date'], 'Day total (opening '.Money::format($day['opening']).')', '', '', $day['receipts'], $day['payments'], $day['closing']], true);
                 }
                 $rows[] = $row(['', 'Period total', '', '', $a['receipts'], $a['payments'], $a['closing']], true);
 

@@ -30,7 +30,7 @@
     @foreach ($mx['branches'] as $a)
         <tr><td>{{ $a['code'] }}</td>
             @foreach ($mx['branches'] as $b)
-                <td class="num">{{ $a['id'] === $b['id'] ? '-' : (isset($cell[$a['id'].':'.$b['id']]) ? $m($cell[$a['id'].':'.$b['id']]) : '') }}</td>
+                <td class="num">@if ($a['id'] === $b['id'])<span class="g">—</span>@else{{ isset($cell[$a['id'].':'.$b['id']]) ? $m($cell[$a['id'].':'.$b['id']]) : '' }}@endif</td>
             @endforeach
             <td class="num">{{ $a['in_scope'] ? $m($mx['sent'][$a['id']]) : '' }}</td></tr>
     @endforeach

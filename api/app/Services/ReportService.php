@@ -37,7 +37,23 @@ class ReportService
 {
     public const NAMES = ['income-expense', 'branch-comparison', 'transfers', 'cash-book'];
 
+    /** Excel export and cash book screen cap (detail rows). */
     public const EXPORT_CAP = 5000;
+
+    /** dompdf needs far more memory per row than Excel: PDF has its own lower cap (QA bug 1, AC 22). */
+    public const PDF_EXPORT_CAP = 1000;
+
+    public const TYPE_LABELS = [
+        Transaction::CAPITAL => 'Capital',
+        Transaction::OPENING_ALLOCATION => 'Opening balance',
+        Transaction::FUND_ALLOCATION => 'Fund allocation',
+        Transaction::FUND_RETURN => 'Fund return',
+        Transaction::BRANCH_TRANSFER => 'Branch transfer',
+        Transaction::INTERNAL_TRANSFER => 'Internal transfer',
+        Transaction::INCOME => 'Income',
+        Transaction::EXPENSE => 'Expense',
+        Transaction::REVERSAL => 'Reversal',
+    ];
 
     public const MAX_DAYS = 366;
 
@@ -53,6 +69,12 @@ class ReportService
     ];
 
     public const BASIS = 'Posted entries incl. reversals; voided entries excluded';
+
+    /** Same labels as the web app's TYPE_LABELS. */
+    public static function typeLabel(string $type): string
+    {
+        return self::TYPE_LABELS[$type] ?? $type;
+    }
 
     // ------------------------------------------------------------------ filters (R1)
 

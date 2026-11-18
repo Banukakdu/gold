@@ -10,6 +10,7 @@ use App\Models\User;
 use App\Services\LedgerService;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\Auth;
+use RuntimeException;
 
 /**
  * Worked example of docs/specs/reports.md section 7 (E-1..E-4), posted through LedgerService.
@@ -23,6 +24,10 @@ class ReportExampleSeeder extends Seeder
 
     public function run(LedgerService $ledger): void
     {
+        // Demo/test data posts real ledger entries: never in production.
+        if (app()->environment('production')) {
+            throw new RuntimeException('ReportExampleSeeder must not run in production.');
+        }
         $admin = User::where('is_super_admin', true)->firstOrFail();
         $previous = Auth::user();
         Auth::setUser($admin);

@@ -29,7 +29,13 @@ class ReportController extends Controller
 
     public function cashBook(Request $request)
     {
-        return $this->reports->cashBook($this->reports->params('cash-book', $request->all()));
+        $params = $this->reports->params('cash-book', $request->all());
+        $rows = $this->reports->cashBookRows($params);
+        if ($rows > ReportService::EXPORT_CAP) {
+            return response()->json(['message' => 'This cash book has '.number_format($rows).' lines; the limit is '.number_format(ReportService::EXPORT_CAP).'. Narrow the date range, branches or accounts.'], 422);
+        }
+
+        return $this->reports->cashBook($params);
     }
 
     public function export(Request $request, string $name)

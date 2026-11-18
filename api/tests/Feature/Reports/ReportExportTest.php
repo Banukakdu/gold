@@ -5,9 +5,14 @@ namespace Tests\Feature\Reports;
 use App\Models\AuditLog;
 use App\Models\Category;
 use App\Models\PeriodLock;
+use App\Models\Role;
+use App\Models\Setting;
 use App\Models\Transaction;
 use App\Models\User;
 use App\Services\LedgerService;
+use App\Services\ReportExporter;
+use App\Services\ReportService;
+use Database\Seeders\ReportExampleSeeder;
 use Illuminate\Support\Facades\DB;
 
 /** PDF / Excel export (spec section 5, accounting review findings 4, 5, 7). */
@@ -139,6 +144,121 @@ class ReportExportTest extends ReportTestCase
             ->assertJsonPath('message', 'This export has 5,001 rows; the limit is 5,000. Narrow the date range or branches.');
         $this->export('cash-book', $q, 'pdf')->assertStatus(422);
         $this->assertSame($before, AuditLog::where('event', 'report.exported')->count());
+    }
+
+    /** Inserts $n cash book lines on KDY Cash in November 2026 (one per entry, spread over 30 days). Test data only. */
+    private function bulkLines(int $n): array
+    {
+        $cash = $this->acc($this->kdy, 'Cash');
+        $txnId = DB::table('transactions')->insertGetId(['branch_id' => $this->kdy->id, 'type' => 'income', 'txn_date' => '2026-11-03', 'amount' => '50.00',
+            'account_id' => $cash->id, 'category_id' => Category::where('name', 'Retail')->value('id'), 'status' => 'posted', 'created_by' => $this->admin->id,
+            'ref_no' => 'KDY-INC-BULK-'.uniqid(), 'payee_payer' => 'Walk-in customer', 'created_at' => now(), 'updated_at' => now()]);
+        $rows = [];
+        for ($i = 0; $i < $n; $i++) {
+            $rows[] = ['transaction_id' => $txnId, 'account_id' => $cash->id, 'branch_id' => $this->kdy->id,
+                'entry_date' => sprintf('2026-11-%02d', 1 + $i % 30), 'debit' => '0.01', 'credit' => '0.00'];
+        }
+        foreach (array_chunk($rows, 500) as $chunk) {
+            DB::table('ledger_entries')->insert($chunk);
+        }
+
+        return ['from' => '2026-11-01', 'to' => '2026-11-30', 'accounts' => [$cash->id]];
+    }
+
+    /** AC 22 (fix round): PDF has its own cap of 1,000 lines; at the cap it succeeds within a sane memory peak. */
+    public function test_ac22_pdf_cap(): void
+    {
+        $q = $this->bulkLines(1000);
+        memory_reset_peak_usage();
+        $base = memory_get_usage();
+        $start = microtime(true);
+        $res = $this->export('cash-book', $q, 'pdf')->assertOk();
+        $peakMb = (memory_get_peak_usage() - $base) / 1024 / 1024;
+        $this->assertSame('application/pdf', $res->headers->get('Content-Type'));
+        $pages = $this->pdfPages($res->getContent());
+        $this->assertGreaterThan(30, count($pages));
+        $this->assertStringContainsString('Carried forward 10.00 0.00', end($pages));
+        $this->assertLessThan(256, $peakMb, "PDF export peak {$peakMb} MB");
+        $this->assertLessThan(60, microtime(true) - $start);
+        $this->assertSame(1000, AuditLog::where('event', 'report.exported')->latest('id')->first()->new_values['rows']);
+
+        // One more line: PDF refused (422, no raw error), Excel still fine.
+        $this->bulkLines(1);
+        $before = AuditLog::where('event', 'report.exported')->count();
+        $this->export('cash-book', $q, 'pdf')->assertStatus(422)
+            ->assertJsonPath('message', 'This export has 1,001 rows; the limit for PDF is 1,000. Use Excel or narrow the date range or branches.');
+        $this->assertSame($before, AuditLog::where('event', 'report.exported')->count());
+        $this->export('cash-book', $q, 'xlsx')->assertOk();
+    }
+
+    /** Fix round: the cash book screen is capped at 5,000 lines as well. */
+    public function test_cash_book_screen_cap(): void
+    {
+        $q = $this->bulkLines(5001);
+        $this->actingAs($this->acct)->withHeader('X-Branch-Id', (string) $this->kdy->id)
+            ->getJson('/api/v1/reports/cash-book?'.http_build_query($q))->assertStatus(422)
+            ->assertJsonPath('message', 'This cash book has 5,001 lines; the limit is 5,000. Narrow the date range, branches or accounts.');
+    }
+
+    /** QA bug 2: cash book Type column shows labels; day totals are formatted. QA bug 4: em dash drawn with DejaVu Sans. */
+    public function test_type_labels_and_dash_glyph(): void
+    {
+        $pdf = $this->export('cash-book', $this->october(), 'pdf')->getContent();
+        $text = implode(' ', $this->pdfPages($pdf));
+        foreach (['Income', 'Expense', 'Fund allocation', 'Branch transfer', 'Internal transfer', 'Reversal'] as $label) {
+            $this->assertStringContainsString(" {$label} ", $text);
+        }
+        $this->assertStringNotContainsString('fund_allocation', $text);
+
+        $ws = $this->xlsx($this->export('cash-book', $this->october(), 'xlsx'))->getSheetByName('KDY Cash');
+        $values = [];
+        foreach ($ws->getRowIterator() as $row) {
+            $values[] = (string) $ws->getCell([2, $row->getRowIndex()])->getValue().'|'.(string) $ws->getCell([3, $row->getRowIndex()])->getValue();
+        }
+        $this->assertContains('Day total (opening 170,000.00)|', $values);
+        $this->assertNotEmpty(preg_grep('/\|Fund allocation$/', $values));
+        $this->assertEmpty(preg_grep('/\|fund_allocation$/', $values));
+
+        $matrix = $this->export('transfers', $this->october(), 'pdf', $this->admin, 'all')->getContent();
+        $this->assertStringContainsString('DejaVuSans', $matrix);
+        $this->assertStringNotContainsString('DejaVuSans', $this->export('branch-comparison', $this->october(), 'pdf')->getContent());
+    }
+
+    /** Reviewer #2: export needs report.view as well as report.export. */
+    public function test_export_requires_report_view(): void
+    {
+        $role = Role::create(['name' => 'Exporter', 'guard_name' => 'web', 'branch_id' => $this->kdy->id]);
+        $role->syncPermissions(['report.export']);
+        $u = User::factory()->create(['status' => 'active']);
+        $u->branches()->attach($this->kdy->id);
+        setPermissionsTeamId($this->kdy->id);
+        $u->assignRole($role);
+        $this->export('income-expense', $this->october(), 'xlsx', $u)->assertForbidden()->assertJsonPath('message', 'Missing permission: report.view');
+    }
+
+    /** Nit: only PNG/JPEG data URIs are used as the logo. */
+    public function test_logo_only_png_or_jpeg_data_uri(): void
+    {
+        $exporter = app(ReportExporter::class);
+        $p = app(ReportService::class)->params('income-expense', $this->october());
+        $data = ['provisional' => false];
+        foreach (['data:image/png;base64,iVBORw0KGgo=' => true, 'data:image/jpeg;base64,/9j/4AAQ' => true, 'data:image/svg+xml;base64,PHN2Zz4=' => false,
+            'https://example.com/logo.png' => false, 'data:image/png;base64,"><script>' => false] as $logo => $ok) {
+            Setting::put('company_logo', $logo);
+            $this->assertSame($ok ? $logo : null, $exporter->header('income-expense', $p, $data, $this->admin)['logo'], $logo);
+        }
+    }
+
+    public function test_example_seeder_refuses_production(): void
+    {
+        $this->app['env'] = 'production';
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('must not run in production');
+        try {
+            (new ReportExampleSeeder)->run(app(LedgerService::class));
+        } finally {
+            $this->app['env'] = 'testing';
+        }
     }
 
     /** AC 23: user text that looks like a formula stays literal text. */

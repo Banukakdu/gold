@@ -21,6 +21,8 @@
     .sub td { background: #faf6ec; }
     h2 { font-size: 11px; margin: 8px 0 4px; }
     .note { color: #555; margin-top: 6px; }
+    /* Core fonts have no em dash: draw it with DejaVu Sans (bundled with dompdf). */
+    .g { font-family: 'DejaVu Sans', sans-serif; }
     .page-break { page-break-after: always; }
     .sign { margin-top: 28px; width: 100%; }
     .sign td { border: 0; padding: 18px 8px 2px; width: 33%; }
