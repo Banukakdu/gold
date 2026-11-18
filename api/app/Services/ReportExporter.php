@@ -272,18 +272,20 @@ class ReportExporter
                 ->filter(fn ($label, $type) => $d[$type] !== null)
                 ->map(function ($label, $type) use ($d, $row) {
                     $rows = [];
+                    // Categories review finding 8: the ledger code in its own column, a "<code> only" tag on branch-only subs.
                     foreach ($d[$type]['categories'] as $c) {
-                        $rows[] = $row([$c['name'].($c['is_active'] ? '' : ' (Inactive)'), '', $c['amount'], $c['percent'] ?? '—'], true);
+                        $rows[] = $row([$c['name'].($c['is_active'] ? '' : ' (Inactive)'), '', $c['amount'], $c['percent'] ?? '—', $c['code'] ?? ''], true);
                         foreach ($c['subs'] as $s) {
-                            $rows[] = $row([$c['name'], $s['name'].($s['is_active'] ? '' : ' (Inactive)'), $s['amount'], $s['percent'] ?? '—']);
+                            $rows[] = $row([$c['name'], $s['name'].(empty($s['branch_only']) ? '' : " ({$s['branch_only']} only)").($s['is_active'] ? '' : ' (Inactive)'),
+                                $s['amount'], $s['percent'] ?? '—', $s['code'] ?? '']);
                         }
                     }
-                    $rows[] = $row([$type === 'income' ? 'Total income' : 'Total expenses', '', $d[$type]['total'], null], true);
+                    $rows[] = $row([$type === 'income' ? 'Total income' : 'Total expenses', '', $d[$type]['total'], null, ''], true);
                     if ($type === 'expense' && $d['net'] !== null) {
-                        $rows[] = $row(['Net (income - expenses)', '', $d['net'], null], true);
+                        $rows[] = $row(['Net (income - expenses)', '', $d['net'], null, ''], true);
                     }
 
-                    return ['title' => $label, 'columns' => [['Category', 'text'], ['Sub-category', 'text'], ['Amount', 'amount'], ['% of type total', 'percent']], 'rows' => $rows];
+                    return ['title' => $label, 'columns' => [['Category', 'text'], ['Sub-category', 'text'], ['Amount', 'amount'], ['% of type total', 'percent'], ['Code', 'text']], 'rows' => $rows];
                 })->values()->all(),
 
             'branch-comparison' => [[
