@@ -1,11 +1,12 @@
 import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
-import { RouterLink } from '@angular/router';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
+import { AuthService } from '../../core/auth.service';
 import { MoneyPipe } from '../../core/money.pipe';
-import { errorText } from '../../core/api.interceptor';
 import {
   BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, ReportMeta, ReportParams, currentMonth, fieldErrors, toHttpParams,
+  readQuery, reportError, writeQuery,
 } from './report-common';
 
 interface Line { id: number | null; name: string; is_active: boolean; amount: string; percent: string | null }
@@ -67,6 +68,9 @@ interface IncomeExpense extends ReportMeta { income: Section | null; expense: Se
 })
 export class IncomeExpenseComponent implements OnInit {
   private http = inject(HttpClient);
+  private router = inject(Router);
+  private route = inject(ActivatedRoute);
+  private auth = inject(AuthService);
   f = { ...currentMonth(), type: 'all' };
   branches = signal<number[]>([]);
   r = signal<IncomeExpense | null>(null);
@@ -88,15 +92,21 @@ export class IncomeExpenseComponent implements OnInit {
 
   errLine() { return Object.values(this.errs()).join(' '); }
 
-  ngOnInit() { this.load(); }
+  ngOnInit() {
+    const { q, branches } = readQuery(this.route, this.auth.isAllBranches());
+    this.f = { from: q.get('from') ?? this.f.from, to: q.get('to') ?? this.f.to, type: q.get('type') ?? this.f.type };
+    this.branches.set(branches);
+    this.load();
+  }
 
   load() {
     const p: ReportParams = { from: this.f.from, to: this.f.to, type: this.f.type, branches: this.branches() };
     this.applied.set(p);
+    writeQuery(this.router, this.route, p);
     this.loading.set(true);
     this.http.get<IncomeExpense>('/api/v1/reports/income-expense', { params: toHttpParams(p) }).subscribe({
       next: r => { this.r.set(r); this.msg.set(''); this.errs.set({}); this.loading.set(false); },
-      error: e => { this.r.set(null); this.errs.set(fieldErrors(e)); this.msg.set(this.errLine() ? '' : errorText(e)); this.loading.set(false); },
+      error: e => { this.r.set(null); this.errs.set(fieldErrors(e)); this.msg.set(this.errLine() ? '' : reportError(e)); this.loading.set(false); },
     });
   }
 
@@ -106,7 +116,9 @@ export class IncomeExpenseComponent implements OnInit {
     return {
       from: r.from, to: r.to, type: `${type},reversal`,
       category_id: sub.id ?? c.id, category_only: 1,
-      branches: r.all_branches ? [] : r.branches.map(b => b.id),
+      category_name: sub.id ? `${c.name} › ${sub.name}` : c.name,
+      // branches[] only means something in All mode; in branch mode the active branch already limits the list.
+      branches: this.auth.isAllBranches() && !r.all_branches ? r.branches.map(b => b.id) : [],
     };
   }
 }

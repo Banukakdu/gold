@@ -27,7 +27,7 @@ import { errorText } from '../../core/api.interceptor';
       <input name="q" placeholder="Search ref, payee, note" [(ngModel)]="f.q" />
       <button type="submit">Filter</button>
       @if (fromReport()) {
-        <span class="tag">From report: {{ f.type }} · category {{ f.category_id }}{{ f.category_only ? ' only' : '' }}{{ branches.length ? ' · ' + branches.length + ' branch(es)' : '' }}</span>
+        <span class="tag">From report: {{ categoryName || 'category ' + f.category_id }}{{ f.category_only ? ' (this line only)' : '' }}{{ branches.length ? ' · ' + branches.length + ' branch(es)' : '' }}</span>
         <button type="button" class="link" (click)="clearReportFilter()">Clear</button>
       }
     </form>
@@ -78,6 +78,7 @@ export class TransactionListComponent implements OnInit {
   creators = signal<{ id: number; name: string; tag: string | null }[]>([]);
   f = { from: '', to: '', type: '', created_by: '', q: '', category_id: '', category_only: '' };
   branches: string[] = [];
+  categoryName = ''; // label only, never sent to the API
   fromReport = signal(false);
   types = Object.entries(TYPE_LABELS);
   private route = inject(ActivatedRoute);
@@ -86,7 +87,9 @@ export class TransactionListComponent implements OnInit {
     // Reports drill-down (spec E1): filters arrive as URL query params.
     const q = this.route.snapshot.queryParamMap;
     for (const k of ['from', 'to', 'type', 'category_id', 'category_only'] as const) this.f[k] = q.get(k) ?? '';
-    this.branches = q.getAll('branches');
+    // branches[] is only valid in All mode; a stale value after a branch switch would give 403.
+    this.branches = this.auth.isAllBranches() ? q.getAll('branches') : [];
+    this.categoryName = q.get('category_name') ?? '';
     this.fromReport.set(!!(this.f.category_id || this.branches.length));
     this.load(1);
     // "Created by" keeps former members (accounting review finding 3).
@@ -108,6 +111,7 @@ export class TransactionListComponent implements OnInit {
     this.f.category_id = '';
     this.f.category_only = '';
     this.branches = [];
+    this.categoryName = '';
     this.fromReport.set(false);
     this.load(1);
   }

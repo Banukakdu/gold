@@ -1,11 +1,13 @@
 import { Component, OnInit, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
+import { ActivatedRoute, Router } from '@angular/router';
+import { AuthService } from '../../core/auth.service';
 import { MoneyPipe } from '../../core/money.pipe';
-import { errorText } from '../../core/api.interceptor';
 import {
   BranchPickerComponent, ExportButtonsComponent, ReportBranch, ReportHeadComponent, ReportMeta, ReportParams, SignaturesComponent,
   fieldErrors, isoDate, periodRange, toHttpParams,
+  readQuery, reportError, writeQuery,
 } from './report-common';
 
 type Figures = Record<'opening' | 'capital' | 'funds_received' | 'income' | 'expenses' | 'transfers_in' | 'transfers_out' | 'closing', string>;
@@ -64,6 +66,9 @@ interface Comparison extends ReportMeta { rows: (Figures & { branch: ReportBranc
 })
 export class BranchComparisonComponent implements OnInit {
   private http = inject(HttpClient);
+  private router = inject(Router);
+  private route = inject(ActivatedRoute);
+  private auth = inject(AuthService);
   cols: [keyof Figures, string][] = [
     ['opening', 'Opening balance'], ['capital', 'Capital introduced'], ['funds_received', 'Funds received'], ['income', 'Income'],
     ['expenses', 'Expenses'], ['transfers_in', 'Transfers in'], ['transfers_out', 'Transfers out'], ['closing', 'Closing balance'],
@@ -83,16 +88,29 @@ export class BranchComparisonComponent implements OnInit {
 
   errLine() { return Object.values(this.errs()).join(' '); }
 
-  ngOnInit() { this.load(); }
+  ngOnInit() {
+    const { q, branches } = readQuery(this.route, this.auth.isAllBranches());
+    const period = q.get('period');
+    const from = q.get('from');
+    const to = q.get('to');
+    if (period && ['month', 'quarter', 'year', 'custom'].includes(period) && from && to) {
+      this.ptype = period as typeof this.ptype;
+      const m = Number(from.slice(5, 7));
+      this.p = { month: from.slice(0, 7), quarter: Math.floor((m - 1) / 3) + 1, year: Number(from.slice(0, 4)), from, to };
+    }
+    this.branches.set(branches);
+    this.load();
+  }
 
   load() {
     const range = periodRange(this.ptype, { ...this.p, year: Number(this.p.year), quarter: Number(this.p.quarter) });
     const params: ReportParams = { ...range, branches: this.branches() };
     this.applied.set(params);
+    writeQuery(this.router, this.route, { period: this.ptype, ...params });
     this.loading.set(true);
     this.http.get<Comparison>('/api/v1/reports/branch-comparison', { params: toHttpParams(params) }).subscribe({
       next: r => { this.r.set(r); this.msg.set(''); this.errs.set({}); this.loading.set(false); },
-      error: e => { this.r.set(null); this.errs.set(fieldErrors(e)); this.msg.set(this.errLine() ? '' : errorText(e)); this.loading.set(false); },
+      error: e => { this.r.set(null); this.errs.set(fieldErrors(e)); this.msg.set(this.errLine() ? '' : reportError(e)); this.loading.set(false); },
     });
   }
 }

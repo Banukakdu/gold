@@ -1,6 +1,7 @@
-import { Component, computed, inject, input, model, OnInit, signal } from '@angular/core';
+import { Component, HostListener, computed, inject, input, model, OnInit, signal } from '@angular/core';
 import { HttpClient, HttpErrorResponse, HttpParams } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
+import { ActivatedRoute, ParamMap, Router } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 import { AuthService } from '../../core/auth.service';
 import { errorText } from '../../core/api.interceptor';
@@ -39,6 +40,41 @@ export function toHttpParams(p: ReportParams): HttpParams {
     else params = params.set(k, String(v));
   }
   return params;
+}
+
+/**
+ * Error text for a report request. Server errors (500) and network failures get a friendly line:
+ * raw PHP messages are never shown (fix round, QA bug 1).
+ */
+export function reportError(err: unknown): string {
+  const status = (err as HttpErrorResponse)?.status ?? 0;
+  if (status === 0) return 'Could not reach the server. Check your connection and try again.';
+  if (status >= 500) return 'The report could not be produced. Please try again, or narrow the date range or branches.';
+  return errorText(err);
+}
+
+/** "YYYY-MM-DD HH:mm (Asia/Colombo)" for printed headers. */
+export function colomboNow(d = new Date()): string {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Colombo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(d).map(p => [p.type, p.value]));
+  return `${parts['year']}-${parts['month']}-${parts['day']} ${parts['hour']}:${parts['minute']} (Asia/Colombo)`;
+}
+
+/**
+ * Report filters live in the URL query (QA bug 6), so Back from a drill-down and a reload keep them.
+ * replaceUrl: each run updates the current history entry instead of adding one.
+ */
+export function writeQuery(router: Router, route: ActivatedRoute, p: ReportParams) {
+  const queryParams: Record<string, string | number | (string | number)[] | null> = {};
+  for (const [k, v] of Object.entries(p)) queryParams[k] = v === undefined || v === '' || (Array.isArray(v) && !v.length) ? null : v;
+  router.navigate([], { relativeTo: route, queryParams, replaceUrl: true });
+}
+
+/** Read the report query. Branch ids are only honoured in "All branches" mode (stale after a branch switch otherwise). */
+export function readQuery(route: ActivatedRoute, allBranches: boolean): { q: ParamMap; branches: number[] } {
+  const q = route.snapshot.queryParamMap;
+  return { q, branches: allBranches ? q.getAll('branches').map(Number).filter(n => n > 0) : [] };
 }
 
 /** Laravel 422 field errors as { field: 'message' } (array fields folded onto their base name). */
@@ -144,8 +180,8 @@ export class ExportButtonsComponent {
     } catch (e) {
       // Error bodies arrive as a Blob because of responseType: 'blob'.
       const err = e as HttpErrorResponse;
-      let msg = errorText(e);
-      if (err?.error instanceof Blob) {
+      let msg = reportError(e);
+      if (err?.status && err.status < 500 && err.error instanceof Blob) {
         try { msg = JSON.parse(await err.error.text())?.message ?? msg; } catch { /* keep default */ }
       }
       this.error.set(msg);
@@ -166,7 +202,7 @@ export class ExportButtonsComponent {
         <div>Branches: {{ m.all_branches ? 'All branches' : branchLabel(m) }}
           @for (b of m.branches; track b.id) { @if (b.status !== 'active') { <span class="tag" data-s="inactive">{{ b.code }} inactive</span> } }</div>
         <div>Period: {{ period(m) }} · Amounts in LKR · Posted entries incl. reversals; voided entries excluded</div>
-        <div class="print-only">Printed by {{ auth.me()?.name }} at {{ printedAt }}</div>
+        <div class="print-only">Printed by {{ auth.me()?.name }} at {{ printedAt() }}</div>
         @if (m.provisional) { <div class="provisional">PROVISIONAL - period not locked</div> }
       </div>
     }
@@ -176,7 +212,11 @@ export class ReportHeadComponent {
   auth = inject(AuthService);
   meta = input<ReportMeta | null>(null);
   title = input('');
-  printedAt = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Colombo', hour12: false }) + ' (Asia/Colombo)';
+  /** Time of printing (QA bug 3): refreshed when the browser starts printing. */
+  printedAt = signal(colomboNow());
+
+  @HostListener('window:beforeprint')
+  onBeforePrint() { this.printedAt.set(colomboNow()); }
 
   branchLabel(m: ReportMeta) { return m.branches.map(b => `${b.code} ${b.name}`).join(', '); }
   period(m: ReportMeta) { return periodLabel(m.from, m.to); }

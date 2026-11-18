@@ -1,13 +1,14 @@
 import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
+import { ActivatedRoute, Router } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
-import { errorText } from '../../core/api.interceptor';
 import { Account } from '../../core/models';
 import {
   BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, ReportMeta, ReportParams, SignaturesComponent,
   fieldErrors, isoDate, toHttpParams,
+  readQuery, reportError, writeQuery,
 } from './report-common';
 
 interface Day {
@@ -84,12 +85,13 @@ interface CashBook extends ReportMeta { accounts: Book[] }
       } @empty { <div class="card"><p class="muted">No accounts to show.</p></div> }
       <ag-signatures />
     }
-    @if (!loading() && !r() && needsBranch()) { <p class="muted">Select at least one branch.</p> }
   `,
 })
 export class CashBookComponent implements OnInit {
   auth = inject(AuthService);
   private http = inject(HttpClient);
+  private router = inject(Router);
+  private route = inject(ActivatedRoute);
   f = { from: isoDate(new Date()), to: isoDate(new Date()) };
   branches = signal<number[]>([]);
   accounts = signal<Account[]>([]);
@@ -110,18 +112,26 @@ export class CashBookComponent implements OnInit {
   ngOnInit() {
     // The account picker needs account.view; without it the report covers all accounts in scope.
     this.http.get<Account[]>('/api/v1/accounts').subscribe({ next: a => this.accounts.set(a), error: () => this.accounts.set([]) });
-    // All mode needs a branch first (API: "Select at least one branch").
-    if (!this.needsBranch()) this.load();
+    const { q, branches } = readQuery(this.route, this.auth.isAllBranches());
+    this.f = { from: q.get('from') ?? this.f.from, to: q.get('to') ?? this.f.to };
+    this.branches.set(branches);
+    this.chosen.set(q.getAll('accounts').map(Number).filter(n => n > 0));
+    // All mode needs a branch first: say so once, as the field error the API would give (QA bug 5).
+    if (this.needsBranch()) this.errs.set({ branches: 'Select at least one branch' });
+    else this.load();
   }
 
   load() {
+    // Before the account list arrives (e.g. accounts from the URL), keep the choice as is; the API validates it.
     const visible = new Set(this.visibleAccounts().map(a => a.id));
-    const params: ReportParams = { from: this.f.from, to: this.f.to, branches: this.branches(), accounts: this.chosen().filter(id => visible.has(id)) };
+    const accounts = this.accounts().length ? this.chosen().filter(id => visible.has(id)) : this.chosen();
+    const params: ReportParams = { from: this.f.from, to: this.f.to, branches: this.branches(), accounts };
     this.applied.set(params);
+    writeQuery(this.router, this.route, params);
     this.loading.set(true);
     this.http.get<CashBook>('/api/v1/reports/cash-book', { params: toHttpParams(params) }).subscribe({
       next: r => { this.r.set(r); this.msg.set(''); this.errs.set({}); this.loading.set(false); },
-      error: e => { this.r.set(null); this.errs.set(fieldErrors(e)); this.msg.set(this.errLine() ? '' : errorText(e)); this.loading.set(false); },
+      error: e => { this.r.set(null); this.errs.set(fieldErrors(e)); this.msg.set(this.errLine() ? '' : reportError(e)); this.loading.set(false); },
     });
   }
 

@@ -59,6 +59,9 @@ export class ShellComponent {
     // Entry forms and statements need a single branch; send the user back to the dashboard.
     if (this.router.url.includes('/new/') || this.router.url.includes('/statement')) {
       this.router.navigateByUrl('/dashboard');
+    } else if (this.router.url.startsWith('/transactions?')) {
+      // Drill-down filters (branches[], category) belong to the previous branch: start from a plain list.
+      this.router.navigateByUrl('/transactions');
     } else if (this.router.url.startsWith('/reports') && !this.auth.can('report.view')) {
       // Reports are per branch permission (report.view); leave if the new branch does not grant it.
       this.router.navigateByUrl('/dashboard');

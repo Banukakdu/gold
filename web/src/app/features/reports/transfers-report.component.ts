@@ -1,10 +1,12 @@
 import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
+import { ActivatedRoute, Router } from '@angular/router';
+import { AuthService } from '../../core/auth.service';
 import { MoneyPipe } from '../../core/money.pipe';
-import { errorText } from '../../core/api.interceptor';
 import {
   BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, ReportMeta, ReportParams, currentMonth, fieldErrors, toHttpParams,
+  readQuery, reportError, writeQuery,
 } from './report-common';
 
 interface Movement {
@@ -100,6 +102,9 @@ export const MOVEMENT_TYPES: [string, string][] = [
 })
 export class TransfersReportComponent implements OnInit {
   private http = inject(HttpClient);
+  private router = inject(Router);
+  private route = inject(ActivatedRoute);
+  private auth = inject(AuthService);
   all = MOVEMENT_TYPES;
   f = currentMonth();
   branches = signal<number[]>([]);
@@ -117,15 +122,23 @@ export class TransfersReportComponent implements OnInit {
 
   errLine() { return Object.values(this.errs()).join(' '); }
 
-  ngOnInit() { this.load(1); }
+  ngOnInit() {
+    const { q, branches } = readQuery(this.route, this.auth.isAllBranches());
+    this.f = { from: q.get('from') ?? this.f.from, to: q.get('to') ?? this.f.to };
+    const types = q.getAll('types').filter(t => MOVEMENT_TYPES.some(m => m[0] === t));
+    if (types.length) this.types.set(types);
+    this.branches.set(branches);
+    this.load(Number(q.get('page')) || 1);
+  }
 
   load(page: number) {
     const params: ReportParams = { from: this.f.from, to: this.f.to, branches: this.branches(), types: this.types(), page };
     this.applied.set(params);
+    writeQuery(this.router, this.route, params);
     this.loading.set(true);
     this.http.get<Transfers>('/api/v1/reports/transfers', { params: toHttpParams(params) }).subscribe({
       next: r => { this.r.set(r); this.msg.set(''); this.errs.set({}); this.loading.set(false); },
-      error: e => { this.r.set(null); this.errs.set(fieldErrors(e)); this.msg.set(this.errLine() ? '' : errorText(e)); this.loading.set(false); },
+      error: e => { this.r.set(null); this.errs.set(fieldErrors(e)); this.msg.set(this.errLine() ? '' : reportError(e)); this.loading.set(false); },
     });
   }
 
