@@ -87,6 +87,13 @@ return new class extends Migration
             DB::statement('DROP INDEX IF EXISTS period_locks_active_unique');
         }
 
+        // On MySQL these indexes now back the branch_id / user_id foreign keys (MySQL dropped the
+        // implicit FK indexes when they were added), so give the FKs their own index first (error 1553).
+        Schema::table('audit_logs', function (Blueprint $table) {
+            $table->index('branch_id', 'audit_logs_branch_id_fk');
+            $table->index('user_id', 'audit_logs_user_id_fk');
+        });
+
         Schema::table('audit_logs', function (Blueprint $table) {
             $table->dropIndex(['branch_id', 'created_at']);
             $table->dropIndex(['event']);
