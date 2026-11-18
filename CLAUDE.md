@@ -17,4 +17,4 @@ Product docs: `docs/Account-gold_Project_Document.pdf`, backlog `docs/Account-go
 - Use `npm ci` in CI; if you change `web/package.json`, commit the updated lock file.
 
 ## Agent team (.claude/agents)
-Feature flow: `ba` writes the spec -> `accountant` checks money/controls -> `developer` builds -> `qa` tests -> `reviewer` reviews.
+Feature flow: `ba` writes the spec -> `accountant` checks the spec -> `developer` builds -> `qa` tests + `reviewer` reviews -> `developer` fixes -> `accountant` checks the finished build (sign-off) -> pull request.
