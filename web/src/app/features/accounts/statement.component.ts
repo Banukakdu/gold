@@ -1,6 +1,6 @@
 import { Component, OnInit, inject, input, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { DatePipe } from '@angular/common';
+import { AppDatePipe } from '../../core/app-date.pipe';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
@@ -14,7 +14,7 @@ interface Statement {
 
 @Component({
   standalone: true,
-  imports: [FormsModule, MoneyPipe, DatePipe, RouterLink],
+  imports: [FormsModule, MoneyPipe, AppDatePipe, RouterLink],
   template: `
     @if (s(); as s) { <h1>{{ s.account.branch.code }} · {{ s.account.code ? s.account.code + ' ' : '' }}{{ s.account.name }} <small class="muted">{{ isMoney(s) ? 'statement' : 'ledger' }}</small></h1> }
     <form class="filters" (ngSubmit)="load()">
@@ -31,7 +31,7 @@ interface Statement {
             <tr class="sub"><td colspan="6">Opening balance</td><td class="num">{{ bal(s, s.opening_balance) }}</td></tr>
             @for (e of s.entries; track $index) {
               <tr>
-                <td>{{ e.date | date: 'd MMM y' }}</td><td class="mono"><a [routerLink]="['/transactions', e.transaction_id]">{{ e.ref_no }}</a></td><td>{{ label(e.type) }} @if (e.status === 'void') { <span class="tag" data-s="void">Void</span> }</td><td>{{ e.description }}</td>
+                <td>{{ e.date | appDate }}</td><td class="mono"><a [routerLink]="['/transactions', e.transaction_id]">{{ e.ref_no }}</a></td><td>{{ label(e.type) }} @if (e.status === 'void') { <span class="tag" data-s="void">Void</span> }</td><td>{{ e.description }}</td>
                 <td class="num pos">{{ +e.in ? (e.in | money) : '' }}</td><td class="num neg">{{ +e.out ? (e.out | money) : '' }}</td>
                 <td class="num">{{ bal(s, e.balance) }}</td>
               </tr>

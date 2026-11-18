@@ -4,8 +4,9 @@ import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe } from '../../core/money.pipe';
+import { SettingsService } from '../../core/settings.service';
 import {
-  BranchPickerComponent, ExportButtonsComponent, ReportBranch, ReportHeadComponent, ReportMeta, ReportParams, SignaturesComponent,
+  BranchPickerComponent, ExportButtonsComponent, FiscalPresetsComponent, ReportBranch, ReportHeadComponent, ReportMeta, ReportParams, SignaturesComponent,
   currentMonth, fieldErrors, readQuery, reportError, toHttpParams, writeQuery,
 } from './report-common';
 
@@ -15,9 +16,18 @@ interface Section { branch: ReportBranch; rows: (Amounts & { account: TbAccount 
 interface ConsRow {
   key: string; label: string; group: string; by_branch: Record<string, string>; elimination: string | null; dr: string; cr: string;
 }
+/** Settings spec section 5: the fiscal-year meta of the trial balance. */
+interface TbFiscalYear {
+  start_year: number; label: string; start: string; end: string; closed: boolean; closed_at: string | null; closed_by: string | null;
+  reopened: { at: string | null; by: string | null; reason: string | null } | null; reopen_count: number;
+}
 interface TrialBalance extends ReportMeta {
   view: 'branch' | 'consolidated';
   basis: string;
+  fiscal_year: TbFiscalYear;
+  earlier_unclosed: boolean;
+  earlier_unclosed_label: string | null;
+  closing_entries: boolean;
   balanced: boolean;
   sections?: Section[];
   rows?: ConsRow[];
@@ -34,12 +44,13 @@ const CLASS_NAMES: Record<string, string> = { asset: 'Asset', liability: 'Liabil
 /** Double-entry S2: trial balance by branch, or consolidated with inter-branch eliminations. */
 @Component({
   standalone: true,
-  imports: [FormsModule, MoneyPipe, BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, SignaturesComponent],
+  imports: [FormsModule, MoneyPipe, BranchPickerComponent, ExportButtonsComponent, FiscalPresetsComponent, ReportHeadComponent, SignaturesComponent],
   template: `
     <h1>Trial Balance</h1>
     <form class="filters" (ngSubmit)="load()">
       <label>From <input type="date" name="from" [(ngModel)]="f.from" required /></label>
       <label>To <input type="date" name="to" [(ngModel)]="f.to" required /></label>
+      <ag-fy-presets (pick)="preset($event)" />
       <ag-branch-picker [(selected)]="branches" />
       @if (auth.isAllBranches()) {
         <label>View
@@ -49,6 +60,9 @@ const CLASS_NAMES: Record<string, string> = { asset: 'Asset', liability: 'Liabil
           </select>
         </label>
       }
+      @if (canPostClosing()) {
+        <label><input type="checkbox" name="closing_entries" [(ngModel)]="closing" style="width:auto" /> Include closing entries</label>
+      }
       <button type="submit">Show</button>
       <ag-export-buttons name="trial-balance" [params]="applied()" />
     </form>
@@ -57,7 +71,12 @@ const CLASS_NAMES: Record<string, string> = { asset: 'Asset', liability: 'Liabil
 
     @if (loading()) { <p class="muted">Loading...</p> }
     @if (!loading() && r(); as r) {
-      <ag-report-head [meta]="r" title="Trial Balance" [basis]="r.basis" />
+      <ag-report-head [meta]="r" [title]="r.closing_entries ? 'Trial balance — post-closing' : 'Trial balance — pre-closing'" [basis]="r.basis" />
+      @if (r.fiscal_year; as fy) {
+        @if (r.earlier_unclosed) { <div class="banner amber">{{ r.earlier_unclosed_label }} is not closed yet.</div> }
+        @if (fy.closed) { <div class="banner grey">{{ fy.label }} closed on {{ settings.date(fy.closed_at) }} by {{ fy.closed_by }}.</div> }
+        @if (fy.reopened; as ro) { <div class="banner red">{{ fy.label }} was reopened on {{ settings.date(ro.at) }} by {{ ro.by }}: {{ ro.reason }}</div> }
+      }
       @if (!r.balanced) {
         <div class="alert">Out of balance by {{ outBy(r) | money }}. Run ledger:verify.</div>
       }
@@ -79,7 +98,7 @@ const CLASS_NAMES: Record<string, string> = { asset: 'Asset', liability: 'Liabil
                     @if (rowsOf(s, g[0]); as rows) {
                       @if (rows.length) {
                         <tr class="sub"><td colspan="9"><b>{{ g[1] }}</b></td></tr>
-                        @for (x of rows; track x.account.id) {
+                        @for (x of rows; track x.account.id ?? x.account.name) {
                           <tr>
                             <td class="mono">{{ x.account.code }}</td>
                             <td>{{ x.account.name }} @if (x.account.status !== 'active') { <span class="tag" data-s="inactive">{{ x.account.status }}</span> }</td>
@@ -152,6 +171,9 @@ export class TrialBalanceComponent implements OnInit {
   private router = inject(Router);
   private route = inject(ActivatedRoute);
   private money = new MoneyPipe();
+  settings = inject(SettingsService);
+  /** "Include closing entries" (post-closing view, S6). */
+  closing = false;
   groups = TB_GROUPS;
   f = currentMonth();
   view: 'branch' | 'consolidated' = 'branch';
@@ -167,13 +189,15 @@ export class TrialBalanceComponent implements OnInit {
   ngOnInit() {
     const { q, branches } = readQuery(this.route, this.auth.isAllBranches());
     this.f = { from: q.get('from') ?? this.f.from, to: q.get('to') ?? this.f.to };
+    this.closing = q.get('closing_entries') === '1';
     if (q.get('view') === 'consolidated' && this.auth.isAllBranches()) this.view = 'consolidated';
     this.branches.set(branches);
     this.load();
   }
 
   load() {
-    const params: ReportParams = { from: this.f.from, to: this.f.to, branches: this.branches(), view: this.view };
+    const params: ReportParams = { from: this.f.from, to: this.f.to, branches: this.branches(), view: this.view,
+      closing_entries: this.closing && (!this.r() || this.canPostClosing()) ? 1 : '' };
     this.applied.set(params);
     writeQuery(this.router, this.route, params);
     this.loading.set(true);
@@ -181,6 +205,17 @@ export class TrialBalanceComponent implements OnInit {
       next: r => { this.r.set(r); this.msg.set(''); this.errs.set({}); this.loading.set(false); },
       error: e => { this.r.set(null); this.errs.set(fieldErrors(e)); this.msg.set(this.errLine() ? '' : reportError(e)); this.loading.set(false); },
     });
+  }
+
+  /** S6: the toggle shows only when To is the last day of a closed fiscal year. */
+  canPostClosing(): boolean {
+    const fy = this.r()?.fiscal_year;
+    return !!fy?.closed && this.f.to === fy.end;
+  }
+
+  preset(r: { from: string; to: string }) {
+    this.f = { ...r };
+    this.load();
   }
 
   rowsOf(s: Section, group: string) { return s.rows.filter(x => x.account.group === group); }

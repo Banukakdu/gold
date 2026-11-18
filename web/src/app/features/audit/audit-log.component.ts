@@ -6,6 +6,7 @@ import { AuthService } from '../../core/auth.service';
 import { errorText } from '../../core/api.interceptor';
 import { ReportParams, toHttpParams } from '../reports/report-common';
 import { colomboToday } from '../../core/dates';
+import { AppDateTimePipe } from '../../core/app-date.pipe';
 
 interface Actor { id: number; name: string; tag: string | null }
 interface AuditRow {
@@ -30,7 +31,7 @@ function show(v: unknown): string {
 /** AG-090 audit log (docs/specs/controls.md S1). Read-only: filters, detail panel and Excel. */
 @Component({
   standalone: true,
-  imports: [FormsModule],
+  imports: [FormsModule, AppDateTimePipe],
   template: `
     <h1>Audit log</h1>
     <form class="filters" (ngSubmit)="load(1)">
@@ -63,7 +64,7 @@ function show(v: unknown): string {
         <tbody>
           @for (r of page()?.data; track r.id) {
             <tr (click)="open(r)" style="cursor:pointer" [class.sub]="selected()?.id === r.id">
-              <td class="mono">{{ r.created_at_local }}</td>
+              <td class="mono">{{ r.created_at | appDateTime }}</td>
               <td>{{ r.branch?.code ?? '—' }}</td>
               <td>{{ r.user?.name ?? '—' }} @if (r.user?.tag) { <span class="tag" data-s="inactive">{{ r.user?.tag }}</span> }</td>
               <td>{{ r.event_label }}</td>
@@ -86,7 +87,7 @@ function show(v: unknown): string {
 
     @if (selected(); as r) {
       <div class="card section" style="margin-top:12px">
-        <h2 style="margin-top:0">{{ r.event_label }} <small class="muted">{{ r.created_at_local }} (Asia/Colombo)</small>
+        <h2 style="margin-top:0">{{ r.event_label }} <small class="muted">{{ r.created_at | appDateTime }} (Asia/Colombo)</small>
           <button class="link" (click)="selected.set(null)">Close</button></h2>
         <p class="muted">
           Event key <span class="mono">{{ r.event }}</span>
@@ -116,7 +117,7 @@ export class AuditLogComponent implements OnInit {
   private http = inject(HttpClient);
   groups: [string, string][] = [['', 'All events'], ['transactions', 'Transactions'], ['voids', 'Voids and reversals'], ['users', 'Users'],
     ['roles', 'Roles'], ['accounts', 'Accounts'], ['branches', 'Branches'], ['periods', 'Period locks'], ['reports', 'Reports'], ['logins', 'Logins'],
-    ['attachments', 'Attachments']];
+    ['attachments', 'Attachments'], ['settings', 'Settings'], ['year_end', 'Year-end']];
   f = { from: colomboToday().slice(0, 8) + '01', to: colomboToday(), event_group: '', user_id: '', self: false, ref_no: '' };
   branches: string[] = [];
   page = signal<AuditPage | null>(null);

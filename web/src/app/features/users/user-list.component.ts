@@ -1,6 +1,6 @@
 import { Component, OnInit, inject, signal } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
-import { DatePipe } from '@angular/common';
+import { AppDateTimePipe } from '../../core/app-date.pipe';
 import { FormsModule } from '@angular/forms';
 import { Router, RouterLink } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
@@ -10,7 +10,7 @@ import { errorText } from '../../core/api.interceptor';
 /** Users list /users (spec 4.1). Branch mode: members of the active branch; All branches: everyone. */
 @Component({
   standalone: true,
-  imports: [FormsModule, DatePipe, RouterLink],
+  imports: [FormsModule, AppDateTimePipe, RouterLink],
   template: `
     <h1>Users</h1>
     <form class="filters" (ngSubmit)="load(1)">
@@ -50,7 +50,7 @@ import { errorText } from '../../core/api.interceptor';
                 }
               </td>
               <td><span class="tag" [attr.data-s]="u.status">{{ u.status }}</span></td>
-              <td>{{ u.last_login_at ? (u.last_login_at | date: 'd MMM y, HH:mm') : 'Invitation pending' }}</td>
+              <td>{{ u.last_login_at ? (u.last_login_at | appDateTime) : 'Invitation pending' }}</td>
             </tr>
           } @empty { <tr><td colspan="6" class="muted">{{ auth.isAllBranches() ? 'No users match.' : 'No users in this branch yet.' }}</td></tr> }
         </tbody>

@@ -1,0 +1,220 @@
+import { Component, OnInit, inject, signal } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { FormsModule } from '@angular/forms';
+import { firstValueFrom } from 'rxjs';
+import { errorText } from '../../core/api.interceptor';
+import { fileSize } from '../../core/attachments';
+import { MONTH_NAMES, PublicSettings, SettingsService, formatYmd } from '../../core/settings.service';
+
+interface Person { id: number; name: string }
+interface LogoInfo {
+  original_name: string; mime: string; size_bytes: number; width: number; height: number; sha256: string;
+  uploaded_by: Person | null; uploaded_at: string | null; file_problem: 'missing' | 'changed' | null;
+}
+/** GET /settings (settings spec section 5). */
+interface FullSettings extends Omit<PublicSettings, 'logo'> {
+  logo: LogoInfo | null;
+  currency_locked: boolean;
+  fiscal_year_start_locked: boolean;
+  date_formats: string[];
+  currencies: string[];
+  last_changed: Record<string, { by: Person | null; at: string | null }>;
+}
+type Editable = 'company_name' | 'currency_code' | 'date_format' | 'fiscal_year_start_month';
+
+const MAX_LOGO = 1024 * 1024;
+const SAMPLE = '2026-10-05';
+
+/** AG-092 S1 Settings. Super Admin only, any switcher mode. */
+@Component({
+  standalone: true,
+  imports: [FormsModule],
+  template: `
+    <h1>Settings</h1>
+    @if (msg()) { <div class="alert">{{ msg() }}</div> }
+    @if (ok()) { <div class="ok">{{ ok() }}</div> }
+    @if (s(); as s) {
+      <form class="settings-form" (ngSubmit)="save()">
+        <fieldset>
+          <legend>Company</legend>
+          <label>Company name
+            <input name="company_name" [(ngModel)]="form.company_name" required minlength="2" maxlength="120" />
+            @if (err()['company_name']) { <span class="neg">{{ err()['company_name'] }}</span> }
+          </label>
+          <div class="changed">{{ changed('company_name') }}</div>
+          <div>
+            <div class="muted">Logo</div>
+            <div class="logo-box">
+              @if (settings.logoUrl(); as url) { <img [src]="url" [alt]="s.company_name" /> }
+              @if (s.logo; as l) {
+                <div>
+                  <div>{{ l.original_name }} · {{ size(l.size_bytes) }} · {{ l.width }} × {{ l.height }} px</div>
+                  <small class="muted">Uploaded by {{ l.uploaded_by?.name ?? '?' }} on {{ settings.date(l.uploaded_at) }}</small>
+                  @if (l.file_problem) { <div class="neg">The logo file is missing or was changed outside the app. Upload it again.</div> }
+                </div>
+              } @else { <span class="muted">No logo. Reports and the header show the company name only.</span> }
+            </div>
+            <input #picker type="file" accept=".jpg,.jpeg,.png,image/jpeg,image/png" hidden (change)="upload(picker)" />
+            <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+              <button type="button" class="ghost" [disabled]="busy()" (click)="picker.click()">{{ s.logo ? 'Replace logo' : 'Upload logo' }}</button>
+              @if (s.logo) { <button type="button" class="ghost" [disabled]="busy()" (click)="removeLogo()">Remove logo</button> }
+            </div>
+            <small class="muted">JPG or PNG, at most 1 MB, 16 to 2000 pixels each side.</small>
+            @if (logoMsg()) { <div class="alert">{{ logoMsg() }}</div> }
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Money</legend>
+          <label>Currency
+            <select name="currency_code" [(ngModel)]="form.currency_code" [disabled]="s.currency_locked">
+              @for (c of s.currencies; track c) { <option [value]="c">{{ c }}</option> }
+            </select>
+            @if (err()['currency_code']) { <span class="neg">{{ err()['currency_code'] }}</span> }
+          </label>
+          @if (s.currency_locked) { <small class="muted">The currency cannot be changed after entries have been posted.</small> }
+          <div class="changed">{{ changed('currency_code') }}</div>
+          <label>Decimal places <input name="decimals" value="2" readonly /></label>
+          <small class="muted">Amounts are kept to 2 decimal places.</small>
+        </fieldset>
+
+        <fieldset>
+          <legend>Display</legend>
+          <label>Date format
+            <select name="date_format" [(ngModel)]="form.date_format">
+              @for (f of s.date_formats; track f) { <option [value]="f">{{ f }} ({{ sample(f) }})</option> }
+            </select>
+            @if (err()['date_format']) { <span class="neg">{{ err()['date_format'] }}</span> }
+          </label>
+          <small class="muted">Changes how dates are shown, not how they are entered or stored.</small>
+          <div class="changed">{{ changed('date_format') }}</div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Fiscal year</legend>
+          <label>Fiscal year starts in
+            <select name="fiscal_year_start_month" [(ngModel)]="form.fiscal_year_start_month" [disabled]="s.fiscal_year_start_locked">
+              @for (m of months; track $index) { <option [ngValue]="$index + 1">{{ m }}</option> }
+            </select>
+            @if (err()['fiscal_year_start_month']) { <span class="neg">{{ err()['fiscal_year_start_month'] }}</span> }
+          </label>
+          @if (s.fiscal_year_start_locked) { <small class="muted">Cannot be changed after a year-end close.</small> }
+          <div>Current fiscal year: {{ s.current_fiscal_year.label }} ({{ settings.date(s.current_fiscal_year.start) }} – {{ settings.date(s.current_fiscal_year.end) }})</div>
+          <div class="changed">{{ changed('fiscal_year_start_month') }}</div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Approvals</legend>
+          <span class="muted">Approval thresholds are set here when transfer approval (AG-051) and expense approval (AG-064) are released.</span>
+        </fieldset>
+
+        <div style="display:flex;gap:8px">
+          <button type="submit" [disabled]="!dirty() || busy()">{{ busy() ? 'Saving...' : 'Save' }}</button>
+          <button type="button" class="ghost" [disabled]="!dirty() || busy()" (click)="reset()">Cancel</button>
+        </div>
+      </form>
+    } @else if (!msg()) { <p class="muted">Loading...</p> }
+  `,
+})
+export class SettingsComponent implements OnInit {
+  private http = inject(HttpClient);
+  settings = inject(SettingsService);
+  months = MONTH_NAMES;
+  s = signal<FullSettings | null>(null);
+  form: Record<Editable, string | number> = { company_name: '', currency_code: '', date_format: '', fiscal_year_start_month: 4 };
+  msg = signal('');
+  ok = signal('');
+  logoMsg = signal('');
+  err = signal<Record<string, string>>({});
+  busy = signal(false);
+
+  /** Save and Cancel stay disabled until something changes (S1). */
+  dirty() { return Object.keys(this.changes()).length > 0; }
+
+  ngOnInit() { this.load(); }
+
+  async load() {
+    try {
+      this.take(await firstValueFrom(this.http.get<FullSettings>('/api/v1/settings')));
+    } catch (e) { this.msg.set(errorText(e)); }
+  }
+
+  private take(s: FullSettings) {
+    this.s.set(s);
+    this.reset();
+    this.settings.apply({ ...s, logo: s.logo ? { sha256: s.logo.sha256, updated_at: s.logo.uploaded_at } : null });
+  }
+
+  reset() {
+    const s = this.s();
+    if (!s) return;
+    this.form = { company_name: s.company_name, currency_code: s.currency_code, date_format: s.date_format,
+      fiscal_year_start_month: Number(s.fiscal_year_start_month) };
+    this.err.set({});
+  }
+
+  /** Only the changed fields are sent (S1). */
+  private changes(): Partial<Record<Editable, string | number>> {
+    const s = this.s();
+    if (!s) return {};
+    const out: Partial<Record<Editable, string | number>> = {};
+    const name = String(this.form.company_name).trim();
+    if (name !== s.company_name) out.company_name = name;
+    if (this.form.currency_code !== s.currency_code) out.currency_code = this.form.currency_code;
+    if (this.form.date_format !== s.date_format) out.date_format = this.form.date_format;
+    if (Number(this.form.fiscal_year_start_month) !== Number(s.fiscal_year_start_month)) out.fiscal_year_start_month = Number(this.form.fiscal_year_start_month);
+    return out;
+  }
+
+  async save() {
+    const body = this.changes();
+    if (!Object.keys(body).length || this.busy()) return;
+    this.busy.set(true);
+    this.msg.set(''); this.ok.set(''); this.err.set({});
+    try {
+      this.take(await firstValueFrom(this.http.put<FullSettings>('/api/v1/settings', body)));
+      this.ok.set('Settings saved.');
+    } catch (e: any) {
+      const errors = e?.error?.errors as Record<string, string[]> | undefined;
+      if (errors) this.err.set(Object.fromEntries(Object.entries(errors).map(([k, v]) => [k, v[0]])));
+      this.msg.set(errorText(e));
+    } finally { this.busy.set(false); }
+  }
+
+  async upload(input: HTMLInputElement) {
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    this.logoMsg.set(''); this.ok.set('');
+    // Client checks before sending (the server is the authority, R3).
+    if (!/\.(jpe?g|png)$/i.test(file.name)) { this.logoMsg.set('Choose a JPG or PNG file.'); return; }
+    if (file.size > MAX_LOGO) { this.logoMsg.set(`${file.name} is larger than 1 MB.`); return; }
+    const data = new FormData();
+    data.append('file', file);
+    this.busy.set(true);
+    try {
+      await firstValueFrom(this.http.post('/api/v1/settings/logo', data));
+      await this.load();
+      this.ok.set('Logo saved.');
+    } catch (e) { this.logoMsg.set(errorText(e)); } finally { this.busy.set(false); }
+  }
+
+  async removeLogo() {
+    if (!confirm('Remove the logo? Reports and the header will show the company name only.')) return;
+    this.busy.set(true);
+    this.logoMsg.set(''); this.ok.set('');
+    try {
+      await firstValueFrom(this.http.post('/api/v1/settings/logo/remove', {}));
+      await this.load();
+      this.ok.set('Logo removed.');
+    } catch (e) { this.logoMsg.set(errorText(e)); } finally { this.busy.set(false); }
+  }
+
+  changed(key: string): string {
+    const c = this.s()?.last_changed?.[key];
+    return c ? `Last changed by ${c.by?.name ?? '?'} on ${this.settings.date(c.at)}` : '';
+  }
+
+  sample(format: string) { return formatYmd(SAMPLE, format); }
+  size(n: number) { return fileSize(n); }
+}

@@ -1,16 +1,19 @@
-import { Component, HostListener, computed, inject, input, model, OnInit, signal } from '@angular/core';
+import { Component, HostListener, computed, inject, input, model, OnInit, output, signal } from '@angular/core';
 import { HttpClient, HttpErrorResponse, HttpParams } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, ParamMap, Router } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 import { AuthService } from '../../core/auth.service';
 import { errorText } from '../../core/api.interceptor';
+import { SettingsService } from '../../core/settings.service';
 
 export interface ReportBranch { id: number; code: string; name: string; status: string }
 
 /** Header data every report response carries. */
 export interface ReportMeta {
   company: string;
+  /** Settings spec S4: the currency setting. */
+  currency?: string;
   from: string;
   to: string;
   branches: ReportBranch[];
@@ -100,10 +103,40 @@ export function periodRange(type: 'month' | 'quarter' | 'year' | 'custom', v: { 
   return { from: v.from, to: v.to };
 }
 
-/** Finding 11: full calendar years are labelled as such. */
-export function periodLabel(from: string, to: string): string {
+/**
+ * Finding 11 and settings spec S6: an exact fiscal year reads "FY 2026-27, <from> to <to>"; a full calendar year is
+ * labelled as such when the fiscal year does not start in January. Dates follow the date format setting (S3).
+ */
+export function periodLabel(from: string, to: string, settings?: SettingsService): string {
+  const d = (x: string) => settings ? settings.date(x) : x;
+  const range = `${d(from)} to ${d(to)}`;
+  if (settings) {
+    const fy = settings.fiscalYearOf(from);
+    if (fy.start === from && fy.end === to) return `${fy.label}, ${range}`;
+  }
   const y = from.slice(0, 4);
-  return from === `${y}-01-01` && to === `${y}-12-31` ? `Year ${y} (calendar), ${from} to ${to}` : `${from} to ${to}`;
+  return from === `${y}-01-01` && to === `${y}-12-31` ? `Year ${y} (calendar), ${range}` : range;
+}
+
+/** S6: "This fiscal year" / "Last fiscal year" presets for the report filter bars. */
+@Component({
+  selector: 'ag-fy-presets',
+  standalone: true,
+  template: `
+    <span class="export">
+      <button type="button" class="ghost" (click)="use(0)">This fiscal year</button>
+      <button type="button" class="ghost" (click)="use(-1)">Last fiscal year</button>
+    </span>
+  `,
+})
+export class FiscalPresetsComponent {
+  private settings = inject(SettingsService);
+  pick = output<{ from: string; to: string }>();
+
+  use(offset: number) {
+    const fy = this.settings.fiscalYear(this.settings.currentFiscalYear().start_year + offset);
+    this.pick.emit({ from: fy.start, to: fy.end });
+  }
 }
 
 /** Branches multi-select, shown only in "All branches" mode (spec 4, F1). None ticked = all branches. */
@@ -198,10 +231,11 @@ export class ExportButtonsComponent {
   template: `
     @if (meta(); as m) {
       <div class="report-head">
-        <div class="print-only"><b>{{ m.company }}</b> · {{ title() }}</div>
+        <div class="print-only">@if (settings.logoUrl(); as logo) { <img [src]="logo" [alt]="m.company" style="max-height:40px;vertical-align:middle" /> }
+          <b>{{ m.company }}</b> · {{ title() }}</div>
         <div>Branches: {{ m.all_branches ? 'All branches' : branchLabel(m) }}
           @for (b of m.branches; track b.id) { @if (b.status !== 'active') { <span class="tag" data-s="inactive">{{ b.code }} inactive</span> } }</div>
-        <div>Period: {{ period(m) }} · Amounts in LKR · {{ basis() || 'Posted entries incl. reversals; voided entries excluded' }}</div>
+        <div>Period: {{ period(m) }} · Amounts in {{ m.currency ?? settings.currency() }} · {{ basis() || 'Posted entries incl. reversals; voided entries excluded' }}</div>
         <div class="print-only">Printed by {{ auth.me()?.name }} at {{ printedAt() }}</div>
         @if (m.provisional) { <div class="provisional">PROVISIONAL - period not locked</div> }
       </div>
@@ -210,18 +244,22 @@ export class ExportButtonsComponent {
 })
 export class ReportHeadComponent {
   auth = inject(AuthService);
+  settings = inject(SettingsService);
   meta = input<ReportMeta | null>(null);
   title = input('');
   /** Basis line; the trial balance has its own (double-entry S2). */
   basis = input('');
   /** Time of printing (QA bug 3): refreshed when the browser starts printing. */
-  printedAt = signal(colomboNow());
+  printedAt = signal(this.now());
 
   @HostListener('window:beforeprint')
-  onBeforePrint() { this.printedAt.set(colomboNow()); }
+  onBeforePrint() { this.printedAt.set(this.now()); }
+
+  /** "Printed ... at": the date format setting (S3), 24 h, Asia/Colombo. */
+  private now() { return `${this.settings.dateTime(new Date().toISOString())} (Asia/Colombo)`; }
 
   branchLabel(m: ReportMeta) { return m.branches.map(b => `${b.code} ${b.name}`).join(', '); }
-  period(m: ReportMeta) { return periodLabel(m.from, m.to); }
+  period(m: ReportMeta) { return periodLabel(m.from, m.to, this.settings); }
 }
 
 /** Prepared / Checked / Approved lines for printed reports (finding 4). */

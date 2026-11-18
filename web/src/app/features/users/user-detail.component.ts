@@ -1,6 +1,6 @@
 import { Component, OnInit, inject, input, signal } from '@angular/core';
 import { HttpClient, HttpHeaders } from '@angular/common/http';
-import { DatePipe } from '@angular/common';
+import { AppDateTimePipe } from '../../core/app-date.pipe';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
@@ -10,7 +10,7 @@ import { errorText } from '../../core/api.interceptor';
 /** User detail /users/:id (spec 4.3): profile, status, invitation and branch access. */
 @Component({
   standalone: true,
-  imports: [FormsModule, DatePipe, RouterLink],
+  imports: [FormsModule, AppDateTimePipe, RouterLink],
   template: `
     <p><a routerLink="/users">← Users</a></p>
     @if (notFound()) {
@@ -29,7 +29,7 @@ import { errorText } from '../../core/api.interceptor';
           @if (errors()['email']) { <small class="neg">{{ errors()['email'] }}</small> }</label>
         <label>Phone <input name="phone" [(ngModel)]="p.phone" [disabled]="!canEdit(u)" maxlength="30" /></label>
         <label>Status <span><span class="tag" [attr.data-s]="u.status">{{ u.status }}</span></span></label>
-        <label>Last login <span>{{ u.last_login_at ? (u.last_login_at | date: 'd MMM y, HH:mm') : 'Invitation pending' }}</span></label>
+        <label>Last login <span>{{ u.last_login_at ? (u.last_login_at | appDateTime) : 'Invitation pending' }}</span></label>
         @if (auth.can('user.edit') && u.profile_locked_reason) { <p class="muted wide">{{ u.profile_locked_reason }}</p> }
         @if (canEdit(u)) {
           <div class="wide actions" style="gap: 8px">

@@ -19,4 +19,5 @@ export const TYPE_LABELS: Record<string, string> = {
   income: 'Income',
   expense: 'Expense',
   reversal: 'Reversal',
+  year_end_close: 'Year-end close',
 };

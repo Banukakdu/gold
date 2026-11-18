@@ -3,7 +3,7 @@ import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { firstValueFrom } from 'rxjs';
 import { errorText } from '../../core/api.interceptor';
-import { colomboDateTime } from '../../core/dates';
+import { SettingsService } from '../../core/settings.service';
 
 /** Lock confirm review (controls finding 7 + AG-062 finding 5): information only, never blocks. */
 interface Review { closes_from: string | null; self_voids: number; self_reversals: number; files_removed?: number; files_removed_self?: number }
@@ -108,6 +108,7 @@ const short = (period: string) => `${MONTHS[+period.slice(5, 7) - 1].slice(0, 3)
 })
 export class PeriodLocksComponent implements OnInit {
   private http = inject(HttpClient);
+  private settings = inject(SettingsService);
   year = new Date().getFullYear();
   years = Array.from({ length: 8 }, (_, i) => new Date().getFullYear() - 6 + i);
   grid = signal<Grid | null>(null);
@@ -134,7 +135,7 @@ export class PeriodLocksComponent implements OnInit {
   monthName(p: string) { return label(p); }
   scopeName(branchId: number | null) { return branchId === null ? 'all branches' : this.grid()?.branches.find(b => b.id === branchId)?.code ?? '?'; }
   /** Q1: times in Asia/Colombo, like the audit log. */
-  when(iso: string) { return colomboDateTime(iso); }
+  when(iso: string) { return this.settings.dateTime(iso); }
 
   private locksAt(period: string, branch: number | null): Lock[] {
     return (this.grid()?.locks ?? []).filter(l => l.period === period && l.branch_id === branch);
@@ -146,7 +147,7 @@ export class PeriodLocksComponent implements OnInit {
     const future = p > g.current_period;
     const history = this.locksAt(p, branch);
     const active = history.find(l => !l.unlocked_at);
-    const by = (l: Lock) => `by ${l.locked_by?.name ?? '?'} ${this.when(l.locked_at).slice(0, 10)}`;
+    const by = (l: Lock) => `by ${l.locked_by?.name ?? '?'} ${this.settings.date(l.locked_at)}`;
     const global = g.closed_through.global ?? '';
 
     // Q2: a later lock keeps this month closed, so its unlock would be refused: say which one to unlock first.

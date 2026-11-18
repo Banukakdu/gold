@@ -15,7 +15,7 @@ interface Chart { branch: { id: number; code: string; name: string; status: stri
 
 const TYPE_NAMES: Record<string, string> = {
   cash: 'Cash', bank: 'Bank', wallet: 'Wallet', head_office: 'Head office current account', branch_current: 'Branch current account',
-  owner_capital: "Owner's capital", category: 'Category',
+  owner_capital: "Owner's capital", retained_earnings: 'Retained earnings', category: 'Category',
 };
 const ORIGIN_NAMES: Record<string, string> = { accounts: 'Accounts', category: 'Category', system: 'System' };
 const MONEY = ['cash', 'bank', 'wallet'];
@@ -39,6 +39,7 @@ const MONEY = ['cash', 'bank', 'wallet'];
     }
     <p class="muted">Cash, bank and wallet accounts are added under Accounts. Income and expense accounts follow Categories.
       Inter-branch and capital accounts are created by the system.
+      At year end, each branch's result is moved to its Head office current account and to Retained earnings in MAIN.
       @if (auth.can('account.manage') && !auth.isAllBranches()) { <a routerLink="/accounts">Add account</a> }</p>
     @if (msg()) { <div class="alert">{{ msg() }}</div> }
     @if (loading()) { <p class="muted">Loading...</p> }
