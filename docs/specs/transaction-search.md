@@ -304,3 +304,4 @@ Build `4d43b45..637dd23` on `feature/transaction-search`, after QA, code review 
 
 **Verdict: APPROVED WITH CONDITIONS. SIGNED OFF for the pull request once C1 is done.**
 - C1 (before merge): change the Direction rule and add the header legend, with the tests above, as described in item 1. If those tests and the full suite pass, no new accountant review is needed. The PR reviewer confirms the change.
+- C1 done in 3890176: `direction()` now treats branch_id as the sender and related_branch_id as the receiver, swapped on reversal rows. The export header has the legend, and the AC 30, finding 5 and AC 30a tests pass. Full suite: 432 passed.
