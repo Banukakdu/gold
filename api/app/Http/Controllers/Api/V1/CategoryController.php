@@ -15,6 +15,7 @@ use App\Services\LedgerService;
 use App\Support\BranchContext;
 use App\Support\Money;
 use App\Support\Settings;
+use Carbon\CarbonImmutable;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -96,7 +97,7 @@ class CategoryController extends Controller
         $category = DB::transaction(function () use ($data) {
             $this->chart->lockChart();
             if ($data['parent_id']) {
-                $parent = Category::lockForUpdate()->findOrFail($data['parent_id']);
+                $parent = Category::findOrFail($data['parent_id']);
                 abort_if($parent->parent_id !== null, 422, self::TWO_LEVELS);
                 abort_unless($parent->is_active, 422, self::PARENT_INACTIVE);
                 $data['type'] = $parent->type; // R2: a sub's type is always its parent's
@@ -116,10 +117,11 @@ class CategoryController extends Controller
 
     public function update(Request $request, Category $category)
     {
+        // R1 first, so a 422 never reveals that another branch's row exists (review N2).
+        $this->authorizeChange($request, $category);
         // R4 / R5: type, parent and branch are fixed from creation.
         abort_if($request->exists('type'), 422, self::TYPE_FIXED);
         abort_if($request->exists('parent_id') || $request->exists('branch_id'), 422, self::NO_MOVE);
-        $this->authorizeChange($request, $category);
         $data = $request->validate(['name' => 'sometimes|required|string|max:100', 'is_active' => 'sometimes|boolean']);
         if (isset($data['name'])) {
             $data['name'] = trim($data['name']);
@@ -130,9 +132,12 @@ class CategoryController extends Controller
 
         // Renaming or (de)activating a category renames / (de)activates its ledger accounts (double-entry R1, R6).
         // Retried on a deadlock (review R3b): each attempt starts from the stored row, so the change is seen again.
-        DB::transaction(function () use ($category, $data) {
+        DB::transaction(function () use ($request, $category, $data) {
             $this->chart->lockChart();
             $category->refresh();
+            // Review S1: re-check access on the stored row under the lock; a promote in between makes the row global
+            // (Super Admin only), and the promote takes the same lock.
+            $this->authorizeChange($request, $category);
             $changed = array_filter($data, fn ($v, $k) => $category->{$k} !== $v, ARRAY_FILTER_USE_BOTH);
             if (! $changed) {
                 return;
@@ -145,6 +150,9 @@ class CategoryController extends Controller
                 ? Category::where('parent_id', $category->id)->where('is_active', true)->orderBy('id')->pluck('id')->all()
                 : null;
             $old = $category->only(array_keys($changed));
+            // Review N3: lock the accounts the sync will write, in id order (as postings do), before changing them.
+            $ids = $category->parent_id === null ? Category::where('parent_id', $category->id)->pluck('id')->push($category->id) : [$category->id];
+            Account::withoutGlobalScopes()->whereIn('category_id', $ids)->orderBy('id')->lockForUpdate()->pluck('id');
             $category->update($changed);
             AuditLog::record('category.updated', $category, $old,
                 $changed + ($affected !== null ? ['affected_sub_ids' => $affected] : []));
@@ -246,6 +254,7 @@ class CategoryController extends Controller
             // A parent's usage and balance include its subs' (S1 "Used in").
             $node['usage_count'] += $children->sum('usage_count');
             $node['year_balance'] = Money::fromCents(Money::toCents($node['year_balance']) + $children->sum(fn ($c) => Money::toCents($c['year_balance'])));
+            $node['first_entry_date'] = $children->pluck('first_entry_date')->push($node['first_entry_date'])->filter()->min();
             $node['children'] = $children->all();
 
             return $node;
@@ -279,8 +288,11 @@ class CategoryController extends Controller
             'effective_active' => $c->is_active && ($parent === null || $parent->is_active),
             'usage_count' => $stats['usage'][$c->id] ?? 0,
             'year_balance' => Money::fromCents($stats['balance'][$c->id] ?? 0),
+            // QA Q3: the rename warning names locked months / a closed year only when the node has entries in them.
+            'first_entry_date' => $stats['first'][$c->id] ?? null,
             'can_edit' => $super || ($c->branch_id !== null && (int) $c->branch_id === app(BranchContext::class)->branchId),
-            'can_promote' => $super && $c->branch_id !== null && $c->parent_id !== null,
+            // QA Q1: only an effectively active branch-only sub can be made global (R9).
+            'can_promote' => $super && $c->branch_id !== null && $c->parent_id !== null && $c->is_active && $parent?->is_active === true,
         ];
     }
 
@@ -289,14 +301,15 @@ class CategoryController extends Controller
      * another type). Year balance (review finding 9): the node's ledger balance in the current fiscal year, on its
      * natural side. Both in the active branch (branch mode) or all branches (All mode), R12.
      *
-     * @return array{usage: array<int,int>, balance: array<int,int>}
+     * @return array{usage: array<int,int>, balance: array<int,int>, first: array<int,string>}
      */
     private function stats(array $ids, ?int $branchId): array
     {
-        $usage = DB::table('transactions')->whereIn('type', [Transaction::INCOME, Transaction::EXPENSE])->whereIn('category_id', $ids)
+        $rows = DB::table('transactions')->whereIn('type', [Transaction::INCOME, Transaction::EXPENSE])->whereIn('category_id', $ids)
             ->when($branchId, fn ($q) => $q->where('branch_id', $branchId))
-            ->groupBy('category_id')->selectRaw('category_id, COUNT(*) as n')->pluck('n', 'category_id')
-            ->map(fn ($n) => (int) $n)->all();
+            ->groupBy('category_id')->selectRaw('category_id, COUNT(*) as n, MIN(txn_date) as first')->get();
+        $usage = $rows->mapWithKeys(fn ($r) => [(int) $r->category_id => (int) $r->n])->all();
+        $first = $rows->mapWithKeys(fn ($r) => [(int) $r->category_id => substr((string) $r->first, 0, 10)])->all();
 
         $fy = app(Settings::class)->currentFiscalYear();
         $dr = Money::sqlCents('le.debit');
@@ -309,7 +322,7 @@ class CategoryController extends Controller
             ->selectRaw("a.category_id, a.class, SUM($dr - $cr) as cents")->get()
             ->mapWithKeys(fn ($r) => [(int) $r->category_id => ($r->class === 'income' ? -1 : 1) * (int) $r->cents])->all();
 
-        return ['usage' => $usage, 'balance' => $balance];
+        return ['usage' => $usage, 'balance' => $balance, 'first' => $first];
     }
 
     /** Context for the S1 dialogs: the fiscal year of year_balance and the rename warning (review findings 7, 9). */
@@ -324,8 +337,9 @@ class CategoryController extends Controller
 
         return [
             'fiscal_year' => ['label' => $fy->label(), 'from' => $fy->start(), 'to' => $fy->end()],
-            'locked_through' => $locked ? ['period' => $locked, 'label' => PeriodLock::label($locked)] : null,
-            'closed_year' => $closed?->fiscal()->label(),
+            'locked_through' => $locked ? ['period' => $locked, 'label' => PeriodLock::label($locked),
+                'end' => CarbonImmutable::parse($locked.'-01')->endOfMonth()->format('Y-m-d')] : null,
+            'closed_year' => $closed ? ['label' => $closed->fiscal()->label(), 'end' => $closed->fiscal()->end()] : null,
         ];
     }
 }
