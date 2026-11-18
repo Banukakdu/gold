@@ -131,11 +131,10 @@ class PeriodLockController extends Controller
         $scope = $branch ? "for {$branch->code}" : 'for all branches';
 
         try {
-            $lock = DB::transaction(function () use ($request, $period, $branchId, $label, $branch, $scope) {
-                // Serialise lock changes on the branch row (MySQL); the active-lock unique index is the last word.
-                if ($branch) {
-                    Branch::whereKey($branch->id)->lockForUpdate()->first();
-                }
+            $lock = DB::transaction(function () use ($request, $period, $branchId, $label, $scope) {
+                // Serialise lock changes with each other and with the year-end close and reopen (review S1): every
+                // branch row, in id order, as LedgerService does. The active-lock unique index is the last word.
+                Branch::lockAll();
                 $active = PeriodLock::active()->lockForUpdate()
                     ->where(fn ($q) => $q->whereNull('branch_id')->when($branchId, fn ($w) => $w->orWhere('branch_id', $branchId)))
                     ->where('period', '>=', $period)->get();
@@ -186,6 +185,8 @@ class PeriodLockController extends Controller
     /** @return array reopened months (R7) */
     private function doUnlock(Request $request, PeriodLock $periodLock, string $reason): array
     {
+        // Review S1: the same branch row locks as the close, so an unlock cannot interleave with a close.
+        Branch::lockAll();
         $lock = PeriodLock::lockForUpdate()->findOrFail($periodLock->id);
         abort_if($lock->unlocked_at !== null, 422, 'This lock is already unlocked.');
         $label = PeriodLock::label($lock->period);

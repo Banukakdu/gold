@@ -374,6 +374,9 @@ class LedgerService
         try {
             $out = DB::transaction(function () use ($fy, $confirm) {
                 $this->lockBranches();
+                // Review S1: take the active period locks FOR UPDATE before the plan. A posting holds a shared lock on
+                // the lock rows it checked until it commits, so an in-flight posting finishes before the plan is read.
+                PeriodLock::active()->orderBy('id')->lockForUpdate()->get(['id']);
                 $plan = $this->yearEnd->plan($fy);
                 if ($checks = $this->yearEnd->checks($fy, $plan)) {
                     throw new LedgerException($checks[0]['message']);
@@ -426,8 +429,9 @@ class LedgerService
                 return ['close' => $close, 'transactions' => $txns];
             }, self::ATTEMPTS);
         } catch (QueryException $e) {
-            // Two simultaneous closes: the unique active_key refuses the second row (R8 check 2).
-            if ($e->getCode() === '23000' || str_contains(strtolower($e->getMessage()), 'unique')) {
+            // Two simultaneous closes: the unique active_key refuses the second row (R8 check 2). Only that index
+            // (review S2): any other integrity error is rethrown as it is.
+            if (YearEnd::isActiveKeyViolation($e)) {
                 throw new LedgerException("{$fy->label()} is already closed.");
             }
             throw $e;
@@ -509,7 +513,7 @@ class LedgerService
     /** R8: every branch row, in id order (as PeriodLockController), so a close and a lock change run one after the other. */
     private function lockBranches(): void
     {
-        Branch::query()->orderBy('id')->lockForUpdate()->get(['id']);
+        Branch::lockAll();
     }
 
     private function notifyYearEnd(string $event, FiscalYear $fy, string $total, ?string $reason = null): void

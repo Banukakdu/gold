@@ -64,6 +64,19 @@ class YearEnd
         return $through !== null && $date <= $through ? $this->settings()->fiscalYear($date) : null;
     }
 
+    /**
+     * The refusal for changing an entry dated $date in a branch: "FY X is closed." before "The period YYYY-MM is
+     * locked." (QA Q4, the same order as LedgerService::assertOpen), or null when the month is open.
+     */
+    public function closedOrLockedMessage(int $branchId, string $date, bool $share = false): ?string
+    {
+        if ($closed = $this->closedYearOf($date, $share)) {
+            return "{$closed->label()} is closed.";
+        }
+
+        return PeriodLock::isLocked($branchId, $date, share: $share) ? 'The period '.substr($date, 0, 7).' is locked.' : null;
+    }
+
     /** First ledger line date, or null when the ledger is empty. */
     public function firstLineDate(): ?string
     {
@@ -263,6 +276,19 @@ class YearEnd
             'close' => $closes->isEmpty() ? null : self::present($closes->last()),
             'history' => $closes->map(fn ($c) => self::present($c))->values()->all(),
         ];
+    }
+
+    /**
+     * Review S2: true only for the one-active-close-per-year index (MySQL 1062 on year_end_closes_active_key_unique,
+     * SQLite constraint 19 on the partial index over year_end_closes.fiscal_year), not for any other 23000.
+     */
+    public static function isActiveKeyViolation(QueryException $e): bool
+    {
+        $driverCode = (int) ($e->errorInfo[1] ?? 0);
+        $msg = $e->getMessage();
+
+        return ($driverCode === 1062 && str_contains($msg, 'year_end_closes_active_key_unique'))
+            || ($driverCode === 19 && str_contains($msg, 'UNIQUE constraint failed: year_end_closes.fiscal_year'));
     }
 
     public static function present(YearEndClose $c): array

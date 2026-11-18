@@ -8,6 +8,7 @@ use App\Models\AuditLog;
 use App\Models\PeriodLock;
 use App\Models\Transaction;
 use App\Models\User;
+use App\Services\YearEnd;
 use App\Support\AttachmentFile;
 use App\Support\BranchContext;
 use Illuminate\Http\Request;
@@ -205,7 +206,9 @@ class AttachmentController extends Controller
             abort_if($txn->status !== 'posted', 422, 'Files of a voided or reversed entry cannot be removed.');
             // Finding 3: the entry's own date and branch, cumulative rule, locking read inside the write.
             $date = $txn->txn_date->format('Y-m-d');
-            abort_if(PeriodLock::isLocked($txn->branch_id, $date, share: true), 422, 'The period '.substr($date, 0, 7).' is locked.');
+            if ($refused = app(YearEnd::class)->closedOrLockedMessage($txn->branch_id, $date, share: true)) {
+                abort(422, $refused);
+            }
 
             $att->update(['removed_at' => now(), 'removed_by' => $user->id, 'removal_reason' => $reason]);
             AuditLog::record('attachment.removed', $txn, [
