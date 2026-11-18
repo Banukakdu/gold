@@ -297,3 +297,93 @@ Setup: users SA (Super Admin), SA2 (Super Admin, active), SA3 (Super Admin, deac
 - **Q5 Retention.** The backlog says 30 days. We keep 30 daily plus 12 month-end (first of month) backups, so last year's closed months can still be restored. The accountant should confirm 12 months is enough, or ask for 7 years for statutory needs (that would be a bucket rule only).
 - **Q6 Archive size.** Every night is a full copy of all attachments (up to 25 MB per entry). Assumed acceptable for R1. Incremental file backups are for a later release if `files_bytes` grows past about 20 GB.
 - **Q7 Off-server provider and bucket region** (data residency for Sri Lankan financial records). Ops and the business decide. The code is provider-neutral (S3 API).
+
+## Accounting review (accountant, 2026-11-18, before development)
+
+Reviewed against `controls.md` (immutable ledger and audit, period locks), `attachments.md`, `settings.md` (fiscal year and year-end close, `year.closed` / `year.reopened`) and `LedgerVerify` (V1-V8). The direction is right. The backup is one encrypted archive with the DB and the files. The app cannot delete off-server copies. There is no download or delete in the UI. Restores are tested with `ledger:verify`. Backup rows cannot be deleted, and every event is audited. Backups change no figure, balance or report. The gaps are: retention for the statutory period, a snapshot of the closed year, proof that the restored books are the same books, and detecting a restore that nobody declared.
+
+**Point of principle.** The live database is the book of account. Nothing is deleted from it, so statutory retention is met first by the live system. Backups are how we survive losing it. They are also the only independent evidence of what the books said at a past date. For that reason, the statutory copy is the **year-end snapshot**, not every daily backup.
+
+### Decisions on the open questions
+- **Q1 (spatie package):** this is a development and ops call. I have no accounting objection either way, as long as R9 audit, R5 checksums and R11 restore tests stay.
+- **Q2 (download from S1):** agreed, **no**. A full copy of every branch's books in one click is a confidentiality risk. An extra copy for the business owner belongs in the off-server bucket (finding 1), not on a laptop.
+- **Q3 ("Back up now"):** this is ops. I have no control objection to keeping it console-only.
+- **Q4 (dead cron):** the heartbeat is ops. From the control side, finding 9 makes a stopped backup visible at every month lock and at year-end, so it cannot go unnoticed for long.
+- **Q5 (retention):** **12 monthly backups are enough for operational recovery. They are not enough for statutory record-keeping.** The Inland Revenue Act No. 24 of 2017 and the Companies Act No. 7 of 2007 both require books and supporting documents to be kept for several years after the year they relate to, and VAT records have their own period. The company secretary and tax adviser should confirm the exact periods. Decision: keep 30 daily and 12 monthly as specified. Also keep a **year-end snapshot for every fiscal year, for at least 7 years after the year ends** (bucket rule 8 years / 2,922 days, to cover filing and the assessment window). This is findings 1 and 2. It is more than a bucket rule, because no snapshot of the closed year exists today.
+- **Q6 (size):** this is ops. One condition: every **year-end** snapshot must stay self-contained (DB plus every file), even if daily file backups later become incremental.
+- **Q7 (provider and region):** this is a business and legal decision (data protection law for cross-border transfer). The accounting requirement is that the bucket supports versioning and object lock (finding 3). Records must also be producible to the Inland Revenue on request within a reasonable time.
+
+### Findings
+1. **MUST - Year-end snapshot, kept 7+ years.**
+   - Add `kept_as = 'year_end'` and a `fiscal_year` column (unsigned smallint null) to `backups`.
+   - The first `backup:run` that **starts after** a `year.closed` (a `year_end_closes` row with `status = closed` and `closed_at` < run start, and no succeeded `year_end` backup for that close id) is a year-end snapshot. It is copied off-server to `yearly/FY{label}/{filename}` plus its sidecar, as well as `daily/`.
+   - At dump time, the year must still be closed (check inside the run). If it was reopened in the meantime, the backup is a plain daily.
+   - The manifest gains `year_end: {fiscal_year, label, close_id, closed_at, closed_by}`.
+   - A reopen followed by a new close produces a **new** year-end snapshot. The earlier one is kept, because it is evidence of what was closed first.
+   - Operators can also take it at once with `backup:run --year-end`. It refuses with "FY … is not closed." if the year is not closed.
+   - Local prune never deletes a `year_end` archive while off-server is not configured or its off-server copy is not `copied`. Otherwise it follows the monthly rule (`rule = year_end_13`, 13 months).
+   - README bucket lifecycle: `yearly/` expires after 2,922 days, under object lock (finding 3).
+   - S1: "Kept as" shows "Year-end FY 2026-27". The summary line adds "and every year-end snapshot for 8 years off-server". `summary.retention` gains `year_end_years: 8`.
+2. **MUST - Each snapshot proves the books balanced, not only row counts (R3, R11, F4).** Add `control.json` to the archive and its sha256 to the manifest. It holds:
+   - per branch and in total: sum of debits and sum of credits of `ledger_entries` (integer cents, `Money`), which must be equal;
+   - per account: id, code, branch and ledger balance (the trial balance as at the dump);
+   - `max_id` of `ledger_entries`, `transactions` and `audit_logs`.
+
+   `backup:run` fails with stage `control` if debits ≠ credits in any branch. Being unbalanced is a ledger fault that must be noticed, but the archive is still kept, with `status = succeeded` and an alert. R11 step 6 recomputes `control.json` from the restored DB and fails on **any** difference. F4 and R10 step 8 compare the restored trial balance with `control.json` (an exact, objective comparison) instead of "the last printed reports" or "production as of the backup time", which has moved on by then. Use the same `LedgerChecks` code as `ledger:verify`, so there is one definition of "balanced".
+3. **MUST - Off-server copies must be impossible to overwrite or remove, not only "no delete right" (R6).**
+   - An S3 `PutObject` on an existing key replaces it, so a key without delete rights can still destroy a backup by overwriting it.
+   - The app checks `exists()` before every write and never writes to an existing key. It fails `offsite` with "Off-server object already exists." if the key is taken.
+   - Versioning is **required**, not "if the provider has it". Object lock in compliance mode is required for `yearly/` and recommended for the rest. The go-live checklist must say this, and the provider must support it (Q7).
+   - In production, S1 shows **red**, not amber, when the off-server disk is not configured. A year-end snapshot that exists only on the same server is not a retained record.
+4. **MUST - Detect an undeclared restore or rollback (tampering).** Anyone with shell access could load an older backup to erase entries together with their audit rows. `backup:restored` (F5) depends on that same person running it.
+   - At precheck, `backup:run` reads the newest local manifest/`control.json` on the `backups` disk. If none exists, it reads the newest sidecar or manifest off-server. Those files survive a DB restore.
+   - If the live `max_id` of `audit_logs` or `ledger_entries` is **lower** than that manifest's value, and there is no `backup.restored` row naming a backup at or before it, write `backup.continuity_failed` (label "Database rolled back without a recorded restore"). Alert every Super Admin with `sendNow` and fail with stage `continuity`.
+   - The backup itself is still taken (keep the archive, so that the state is preserved), and the row is `failed` so that S1 goes red.
+   - `backup:restored` with a matching filename clears the condition.
+5. **MUST - A restore must not quietly undo access and control changes (R10).** Restoring the DB also restores `users`, roles, `personal_access_tokens`, period locks and year-end closes as they were at the backup. A user deactivated after the backup becomes active again, and a revoked token works again.
+   - `backup:restored` revokes **all** Sanctum tokens, so everyone signs in again.
+   - It sends the `backup.restored` details to every active Super Admin with `sendNow`: filename, backup time, reason and operator.
+   - R10 adds a step before `php artisan up`: "Super Admin re-applies every user deactivation, role change, period lock and year-end close made after {backup time}, using the access-alert and year-end emails received since then, and records them in the restore note."
+   - `backup.restored` `new_values` gain `backup_started_at` (the start of the lost window).
+6. **MUST - Consistent snapshot of ledger and audit log (R1, R2).**
+   - `--single-transaction` gives one point in time only for InnoDB tables. The precheck fails with stage `precheck` and "Table {t} is not InnoDB." if any table in the app schema uses another engine.
+   - Agreed that dumping the DB first and then copying the files is consistent, because attachment and logo files are never deleted (attachments R4-R5, settings branding).
+   - `attachments:verify` in R11 must compare each restored file's sha256 with `attachments.sha256`, not only check that the file exists.
+7. **MUST - Verify every year-end snapshot and the old archives.**
+   - A `year_end` backup runs `backup:verify {filename}` immediately after it succeeds, in the same command. The result is shown on its row.
+   - Add a monthly scheduled job, `backup:verify --oldest-offsite` (1st Sunday, 04:00). It restores the oldest `yearly/` (else `monthly/`) object from the off-server disk. This proves that an old archive, possibly encrypted with an older password (R12), still opens and balances.
+   - A restore test that has never covered an archive older than 12 months gives no assurance about the statutory copies.
+8. **SHOULD - Hold the year-end hash outside the server.** The `YearEndNotification` is sent on `year.closed`, before the snapshot exists. Instead, when the year-end backup succeeds, send every active Super Admin (with `sendNow`) a one-off "Year-end snapshot FY 2026-27 taken: {filename}, SHA-256 {64 hex}, debits = credits = {total}". The accountant files it with the year-end pack. An archive changed later on the server then no longer matches a hash that the business holds independently.
+9. **SHOULD - Backup status at the points where the books are closed (Q4).** The period-lock Lock confirm (`/period-locks/review`) and the year-end preview checks show a non-blocking warning when the last succeeded backup is older than 26 h or the last restore test is not `passed` within 8 days. For example: "Last successful backup 3 days ago. Fix backups before closing." Closing must not be blocked by an ops failure, but nobody should close a month without knowing that there is no copy.
+10. **SHOULD - Segregation for the people who hold the keys.**
+    - Restore is an operator task, so whoever has shell access can change the books outside the app. Findings 3-5 detect this. The README also states that the operator must not be a user who records or voids entries (Cashier/Accountant).
+    - The archive password is held by **two** people: the operator, and the owner or a director in the business password manager. The off-server account root credentials are held by the business, not the IT vendor alone.
+    - Read-only S1 for Super Admins only, with no permission key: fine.
+    - Backup rows with `branch_id` null are hidden from branch users: fine.
+11. **SHOULD - Confidentiality of extracted copies.**
+    - R10 step 3 extracts the whole book in plain text to `/tmp/restore`. Use a fresh 0700 folder under `storage/app/backup-temp/`, and delete it at step 10.
+    - The `account_gold_verify` DB and its user get the same access restrictions as the live DB. R11 step 8 already drops its tables.
+    - AES-256 with production refusing an empty password, a password separate from APP_KEY, uuid-only entry names, and no paths or URLs in the API: all fine.
+12. **SHOULD - Lost-window entries after a real restore (R10 step 10).** Entries re-entered from paper get new ref numbers, which may repeat numbers issued before the restore. The README tells users to put "Re-entered after restore of {file}; original ref {X}" in the description. The accountant reviews the re-entered entries against the paper vouchers before the month is locked.
+13. **SHOULD - Wording.** The monthly backup is the state at 01:30 on the 1st. It is **not** the closed month, because late entries can still be posted before the lock. Call it "first of month" in S1, the summary and Q5, not "month-end". The closed state is the year-end snapshot (finding 1).
+14. Fine as specified:
+    - one archive for DB and files, with checksum, sidecar and self-check (R3-R5);
+    - no DELETE on `backups` (trigger plus model);
+    - prune is the only delete and never touches off-server (AC 19);
+    - `min_keep` 7, so a stopped scheduler cannot prune the last good copies;
+    - failure mails are sent with `sendNow`;
+    - R9 audit events and the "Backups" group;
+    - R11 refuses to verify against the live database;
+    - restore never deletes from the backups folder;
+    - out of scope: no UI restore, download or delete.
+
+### Acceptance criteria to add
+41. (F1) Given FY 2026-27 closed at 2027-04-10 15:00, When `backup:run` runs at 2027-04-11 01:30, Then the row has `kept_as = year_end`, `fiscal_year = 2026`, and the manifest's `year_end.close_id` set. `yearly/FY2026-27/{file}`, its sidecar and `daily/{file}` exist off-server, and the next run is a plain `daily`. Given the year is reopened before the run, Then the run is `daily`. Given it is closed again, Then the next run is a second `year_end` and the first is kept.
+42. (F1) Given a 14-month-old `year_end` backup whose off-server copy is `not_configured` or `failed`, When `backup:prune` runs, Then it is not pruned. Given its copy is `copied`, Then it is pruned with `rule = year_end_13`. `summary.retention.year_end_years = 8`.
+43. (F2) Given the AC 1 archive, Then `control.json` holds per-branch and total debit and credit sums that are equal, a trial-balance row per account equal to `ledger:verify`'s ledger balance, and `max_id` for the three tables, and its sha256 is in the manifest. Given a fixture where one ledger line is changed in the archive's DB, When `backup:verify` runs, Then it fails at stage `control` and names the account.
+44. (F3) Given `daily/{file}` already exists on the fake off-server disk, When the run uploads, Then nothing is written, `offsite_status = failed` with "Off-server object already exists.", and the existing object is unchanged. Given `APP_ENV=production` and no off-server disk, Then the S1 banner is red.
+45. (F4) Given a succeeded backup whose `control.json` has `audit_logs.max_id = 500`, and the live `audit_logs` max id is now 420 with no `backup.restored` row, When `backup:run` runs, Then the archive is kept, the row is `failed` with stage `continuity`, `backup.continuity_failed` is written, and SA and SA2 are notified with `sendNow`. After `backup:restored {that older file} --reason="..."`, the next run succeeds.
+46. (F5) Given SA, BA and ACC hold tokens, When `backup:restored` runs, Then every `personal_access_tokens` row is gone, and `backup.restored` has `backup_started_at`. SA and SA2 receive the restore notification with `sendNow`.
+47. (F6) Given a MyISAM table in the schema (MySQL, staging), When `backup:run` runs, Then it fails at `precheck` naming the table. Given a restored attachment file with one byte changed, Then `attachments:verify` in `backup:verify` fails on a sha256 mismatch.
+48. (F7) Given a `year_end` backup succeeds, Then `verify_status` is set by the same command. `schedule:list` shows `backup:verify --oldest-offsite` monthly, and given only an off-server `yearly/` object, it restores and passes.
+49. (F8, F9) Given a `year_end` backup succeeds, Then SA and SA2 receive the snapshot email with the full SHA-256 and the debit and credit total. Given the last succeeded backup is 3 days old, When SA opens the Lock confirm or the year-end preview, Then the warning shows and Lock or Close still works.
