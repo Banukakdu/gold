@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function () {
     Route::post('auth/login', [AuthController::class, 'login']);
+    Route::post('auth/set-password', [AuthController::class, 'setPassword'])->middleware('throttle:10,1');
 
     Route::middleware('auth:sanctum')->group(function () {
         Route::post('auth/logout', [AuthController::class, 'logout']);
@@ -37,6 +38,7 @@ Route::prefix('v1')->group(function () {
             Route::put('categories/{category}', [CategoryController::class, 'update'])->middleware('perm:category.manage');
 
             Route::get('transactions', [TransactionController::class, 'index'])->middleware('perm:transaction.view');
+            Route::get('transactions/creators', [TransactionController::class, 'creators'])->middleware('perm:transaction.view');
             Route::get('transactions/{transaction}', [TransactionController::class, 'show'])->middleware('perm:transaction.view');
             Route::put('transactions/{transaction}', [TransactionController::class, 'update']);
             Route::post('transactions/{transaction}/void', [TransactionController::class, 'void']);
@@ -51,12 +53,17 @@ Route::prefix('v1')->group(function () {
             Route::get('permissions', [RoleController::class, 'permissions'])->middleware('perm:role.view');
             Route::get('roles', [RoleController::class, 'index'])->middleware('perm:role.view');
             Route::post('roles', [RoleController::class, 'store'])->middleware('perm:role.manage');
+            Route::post('roles/copy-templates', [RoleController::class, 'copyTemplates'])->middleware('super');
             Route::put('roles/{role}', [RoleController::class, 'update'])->middleware('perm:role.manage');
 
             Route::get('users', [UserController::class, 'index'])->middleware('perm:user.view');
             Route::post('users', [UserController::class, 'store'])->middleware('perm:user.create');
+            Route::get('users/{user}', [UserController::class, 'show'])->middleware('perm:user.view');
             Route::put('users/{user}', [UserController::class, 'update'])->middleware('perm:user.edit');
             Route::post('users/{user}/role', [UserController::class, 'assignRole'])->middleware('perm:user.edit');
+            Route::post('users/{user}/remove-from-branch', [UserController::class, 'removeFromBranch'])->middleware('perm:user.edit');
+            Route::post('users/{user}/resend-invite', [UserController::class, 'resendInvite'])->middleware('perm:user.edit');
+            // Nothing is hard-deleted: there is deliberately no DELETE route for users, roles or templates (AC 27).
         });
     });
 });

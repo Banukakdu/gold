@@ -7,8 +7,10 @@ use App\Models\Account;
 use App\Models\AuditLog;
 use App\Models\PeriodLock;
 use App\Models\Transaction;
+use App\Models\User;
 use App\Services\LedgerService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class TransactionController extends Controller
 {
@@ -26,7 +28,7 @@ class TransactionController extends Controller
         ]);
 
         $q = Transaction::with(['branch:id,code,name', 'category:id,name,parent_id', 'category.parent:id,name',
-            'account:id,name', 'fromAccount:id,name,branch_id', 'toAccount:id,name,branch_id', 'creator:id,name'])
+            'account:id,name', 'fromAccount:id,name,branch_id', 'toAccount:id,name,branch_id', 'creator:id,name,status,is_super_admin'])
             ->latest('txn_date')->latest('id');
 
         $q->when($f['from'] ?? null, fn ($q, $v) => $q->whereDate('txn_date', '>=', $v))
@@ -40,12 +42,35 @@ class TransactionController extends Controller
             ->when($f['max'] ?? null, fn ($q, $v) => $q->where('amount', '<=', $v))
             ->when($f['q'] ?? null, fn ($q, $v) => $q->where(fn ($w) => $w->where('ref_no', 'like', "%$v%")->orWhere('description', 'like', "%$v%")->orWhere('payee_payer', 'like', "%$v%")->orWhere('reference', 'like', "%$v%")));
 
-        return $q->paginate($f['per_page'] ?? 25);
+        $page = $q->paginate($f['per_page'] ?? 25);
+        $this->tagAuthors($page->getCollection());
+
+        return $page;
     }
 
     public function show(Transaction $transaction)
     {
-        return $transaction->load(['entries', 'branch', 'category.parent', 'account', 'fromAccount.branch', 'toAccount.branch', 'creator:id,name']);
+        $transaction->load(['entries', 'branch', 'category.parent', 'account', 'fromAccount.branch', 'toAccount.branch', 'creator:id,name,status,is_super_admin']);
+        $this->tagAuthors(collect([$transaction]));
+
+        return $transaction;
+    }
+
+    /** Options for the "Created by" filter: everyone who created an entry here, former members included (finding 3). */
+    public function creators()
+    {
+        $rows = Transaction::query()->select('branch_id', 'created_by')->distinct()->get();
+        $ids = $rows->pluck('created_by')->unique()->values();
+        $members = $this->memberships($ids->all());
+        $users = User::whereIn('id', $ids)->orderBy('name')->get(['id', 'name', 'status', 'is_super_admin']);
+
+        return $users->map(function (User $u) use ($rows, $members) {
+            $branches = $rows->where('created_by', $u->id)->pluck('branch_id');
+            $tag = $u->status !== 'active' ? 'inactive'
+                : (! $u->is_super_admin && $branches->contains(fn ($b) => ! isset($members[$u->id.':'.$b])) ? 'no longer in this branch' : null);
+
+            return ['id' => $u->id, 'name' => $u->name, 'tag' => $tag];
+        })->values();
     }
 
     public function storeIncome(Request $request)
@@ -82,6 +107,29 @@ class TransactionController extends Controller
         $request->user()->canDo("{$transaction->type}.void") || abort(403, "Missing permission: {$transaction->type}.void");
 
         return $this->ledger->void($transaction, $request->validate(['reason' => 'required|string|max:500'])['reason']);
+    }
+
+    /** Finding 3 / AC 42: authors stay visible, tagged "(inactive)" or "(no longer in this branch)". */
+    private function tagAuthors($txns): void
+    {
+        $members = $this->memberships($txns->pluck('created_by')->unique()->all());
+        foreach ($txns as $t) {
+            $u = $t->creator;
+            $tag = null;
+            if ($u && $u->status !== 'active') {
+                $tag = 'inactive';
+            } elseif ($u && ! $u->is_super_admin && ! isset($members[$u->id.':'.$t->branch_id])) {
+                $tag = 'no longer in this branch';
+            }
+            $t->setAttribute('creator_tag', $tag);
+        }
+    }
+
+    /** @return array<string, true> keyed "user_id:branch_id" */
+    private function memberships(array $userIds): array
+    {
+        return DB::table('branch_user')->whereIn('user_id', $userIds)->get(['user_id', 'branch_id'])
+            ->mapWithKeys(fn ($r) => [$r->user_id.':'.$r->branch_id => true])->all();
     }
 
     private function validated(Request $request): array

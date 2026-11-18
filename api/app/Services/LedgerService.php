@@ -153,7 +153,7 @@ class LedgerService
                 $this->entry($txn, $accounts[$e->account_id], debit: $e->credit, credit: $e->debit);
             }
             $original->update(['status' => 'reversed']);
-            AuditLog::record('transaction.reversed', $original, ['status' => 'posted'], ['status' => 'reversed', 'reversal_id' => $txn->id]);
+            AuditLog::record('transaction.reversed', $original, ['status' => 'posted'], ['status' => 'reversed', 'reversal_id' => $txn->id, 'self' => (int) $original->created_by === (int) auth()->id()]);
 
             return $this->finish($txn);
         });
@@ -180,7 +180,7 @@ class LedgerService
             $acc->current_balance = $acc->ledgerBalance();
             $acc->save();
             $txn->update(['status' => 'void', 'description' => trim(($txn->description ?? '')."\n[Void] ".($reason ?? ''))]);
-            AuditLog::record('transaction.voided', $txn, ['status' => 'posted'], ['status' => 'void', 'reason' => $reason]);
+            AuditLog::record('transaction.voided', $txn, ['status' => 'posted'], ['status' => 'void', 'reason' => $reason, 'self' => (int) $txn->created_by === (int) auth()->id()]);
 
             return $txn->fresh();
         });

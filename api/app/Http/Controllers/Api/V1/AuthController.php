@@ -8,7 +8,9 @@ use App\Models\Branch;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
 {
@@ -21,7 +23,7 @@ class AuthController extends Controller
             return response()->json(['message' => 'Too many failed attempts. Try again in '.ceil(RateLimiter::availableIn($key) / 60).' minutes.'], 429);
         }
 
-        $user = User::where('email', $data['email'])->first();
+        $user = User::whereRaw('lower(email) = ?', [mb_strtolower($data['email'])])->first();
         if (! $user || ! Hash::check($data['password'], $user->password)) {
             RateLimiter::hit($key, 15 * 60);
 
@@ -31,12 +33,38 @@ class AuthController extends Controller
             return response()->json(['message' => 'Your account is inactive. Contact your administrator.'], 403);
         }
 
+        if (! $user->is_super_admin && ! $user->branches()->exists()) {
+            return response()->json(['message' => 'You do not have access to any branch. Contact your administrator.'], 403); // B12
+        }
+
         RateLimiter::clear($key);
         $user->forceFill(['last_login_at' => now()])->save();
         auth()->setUser($user);
         AuditLog::record('auth.login', $user);
 
         return ['token' => $user->createToken('web')->plainTextToken, 'user' => $this->profile($user)];
+    }
+
+    /** N5: invited user sets their password with the emailed token (AG-020, 60-minute link, single use). */
+    public function setPassword(Request $request)
+    {
+        $data = $request->validate([
+            'token' => 'required|string',
+            'email' => 'required|email',
+            'password' => 'required|string|min:8|regex:/[A-Za-z]/|regex:/[0-9]/|confirmed',
+        ]);
+        $data['email'] = mb_strtolower($data['email']);
+
+        $status = Password::reset($data, function (User $user, string $password) {
+            $user->forceFill(['password' => $password])->save();
+            auth()->setUser($user);
+            AuditLog::record('user.password_set', $user);
+        });
+        if ($status !== Password::PASSWORD_RESET) {
+            throw ValidationException::withMessages(['token' => 'This link has expired. Ask your administrator to resend the invitation.']);
+        }
+
+        return response()->noContent();
     }
 
     public function logout(Request $request)

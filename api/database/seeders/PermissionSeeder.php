@@ -2,9 +2,9 @@
 
 namespace Database\Seeders;
 
+use App\Models\Role;
 use Illuminate\Database\Seeder;
 use Spatie\Permission\Models\Permission;
-use Spatie\Permission\Models\Role;
 use Spatie\Permission\PermissionRegistrar;
 
 /** Permission catalogue (fixed in code) + global role templates (branch_id NULL). */
@@ -28,7 +28,9 @@ class PermissionSeeder extends Seeder
         'Branch Admin' => '*',
         'Accountant' => ['branch.view', 'account.view', 'account.manage', 'transfer.create', 'transfer.reverse', 'transaction.view',
             'income.create', 'income.edit', 'income.void', 'expense.create', 'expense.edit', 'expense.void',
-            'report.dashboard', 'report.view', 'report.export'],
+            'report.dashboard', 'report.view', 'report.export',
+            // Accounting review finding 6: the main reviewer of the books reads the audit log and classifies entries.
+            'audit.view', 'category.manage'],
         'Cashier' => ['branch.view', 'account.view', 'transaction.view', 'income.create', 'expense.create', 'report.dashboard'],
         'Viewer' => ['branch.view', 'account.view', 'transaction.view', 'report.dashboard', 'report.view', 'audit.view'],
     ];
@@ -42,7 +44,10 @@ class PermissionSeeder extends Seeder
         setPermissionsTeamId(null);
         foreach (self::TEMPLATES as $name => $perms) {
             $role = Role::firstOrCreate(['name' => $name, 'guard_name' => 'web', 'branch_id' => null]);
-            $role->syncPermissions($perms === '*' ? self::PERMISSIONS : $perms);
+            // Finding 7: only a new template gets the default permissions; re-seeding never resets Super Admin edits.
+            if ($role->wasRecentlyCreated) {
+                $role->syncPermissions($perms === '*' ? self::PERMISSIONS : $perms);
+            }
         }
     }
 }

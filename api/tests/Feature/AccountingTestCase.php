@@ -5,10 +5,10 @@ namespace Tests\Feature;
 use App\Models\Account;
 use App\Models\Branch;
 use App\Models\Category;
+use App\Models\Role;
 use App\Models\User;
 use Database\Seeders\DatabaseSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
 abstract class AccountingTestCase extends TestCase
@@ -47,14 +47,28 @@ abstract class AccountingTestCase extends TestCase
         return Account::withoutGlobalScopes()->where('branch_id', $b->id)->where('name', 'Cash')->first();
     }
 
+    /** Member of the branch holding the branch copy of a template (created from the template if missing). */
     protected function userIn(Branch $b, string $role): User
     {
         $u = User::factory()->create(['status' => 'active']);
         $u->branches()->attach($b->id);
         setPermissionsTeamId($b->id);
-        $u->assignRole(Role::where('name', $role)->whereNull('branch_id')->first());
+        $u->assignRole($this->branchRole($b, $role));
 
         return $u;
+    }
+
+    protected function branchRole(Branch $b, string $name): Role
+    {
+        $existing = Role::where('branch_id', $b->id)->where('name', $name)->first();
+        if ($existing) {
+            return $existing;
+        }
+        $tpl = Role::where('name', $name)->whereNull('branch_id')->firstOrFail();
+        $role = Role::create(['name' => $name, 'guard_name' => 'web', 'branch_id' => $b->id]);
+        $role->syncPermissions($tpl->permissionKeys());
+
+        return $role;
     }
 
     protected function category(string $type): Category
