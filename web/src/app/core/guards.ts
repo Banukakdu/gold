@@ -15,3 +15,9 @@ export const permissionGuard = (permission: string): CanActivateFn => () => {
 
 export const superAdminGuard: CanActivateFn = () =>
   inject(AuthService).isSuperAdmin() || inject(Router).parseUrl('/dashboard');
+
+/** Pages that need a single branch (e.g. New user): redirect elsewhere in "All branches" mode. */
+export const branchModeGuard = (redirectTo: string): CanActivateFn => () => {
+  const auth = inject(AuthService);
+  return !auth.isAllBranches() || inject(Router).parseUrl(redirectTo);
+};

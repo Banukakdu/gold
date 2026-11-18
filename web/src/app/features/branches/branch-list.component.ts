@@ -1,5 +1,5 @@
 import { Component, OnInit, inject, signal } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe } from '../../core/money.pipe';
@@ -21,12 +21,16 @@ interface Branch { id: number; code: string; name: string; address?: string; pho
               <td class="mono">{{ b.code }}</td><td>{{ b.name }} @if (b.is_main) { <span class="tag">Main</span> }</td>
               <td>{{ b.phone }}</td><td><span class="tag" [attr.data-s]="b.status">{{ b.status }}</span></td>
               <td class="num">{{ b.balance | money }}</td>
-              <td>@if (!b.is_main) { <button class="link" (click)="toggle(b)">{{ b.status === 'active' ? 'Deactivate' : 'Activate' }}</button> }</td>
+              <td>
+                <button class="link" (click)="copyTemplates(b)">Copy role templates</button>
+                @if (!b.is_main) { <button class="link" (click)="toggle(b)">{{ b.status === 'active' ? 'Deactivate' : 'Activate' }}</button> }
+              </td>
             </tr>
           }
         </tbody>
       </table>
     </div>
+    @if (ok()) { <div class="ok">{{ ok() }}</div> }
     <h2>New branch</h2>
     <form class="card form" (ngSubmit)="add()">
       <label>Code <input name="code" [(ngModel)]="m.code" maxlength="10" required placeholder="KDY" /></label>
@@ -44,6 +48,7 @@ export class BranchListComponent implements OnInit {
   private auth = inject(AuthService);
   branches = signal<Branch[]>([]);
   error = signal('');
+  ok = signal('');
   m: any = { code: '', name: '', address: '', phone: '' };
 
   ngOnInit() { this.http.get<Branch[]>('/api/v1/branches').subscribe(b => this.branches.set(b)); }
@@ -51,6 +56,18 @@ export class BranchListComponent implements OnInit {
   add() {
     this.http.post('/api/v1/branches', { ...this.m, code: this.m['code'].toUpperCase() }).subscribe({
       next: () => { this.m = { code: '', name: '', address: '', phone: '' }; this.error.set(''); this.ngOnInit(); this.auth.loadMe(); },
+      error: e => this.error.set(errorText(e)),
+    });
+  }
+
+  /** F6: copy Branch Admin, Accountant, Cashier, Viewer into the branch; existing names are skipped. */
+  copyTemplates(b: Branch) {
+    this.http.post<{ created: string[]; skipped: string[] }>('/api/v1/roles/copy-templates', {},
+      { headers: new HttpHeaders({ 'X-Branch-Id': String(b.id) }) }).subscribe({
+      next: r => {
+        this.error.set('');
+        this.ok.set(`${b.code}: created ${r.created.join(', ') || 'none'}` + (r.skipped.length ? `; skipped ${r.skipped.join(', ')}` : '') + '.');
+      },
       error: e => this.error.set(errorText(e)),
     });
   }

@@ -1,9 +1,10 @@
 import { Routes } from '@angular/router';
-import { authGuard, permissionGuard, superAdminGuard } from './core/guards';
+import { authGuard, branchModeGuard, permissionGuard, superAdminGuard } from './core/guards';
 import { ShellComponent } from './layout/shell.component';
 
 export const routes: Routes = [
   { path: 'login', loadComponent: () => import('./features/auth/login.component').then(m => m.LoginComponent) },
+  { path: 'set-password', loadComponent: () => import('./features/auth/set-password.component').then(m => m.SetPasswordComponent) },
   {
     path: '',
     component: ShellComponent,
@@ -24,6 +25,18 @@ export const routes: Routes = [
         loadComponent: () => import('./features/accounts/statement.component').then(m => m.StatementComponent) },
       { path: 'branches', canActivate: [superAdminGuard],
         loadComponent: () => import('./features/branches/branch-list.component').then(m => m.BranchListComponent) },
+      { path: 'users', canActivate: [permissionGuard('user.view')],
+        loadComponent: () => import('./features/users/user-list.component').then(m => m.UserListComponent) },
+      { path: 'users/new', canActivate: [permissionGuard('user.create'), branchModeGuard('/users')],
+        loadComponent: () => import('./features/users/user-form.component').then(m => m.UserFormComponent) },
+      { path: 'users/:id', canActivate: [permissionGuard('user.view')],
+        loadComponent: () => import('./features/users/user-detail.component').then(m => m.UserDetailComponent) },
+      { path: 'roles', canActivate: [permissionGuard('role.view')],
+        loadComponent: () => import('./features/roles/role-list.component').then(m => m.RoleListComponent) },
+      { path: 'roles/new', canActivate: [permissionGuard('role.manage')],
+        loadComponent: () => import('./features/roles/role-editor.component').then(m => m.RoleEditorComponent) },
+      { path: 'roles/:id', canActivate: [permissionGuard('role.view')],
+        loadComponent: () => import('./features/roles/role-editor.component').then(m => m.RoleEditorComponent) },
     ],
   },
   { path: '**', redirectTo: '' },

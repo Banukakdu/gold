@@ -19,6 +19,8 @@ import { AuthService } from '../core/auth.service';
           @if (auth.isSuperAdmin()) { <a routerLink="/allocations/new" routerLinkActive="on">Fund a branch</a> }
           @if (auth.can('account.view')) { <a routerLink="/accounts" routerLinkActive="on">Accounts</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/branches" routerLinkActive="on">Branches</a> }
+          @if (auth.can('user.view')) { <a routerLink="/users" routerLinkActive="on">Users</a> }
+          @if (auth.can('role.view')) { <a routerLink="/roles" routerLinkActive="on">Roles</a> }
         </nav>
       </aside>
       <div class="main">
@@ -55,6 +57,9 @@ export class ShellComponent {
     // Entry forms and statements need a single branch; send the user back to the dashboard.
     if (this.router.url.includes('/new/') || this.router.url.includes('/statement')) {
       this.router.navigateByUrl('/dashboard');
+    } else if (/^\/(users|roles)\/./.test(this.router.url)) {
+      // User/role pages belong to one branch; go back to the list for the new branch.
+      this.router.navigateByUrl(this.router.url.startsWith('/users') ? '/users' : '/roles');
     }
   }
 }
