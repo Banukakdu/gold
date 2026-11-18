@@ -4,7 +4,7 @@ import { HttpClient, HttpErrorResponse, HttpParams } from '@angular/common/http'
 import { NgTemplateOutlet } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, ParamMap, Params, Router, RouterLink } from '@angular/router';
-import { firstValueFrom } from 'rxjs';
+import { Subscription, firstValueFrom } from 'rxjs';
 import { AppDatePipe } from '../../core/app-date.pipe';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
@@ -195,7 +195,7 @@ interface Chip { key: string; label: string; remove: string[] }
           <span>Page {{ p.current_page }} of {{ p.last_page }} · {{ p.total }} {{ p.total === 1 ? 'entry' : 'entries' }}</span>
           <button class="ghost" [disabled]="p.current_page >= p.last_page" (click)="goPage(p.current_page + 1)">Next</button>
           <select aria-label="Rows per page" [ngModel]="'' + perPage()" (ngModelChange)="setPerPage($event)">
-            @for (n of ['25', '50', '100']; track n) { <option [value]="n">{{ n }} per page</option> }
+            @for (n of perPageOptions(); track n) { <option [value]="n">{{ n }} per page</option> }
           </select>
         </div>
       }
@@ -270,11 +270,18 @@ export class TransactionListComponent implements OnInit {
   statuses = Object.entries(STATUS_LABELS);
   sorts = SORTS;
   private creatorsFor = '';
+  private listSub?: Subscription;
+  /** Rows per page: 200 stays valid for existing links (AC 20), so it is offered when the URL holds it. */
+  perPageOptions = computed(() => {
+    const base = ['25', '50', '100'];
+    const cur = String(this.perPage());
+    return base.includes(cur) ? base : [...base, cur];
+  });
 
   ngOnInit() {
     this.http.get<AccountOpt[]>('/api/v1/accounts').subscribe({ next: a => this.accounts.set(a), error: () => this.accounts.set([]) });
     this.http.get<CategoryNode[]>('/api/v1/categories', { params: { include_inactive: 1 } }).subscribe({
-      next: c => { this.categories.set(c); this.fillForm(this.applied()); }, error: () => this.categories.set([]) });
+      next: c => { this.categories.set(c); this.resolveCategory(); }, error: () => this.categories.set([]) });
     if (this.auth.isAllBranches()) {
       this.http.get<BranchOpt[]>('/api/v1/branches').subscribe({ next: b => this.branchOpts.set(b), error: () => this.branchOpts.set([]) });
     }
@@ -287,11 +294,14 @@ export class TransactionListComponent implements OnInit {
   private fromUrl(m: ParamMap) {
     const p: Params = {};
     for (const k of m.keys) {
-      if (k === 'branches') p[k] = m.getAll(k);
-      else p[k] = m.get(k);
+      if (k === 'branches') {
+        // QA F5: an empty branches value is no branch filter.
+        const b = m.getAll(k).filter(Boolean);
+        if (b.length) p[k] = b;
+      } else p[k] = m.get(k);
     }
     // F3 / AC 16: branches only exist in All mode; a link from All mode is dropped with a note.
-    if (p['branches'] && !this.auth.isAllBranches()) {
+    if (p['branches']?.length && !this.auth.isAllBranches()) {
       delete p['branches'];
       this.note.set(BRANCH_NOTE);
       this.router.navigate([], { queryParams: p, replaceUrl: true });
@@ -377,6 +387,18 @@ export class TransactionListComponent implements OnInit {
     return p;
   }
 
+  /**
+   * Categories arrived after the URL was read: place a sub-category id under its parent. Only the category fields are
+   * touched, and only while they still hold the unresolved URL value (fields the user is editing are kept).
+   */
+  private resolveCategory() {
+    const p = this.applied();
+    const id = p['category_id'] ?? '';
+    const node = id ? this.findCategory(id) : undefined;
+    if (!node?.parent_id || this.f.parent !== String(id)) return;
+    this.f = { ...this.f, parent: String(node.parent_id), sub: String(node.id) };
+  }
+
   /** URL -> form. A category id that is a sub selects its parent and the sub; an unknown id shows "Category #<id>". */
   private fillForm(p: Params) {
     const list = (v: unknown) => String(v ?? '').split(',').map(s => s.trim()).filter(Boolean);
@@ -435,10 +457,13 @@ export class TransactionListComponent implements OnInit {
   }
 
   private load(p: Params) {
-    this.http.get<Page<Transaction>>('/api/v1/transactions', { params: this.apiParams(p) }).subscribe({
+    // Reviewer m1: a newer URL cancels the request of the older one, so a late response never overwrites the list.
+    this.listSub?.unsubscribe();
+    this.listSub = this.http.get<Page<Transaction>>('/api/v1/transactions', { params: this.apiParams(p) })
+      .pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: r => {
-        // AC 21: a page past the end moves to the last page without an extra history entry.
-        if (r.total > 0 && r.current_page > r.last_page) { this.goPage(r.last_page); return; }
+        // AC 21: a page past the end moves to the last page (page 1 when nothing matches), without an extra history entry.
+        if (r.current_page > 1 && r.current_page > r.last_page) { this.goPage(Math.max(1, r.last_page)); return; }
         this.page.set(r); this.msg.set(''); this.listError.set(false);
       },
       error: e => { this.page.set(null); this.msg.set(errorText(e)); this.listError.set(e?.status === 422 || e?.status === 403); },

@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Transactions;
 
+use App\Models\Category;
 use Illuminate\Http\UploadedFile;
 
 /**
@@ -115,5 +116,24 @@ class IsolationTest extends TransactionSearchTestCase
             }
         }
         $this->exportAs($this->nimal, $this->kdy->id, ['branches' => [$this->gal->id]])->assertForbidden();
+    }
+
+    /** Reviewer M1: the export header never names another branch's private category. */
+    public function test_m1_export_header_does_not_name_another_branchs_category(): void
+    {
+        $secret = Category::create(['type' => 'expense', 'name' => 'GAL Secret Payroll', 'parent_id' => $this->utilities->id, 'branch_id' => $this->gal->id]);
+        $sheet = $this->sheet($this->exportAs($this->nimal, $this->kdy->id, ['category_id' => $secret->id]));
+        $this->assertContains("Filters: Category: Category #{$secret->id}", $sheet['lines']);
+        $this->assertSame([], array_filter($sheet['lines'], fn ($l) => str_contains($l, 'Secret')));
+        $this->assertSame([], $sheet['rows']);
+
+        // Visible categories keep their name; the GAL user and All mode may see the GAL one.
+        $this->assertContains('Filters: Category: Utilities › Electricity',
+            $this->sheet($this->exportAs($this->nimal, $this->kdy->id, ['category_id' => $this->electricity->id]))['lines']);
+        $galUser = $this->userIn($this->gal, 'Accountant');
+        $this->assertContains('Filters: Category: Utilities › GAL Secret Payroll',
+            $this->sheet($this->exportAs($galUser, $this->gal->id, ['category_id' => $secret->id]))['lines']);
+        $this->assertContains('Filters: Category: Utilities › GAL Secret Payroll',
+            $this->sheet($this->exportAs($this->admin, 'all', ['category_id' => $secret->id]))['lines']);
     }
 }

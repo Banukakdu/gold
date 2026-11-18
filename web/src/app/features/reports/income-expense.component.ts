@@ -122,12 +122,14 @@ export class IncomeExpenseComponent implements OnInit {
   /** F3: open the transactions behind a sub-category amount (originals + reversals). */
   drill(type: 'income' | 'expense', c: Cat, sub: Line) {
     const r = this.r()!;
-    return {
+    const q: Record<string, unknown> = {
       from: r.from, to: r.to, type: `${type},reversal`,
       category_id: sub.id ?? c.id, category_only: 1,
       category_name: sub.id ? `${c.name} › ${sub.name}` : c.name,
-      // branches[] only means something in All mode; in branch mode the active branch already limits the list.
-      branches: this.auth.isAllBranches() && !r.all_branches ? r.branches.map(b => b.id) : [],
     };
+    // branches[] only means something in All mode; in branch mode the active branch already limits the list, and the
+    // key is left out (AG-065 QA F5: an empty value read as a branch filter).
+    if (this.auth.isAllBranches() && !r.all_branches) q['branches'] = r.branches.map(b => b.id);
+    return q;
   }
 }

@@ -203,5 +203,6 @@ button.att-danger { color: var(--neg); border-color: var(--neg); }
   .ts-l3 { color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
   .ts-card-actions:empty { display: none; }
   .ts-card-actions button.link { min-height: 44px; min-width: 44px; }
+  .ts-chip button.link { min-width: 44px; min-height: 44px; }
   .ts-pager { button { min-height: 44px; flex: 1; } span { order: 3; width: 100%; text-align: center; } select { order: 4; width: 100%; } }
 }

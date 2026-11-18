@@ -36,8 +36,8 @@ class TransactionSearch
         $rules = [
             'from' => 'nullable|date_format:Y-m-d',
             'to' => ['nullable', 'date_format:Y-m-d'],
-            'type' => ['nullable', 'string', $this->listRule('type', self::TYPES)],
-            'status' => ['nullable', 'string', $this->listRule('status', self::STATUSES)],
+            'type' => ['bail', 'nullable', 'string', $this->listRule('type', self::TYPES)],
+            'status' => ['bail', 'nullable', 'string', $this->listRule('status', self::STATUSES)],
             'account_id' => 'nullable|integer',
             'category_id' => 'nullable|integer',
             'category_only' => 'nullable|boolean',
@@ -186,6 +186,9 @@ class TransactionSearch
     private function listRule(string $name, array $allowed): \Closure
     {
         return function (string $attribute, mixed $value, \Closure $fail) use ($name, $allowed) {
+            if (! is_string($value)) {
+                return; // the string rule reports it (reviewer M2: never cast an array)
+            }
             foreach ($this->list((string) $value) ?? [] as $v) {
                 if (! in_array($v, $allowed, true)) {
                     $fail("Unknown {$name}: {$v}.");

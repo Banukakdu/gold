@@ -243,7 +243,11 @@ class TransactionExporter
             $parts[] = 'Account: '.($acc ? trim("{$code} {$acc->name}") : "#{$id}");
         }
         if ($id = $p->get('category_id')) {
-            $c = Category::with('parent:id,name')->find((int) $id);
+            // Reviewer M1: only a category the caller can see (global, or of the active branch; All mode: any), as
+            // CategoryController::index; another branch's private category is never named.
+            $c = Category::with('parent:id,name')
+                ->when($p->activeBranchId, fn ($q, $b) => $q->where(fn ($w) => $w->whereNull('branch_id')->orWhere('branch_id', $b)))
+                ->find((int) $id);
             $label = $c ? ($c->parent ? "{$c->parent->name} › {$c->name}" : $c->name) : "Category #{$id}";
             if ($c && ! $c->parent && $p->get('category_only')) {
                 $label .= ' › (no sub-category)';

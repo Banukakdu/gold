@@ -115,4 +115,26 @@ class FiltersTest extends TransactionSearchTestCase
         $this->assertSame($lines, LedgerEntry::count());
         $this->assertSame(1, DB::table('audit_logs')->where('event', 'report.exported')->count());
     }
+
+    /** Reviewer M2: a list param sent as an array is a 422, never a 500, on the list, creators and export. */
+    public function test_m2_array_params_are_rejected_with_422(): void
+    {
+        foreach (['type', 'status'] as $key) {
+            $this->kdyList([$key => ['income']])->assertStatus(422)->assertJsonValidationErrors($key);
+            $this->exportAs($this->nimal, $this->kdy->id, [$key => ['void']])->assertStatus(422)->assertJsonValidationErrors($key);
+            $this->actingAs($this->nimal)->withHeader('X-Branch-Id', (string) $this->kdy->id)
+                ->getJson('/api/v1/transactions/creators?'.http_build_query([$key => ['x']]))->assertOk();
+        }
+        foreach (['min', 'q', 'from', 'account_id'] as $key) {
+            $this->kdyList([$key => ['1']])->assertStatus(422)->assertJsonValidationErrors($key);
+        }
+    }
+
+    /** AC 25 / QA F5: the Income & Expense drill-down link works in branch mode (no branches key, category_name ignored). */
+    public function test_ac25_reports_drill_down_in_branch_mode(): void
+    {
+        $q = ['from' => '2026-10-01', 'to' => '2026-10-31', 'type' => 'income,reversal', 'category_id' => $this->walkIn->id,
+            'category_only' => 1, 'category_name' => 'Retail › Walk-in'];
+        $this->assertSame($this->ids('E1'), $this->rowIds($this->kdyList($q)));
+    }
 }

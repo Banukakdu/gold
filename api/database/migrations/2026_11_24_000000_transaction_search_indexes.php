@@ -11,8 +11,9 @@ use Illuminate\Support\Facades\Schema;
  *  - (txn_date, id): All mode with no branch filter pages the whole table in date order without a filesort;
  *  - (related_branch_id, txn_date): the incoming leg of the scope (branch_id = ? OR related_branch_id = ?).
  * MySQL silently drops the implicit index of the related_branch_id foreign key once another index can serve it, and
- * then refuses to drop that index (error 1553). So on MySQL the foreign key first gets its own named index, kept on
- * rollback; the rollback drops only the two indexes above (and re-adds the foreign key index if it is missing).
+ * then refuses to drop that index (error 1553). So the rollback first gives the foreign key its own named index when
+ * it has no single-column index, and drops only the two indexes above. up() adds that index only when no index serves
+ * the foreign key at all (a partial run), never as a duplicate.
  */
 return new class extends Migration
 {
@@ -24,7 +25,9 @@ return new class extends Migration
 
     public function up(): void
     {
-        if (DB::connection()->getDriverName() === 'mysql' && ! Schema::hasIndex('transactions', self::RELATED_FK)) {
+        // Only when no index serves the foreign key at all (reviewer m2: no duplicate of the implicit index; a re-run
+        // after the composite exists adds nothing).
+        if (DB::connection()->getDriverName() === 'mysql' && ! $this->hasIndexStartingWith('related_branch_id')) {
             Schema::table('transactions', fn (Blueprint $t) => $t->index('related_branch_id', self::RELATED_FK));
         }
         if (! Schema::hasIndex('transactions', self::DATE_ID)) {
@@ -37,6 +40,7 @@ return new class extends Migration
 
     public function down(): void
     {
+        // The composite may be the only index of the foreign key (MySQL dropped the implicit one): give it its own first.
         if (DB::connection()->getDriverName() === 'mysql' && ! $this->hasSingleColumnIndex('related_branch_id')) {
             Schema::table('transactions', fn (Blueprint $t) => $t->index('related_branch_id', self::RELATED_FK));
         }
@@ -46,6 +50,17 @@ return new class extends Migration
         if (Schema::hasIndex('transactions', self::DATE_ID)) {
             Schema::table('transactions', fn (Blueprint $t) => $t->dropIndex(self::DATE_ID));
         }
+    }
+
+    private function hasIndexStartingWith(string $column): bool
+    {
+        foreach (Schema::getIndexes('transactions') as $index) {
+            if (($index['columns'][0] ?? null) === $column) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function hasSingleColumnIndex(string $column): bool
