@@ -100,10 +100,14 @@ No new permission key. Settings and the year-end close use the existing `super` 
   - **Ready to close:** all checks in R8 pass.
   - **Closed.**
   - **Reopened:** shows the reason; the year can be closed again.
+  - **No result to close:** the year has no income or expense line (only balance-sheet lines such as capital or opening allocations). It does not block the next close (R8 check 3) and is covered by the cumulative lock. It can still be closed (R7, AC 36).
+- **History** (review finding 5): under each row, every close and reopen of that year, oldest first, with who, when, the total result and the reopen reason.
 - **Check list** on an Open row (one line per failed check), e.g. "Lock March 2027 for: KDY, GAL (or lock all branches).", "Close FY 2025-26 first.", "2 entries up to March 2027 are not balanced. Run ledger:verify."
 - **"Preview"** (Ready or Closed): one card per branch with Income total, Expense total, Result, and the closing lines (Code | Account | Debit | Credit), including the MAIN lines for that branch. A summary card shows the result per branch, the total, and the Retained earnings movement. Print button.
+  - **I&E reconciliation** (review finding 2): each branch card and the summary show the ledger result N, the Income & Expense report net for S..E (`countedTransactions`) and the difference. A difference other than 0.00 is shown in red and blocks the close (R8 check 5b).
+  - **Print** (review finding 12): title "Year-end close FY 2026-27 — preview", the logo and header as the PDF reports, the I&E reconciliation, and the Prepared by / Checked by / Approved by block.
 - **"Close FY 2026-27"** (Ready only): a dialog listing the result per branch and the total. It needs the label typed exactly ("2026-27"). Text: "This posts closing entries dated 31 Mar 2027 in every branch and keeps March 2027 locked for all branches. It can only be undone by reopening the year."
-- **"Reopen year"** (latest closed year only): Reason (textarea, required, 10–500). Text: "This cancels the closing entries. The months stay locked; unlock them in Period locks if you need to change an entry."
+- **"Reopen year"** (latest closed year only): Reason (textarea, required, 10–500). Text: "This cancels the closing entries. The months stay locked; unlock them in Period locks if you need to change an entry." Warning (review finding 10, LKAS 8): "Reopen only before the accounts for this year are signed or filed. After that, record corrections in the current year."
 - **Empty state:** "No entries yet." **Errors:** the API `message` in `.alert`.
 
 **S6 Trial balance changes** (double-entry S2):
@@ -111,16 +115,21 @@ No new permission key. Settings and the year-end close use the existing `super` 
 - **Presets** (all reports' filter bar): "This fiscal year", "Last fiscal year" (and the existing month presets).
 - **Toggle "Include closing entries"** (post-closing view): shown only when To is the last day of a closed fiscal year. Default off (pre-closing).
 - **Banners:**
-  - amber "FY 2026-27 is not closed yet." when an earlier year with entries is not closed;
-  - grey "FY 2026-27 closed on <date> by <name>." when the shown year is closed.
-- **Basis line:** "Income and expense from the start of FY <label> (<start>). Results of earlier years are in Retained earnings (MAIN) and Head office current accounts once closed, otherwise in 'Result of earlier years not yet closed'. Closing entries excluded / included."
-- **Period label** (`ReportExporter::periodLabel`): an exact fiscal year range reads "FY 2026-27, 2026-04-01 to 2027-03-31". The calendar label stays for Jan–Dec only when the fiscal year does not start in January.
+  - amber "FY 2026-27 is not closed yet." when an earlier year with income or expense lines is not closed;
+  - grey "FY 2026-27 closed on <date> by <name>." when the shown year is closed;
+  - red "FY 2026-27 was reopened on <date> by <name>: <reason>." when the shown year has been reopened and not closed again (review finding 5).
+- **Basis line:** "Income and expense from the start of FY <label> (<start>). Results of earlier years are in Retained earnings (MAIN) and Head office current accounts once closed, otherwise in 'Result of earlier years not yet closed'. Retained earnings excludes results before go-live. Closing entries excluded / included." (The go-live sentence is review finding 14; the opening Retained earnings journal is a follow-up in the "Manual journals + liabilities" backlog item.)
+- **PDF / Excel title** (review finding 12): "Trial balance — pre-closing" or "Trial balance — post-closing" (the PDF prints the dash as "-"). The PDF ends with the Prepared by / Checked by / Approved by block.
+- **PDF header of a year closed again** (review finding 5): the line "Reopened N time(s)".
+- **Period label** (`ReportExporter::periodLabel`): an exact fiscal year range reads "FY 2026-27, 2026-04-01 to 2027-03-31" (the dates in the date format setting, S3; with the default format "FY 2026-27, 1 Apr 2026 to 31 Mar 2027"). The calendar label stays for Jan–Dec only when the fiscal year does not start in January.
 
 **S7 Other screens.**
 - **Transactions list and detail:** type label "Year-end close". No Edit, Void or Reverse actions.
+  - **Amount** (review finding 15): the closing transaction's `amount` (total closing debits) is not money moved. The list shows "—" in the Amount column, and `year_end_close` is left out of any total or sum on the list and its export. The lines are on the detail.
 - **Detail** "Ledger lines" note: "Year-end close FY 2026-27", or "Cancelled by reopening FY 2026-27" for the contras.
 - **Chart of accounts:** MAIN shows 32000 "Retained earnings" under Equity, type "Retained earnings", created from "System".
 - **Chart info line** adds: "At year end, each branch's result is moved to its Head office current account and to Retained earnings in MAIN."
+- **Account pickers** (review finding 3): Retained earnings is never offered by any account picker, `accounts/destinations`, the transfer or the capital forms (they list cash, bank and wallet accounts only).
 
 ## 5. API
 | Method, path | Guard | Request | Response / errors |
@@ -131,11 +140,11 @@ No new permission key. Settings and the year-end close use the existing `super` 
 | `PUT /v1/settings` | `super` | any of `company_name`, `currency_code`, `date_format`, `fiscal_year_start_month`, `currency_decimals` | 200 with the `GET /settings` body. 422 for: an unknown or not editable key (e.g. `expense_negative_balance`, `company_logo`) "Unknown setting: <key>."; field rules in S1; currency with entries (R2); decimals ≠ 2 (R2); fiscal year start after a close (R4) |
 | `POST /v1/settings/logo` | `super`, `throttle:attachments-upload` | multipart `file` | 201 with `logo` metadata. 422 messages in R3 |
 | `POST /v1/settings/logo/remove` | `super` | — | 200. 422 "There is no logo to remove." No DELETE route (nothing is hard-deleted) |
-| `GET /v1/fiscal-years` | `super` | — | `{data:[{start_year, label, start, end, status:'open'\|'ready'\|'closed'\|'reopened', checks:[{code, message}], close:{id, closed_by, closed_at, total_net, reopened_by, reopened_at, reopen_reason}\|null}]}` |
-| `GET /v1/fiscal-years/{startYear}/preview` | `super` | — | `{fiscal_year, branches:[{branch:{id,code}, income, expense, net, lines:[{branch_code, code, account, debit, credit}]}], total_net, retained_earnings_movement, checks}`. 404 for a year outside the list |
+| `GET /v1/fiscal-years` | `super` | — | `{data:[{start_year, label, start, end, status:'open'\|'ready'\|'closed'\|'reopened'\|'no_result', can_close, result, checks:[{code, message}], close:{id, closed_by, closed_at, total_net, reopened_by, reopened_at, reopen_reason}\|null, history:[same shape as close, oldest first]}]}` |
+| `GET /v1/fiscal-years/{startYear}/preview` | `super` | — | `{fiscal_year, branches:[{branch:{id,code}, income, expense, net, ie_net, difference, lines:[{branch_code, code, account, debit, credit}]}], total_net, total_ie_net, retained_earnings_movement, checks}`. 404 for a year outside the list |
 | `POST /v1/fiscal-years/{startYear}/close` | `super` | `confirm` (must equal the label) | 201 `{close, transactions:[{id, ref_no, branch_code, lines}]}`. 422 messages in R8 and R10 |
-| `POST /v1/fiscal-years/{startYear}/reopen` | `super` | `reason` (10–500) | 200. 422 in R11 |
-| `GET /v1/reports/trial-balance` (+ export) | unchanged | + `closing_entries` (0/1, default 0) | `meta` gains `fiscal_year:{label, start, end, closed, closed_at, closed_by}` and `earlier_unclosed:bool`. Rows may include the virtual row (R6). 422 in R5 |
+| `POST /v1/fiscal-years/{startYear}/reopen` | `super` | `reason` (10–500) | 200. 422 in R11 (including "FY 2026-27 is not closed." for the loser of two simultaneous reopens) |
+| `GET /v1/reports/trial-balance` (+ export) | unchanged | + `closing_entries` (0/1, default 0) | `meta` gains `fiscal_year:{label, start, end, closed, closed_at, closed_by, reopened:{at, by, reason}\|null, reopen_count}`, `earlier_unclosed:bool`, `earlier_unclosed_label` and `closing_entries:bool`. Rows may include the virtual row (R6). 422 in R5 |
 | `PUT /v1/transactions/{id}`, `POST …/void`, `POST …/reverse` | unchanged | — | for type `year_end_close`: 422 "Year-end closing entries change only by reopening the year." |
 
 **Schema** (migrations dated after `2026_11_22_000001_double_entry_backfill.php`):
@@ -152,6 +161,7 @@ No new permission key. Settings and the year-end close use the existing `super` 
      - `closed_by` (FK users), `closed_at`;
      - `reopened_by` (FK users null), `reopened_at` (null), `reopen_reason` (text null);
      - `summary` (json: per branch income, expense, net, transaction id, line count), timestamps;
+     - `period_lock_id` (FK `period_locks`): the active global lock for exactly month(E) that the close ensured (review finding 1, R8 step 7);
      - `active_key`, unique: a generated column on MySQL (`IF(status='closed', fiscal_year, NULL)`) or a partial unique index on SQLite, the same pattern as `period_locks`.
    - **`transactions.type`** gains `year_end_close` (`Transaction::YEAR_END_CLOSE`). **`ledger_entries.origin`** gains `close`: ADD-only, with no CHECK through the schema builder (double-entry schema note).
    - **`accounts.type`** gains `retained_earnings`. The migration creates MAIN 32000 "Retained earnings" (class equity, created from System) with a zero balance and writes `account.created`. **MAIN only.**
@@ -250,8 +260,11 @@ All lines are dated E, with `origin = close`. The balances are taken from **all 
 | | MAIN | BCA(B) N | 32000 Retained earnings N |
 | non-main B, N < 0 | B | HO in B \|N\| | — |
 | | MAIN | 32000 \|N\| | BCA(B) \|N\| |
-| **MAIN's own** result N > 0 (or < 0) | MAIN | — (32000 \|N\|) | 32000 N (—) |
+| **MAIN's own** result N > 0 | MAIN | — | 32000 N |
+| **MAIN's own** result N < 0 | MAIN | 32000 \|N\| | — |
 | N = 0 with non-zero accounts | — | no result line | |
+
+The MAIN mirror lines (BCA(B) / 32000) of a non-main branch B sit in **B's** closing transaction, so the KDY close has MAIN lines. MAIN's own closing transaction (MAIN-YEC) exists only when MAIN has its own income or expense balances (review finding 13; section 7 shows this).
 
 How the accounts behave at year end:
 - **Head Office and branches:**
@@ -268,32 +281,41 @@ How the accounts behave at year end:
 
 1. **The year has ended:** E < today (Asia/Colombo). Otherwise 422 "FY 2026-27 has not ended yet."
 2. **Not already closed:** no active close for the year. Otherwise 422 "FY 2026-27 is already closed." The unique `active_key` also stops two simultaneous closes; the loser gets the same 422 and nothing posts.
-3. **Earlier year closed:** the previous fiscal year is closed, if it has any ledger line. Otherwise 422 "Close FY 2025-26 first."
+3. **Earlier year closed:** the previous fiscal year is closed, if it has **any income or expense line** (review finding 11, Q-A8). Otherwise 422 "Close FY 2025-26 first." A year with only balance-sheet lines (capital, opening allocations, funding) has nothing to close and does not block.
 4. **All 12 months locked:** every branch, active and inactive, is closed through month(E), using the cumulative rule `PeriodLock::closedThrough`. Otherwise 422 "Lock March 2027 for: KDY, GAL (or lock all branches) before closing FY 2026-27."
 5. **No unbalanced entry:** no transaction dated ≤ E breaks double-entry V1 (the same grouped query as the lock control). Otherwise 422 "2 entries up to March 2027 are not balanced. Run ledger:verify."
+5b. **The year result reconciles to the I&E report** (review finding 2): for every branch, the ledger result N (R7) equals the Income & Expense report net for S..E (`countedTransactions`, the same basis as the I&E report). Otherwise 422 "The ledger result for KDY differs from the Income & Expense report by 100.00. Run ledger:verify." and nothing is posted.
 6. **Confirmation:** `confirm` equals the label. Otherwise 422 "Type 2026-27 to confirm."
 7. **What the close writes:**
-   - the R7 transactions, then the `year_end_closes` row;
-   - an **active global period lock** for month(E), if the global closed-through is earlier than month(E). It is `locked_by` the closer, with audit `period.locked` and `source: year_end_close`. **The close itself locks the year for all branches**, whatever branch locks exist.
+   - the R7 transactions, then the `year_end_closes` row. `closed_at` is taken **after** the closing lines are written, in the same DB transaction (review finding 7);
+   - an **active global period lock for exactly month(E)** (review finding 1): the close creates one unless an active global lock for that month already exists (a later global lock, e.g. April 2027, does not count). It is `locked_by` the closer, with audit `period.locked` and `source: year_end_close`. Its id is stored in `year_end_closes.period_lock_id`. **The close itself locks the year for all branches**, whatever branch or later locks exist;
+   - a queued notification to every active Super Admin (review finding 5, below).
 
 **Lock exemption.**
 - The months are locked, so the closing lines are written by a **private** `LedgerService::postClose` path that skips `assertOpen`. It is the same confinement as the back-fill (double-entry R6, finding 6).
 - `postClose` is reached only from `closeYear` / `reopenYear` and takes no bypass flag.
 - It writes only `origin = close` lines, and only on income, expense, head_office, branch_current and retained_earnings accounts. **Never on a money account.** Anything else throws.
+- It writes only lines dated E of the year being closed or reopened. It is the **only** writer allowed in a closed year (review finding 4).
 - L1 (balanced per branch, re-read before commit), L2 and D1–D3 apply as to any posting.
+- **Retained earnings is written only by the close** (review finding 3): `LedgerService` refuses any line on a `retained_earnings` account whose origin is not `close`. The account type is not offered by any picker, `accounts/destinations`, the transfer or the capital paths (they take cash, bank and wallet accounts only).
+- **The back-fill path never writes in a closed year** (review finding 4): the private back-fill path, which skips the lock check, refuses any line dated ≤ E of an active close: "Back-fill of <ref> refused: FY 2026-27 is closed." The run stops, names the entry and adds no line.
 
 **While a year is closed:**
 - **Postings:** `LedgerService::assertOpen` also refuses any date ≤ E of the latest active close: 422 "FY 2026-27 is closed." This backs up the locks.
-- **Unlocks:** `PeriodLockController::unlock` refuses an unlock whose `PeriodLock::reopens()` would reopen any month of a closed year: 422 "FY 2026-27 is closed. Reopen the year before unlocking March 2027." Unlocking a later month that leaves the year closed (e.g. a May 2027 lock above the March global lock) is allowed.
+- **Unlocks:** `PeriodLockController::unlock` refuses
+  - the close's own lock (`year_end_closes.period_lock_id`) while the close is active: 422 "FY 2026-27 is closed. Reopen the year before unlocking March 2027." (review finding 1);
+  - any other unlock whose `PeriodLock::reopens()` would reopen any month of a closed year, with the same message naming the lock's month.
+  - Unlocking a later month that leaves the year closed (e.g. a May 2027 lock above the March global lock, or an April 2027 global lock that existed before the close) is allowed.
 - **Edit, void, reverse** of a `year_end_close` transaction: 422 (API table).
 
 ### R9 Balance and verification
 `ledger:verify` additions:
 - **V5 (changed):** the category account balance **excluding `origin = close` lines** equals the all-time I&E figure.
-- **V7:** for every active close of year [S, E], each branch's income and expense lines dated ≤ E (all origins) net to 0.00 per account. Also: MAIN 32000 = − Σ (`total_net` of active closes), signed (credit for profit).
+- **V7:** for every active close of year [S, E], each branch's income and expense lines dated ≤ E (all origins) net to 0.00 per account. Also: MAIN 32000 = − Σ (`total_net` of active closes), signed (credit for profit). Also (review finding 8): for each active close and branch B, the close's lines on HO in B (non-main B) or on 32000 in MAIN's own closing transaction (MAIN) equal −N(B) as stored in `summary`; V4 still holds after the close.
 - **V8:**
   - `origin = close` lines exist only in `year_end_close` transactions, and those transactions have no other origin;
-  - no line dated in a closed year was created after that year's `closed_at`, except the reopen contras of a close.
+  - for each **active** close, every line dated in [S, E] has `created_at ≤ closed_at`, or belongs to one of that close's own transactions (ids in `summary`) (review finding 7). Only active closes are checked, so a reopen's contras need no exception;
+  - every line on a `retained_earnings` account has `origin = close` (review finding 3).
 - **Double-entry R8 reconciliation** (inter-branch movement = Transfers report "Net"): it now excludes `year_end_close` lines as well as non-main capital.
 
 ### R10 Who runs the close
@@ -303,13 +325,23 @@ How the accounts behave at year end:
 ### R11 Reopen
 - **Which year:** only the **latest** closed year. Otherwise 422 "Reopen FY 2027-28 first."
 - **Reason:** 10–500 characters. Otherwise 422.
+- **Concurrency** (review finding 9): the reopen reads the `year_end_closes` row `FOR UPDATE` and re-checks `status = closed` and "latest closed year" inside the transaction. Of two simultaneous reopens, one posts the contras; the other gets 422 "FY 2026-27 is not closed." and posts nothing.
 - **In one DB transaction:**
   1. Lock the branch rows.
   2. Post one contra per close line, through `postClose`: same transaction, account, branch and date E, sides swapped, `contra_of_id` set, `origin = close`.
   3. Set each closing transaction's status to `void`, so the trial balance period columns leave it out (double-entry R4/D4 basis).
   4. Set `year_end_closes.status = reopened` with the who, when and reason.
+  5. Write `transaction.year_end_reopened` per closing transaction (review finding 6) and `year.reopened` (R12), and queue the Super Admin notification (below).
 - **No locks change.** The Super Admin unlocks months separately (F5), which is audited as today.
 - **Closing again** after a reopen creates a new `year_end_closes` row and new transactions. The old ones stay void with their contras. The net effect on every account equals one clean close (AC 33).
+
+### R11b Compensating controls for close and reopen (review finding 5, Q-A5)
+No second person is required in R1. Instead:
+- **Notification:** on `year.closed` and `year.reopened`, a queued notification (`YearEndNotification`, mail, after commit) goes to **every** active Super Admin, the actor included. (`AccessAlerts` skips Super Admin actors, so this is a separate class.) It gives the year, the actor, the time, the total result and, on a reopen, the reason.
+- **History:** the Year-end screen keeps every close and reopen row of each year (S5).
+- **Banner:** the trial balance of a year that has been reopened and not closed again shows the red banner (S6).
+- **PDF:** the trial balance PDF of a year that was closed again lists "Reopened N time(s)" in its header.
+- Backlog note: when the R2 approval framework (AG-051) exists, make reopening approvable by a second Super Admin.
 
 ### R12 Audit
 Every change writes `AuditLog::record`. `branch_id` is null unless stated.
@@ -322,10 +354,11 @@ Every change writes `AuditLog::record`. `branch_id` is null unless stated.
 | `account.created` | — | 32000 at migration (as double-entry) |
 | `year.closed` (auditable = `year_end_closes`) | null | `{fiscal_year, period_start, period_end, by_branch:{CODE:{income, expense, net, transaction_id, ref_no, lines}}, total_net, global_lock_created}` |
 | `year.reopened` | `{closed_by, closed_at, total_net}` | `{reason, contra_line_ids, transaction_ids}` |
+| `transaction.year_end_reopened` (per closing transaction, `branch_id` = its branch, auditable = the transaction; review finding 6) | `{status: posted}` | `{status: void, reason, contra_line_ids}` |
 | `transaction.year_end_close` (per closing transaction, `branch_id` = its branch; written by `finish()`) | null | as other postings |
 | `period.locked` | — | the lock made by the close, `source: year_end_close` |
 
-The audit log screen (controls S1) gains the event groups "Settings" (`settings.*`) and "Year-end" (`year.*`, `transaction.year_end_close`).
+The audit log screen (controls S1) gains the event groups "Settings" (`settings.*`) and "Year-end" (`year.*`, `transaction.year_end_close`, `transaction.year_end_reopened`).
 
 ### R13 Edge cases
 - **Branch created after a close:** no lines in the closed year. The global lock covers it, so the next close's check 4 passes for it.
@@ -411,7 +444,7 @@ Fiscal year start April unless stated. `Storage::fake('branding')`. Real image b
 18. Given start month 4, Then 2027-03-31 is in FY 2026-27 and 2027-04-01 is in FY 2027-28. Given start month 1, Then 2026-11-18 is in "FY 2026".
 19. Given the trial balance with From 2027-03-01 and To 2027-04-30, Then 422 "From and To must be in the same fiscal year (FY 2026-27: 2026-04-01 to 2027-03-31)." The I&E report accepts the same range.
 20. Given the Y-dataset, no close, and a trial balance for KDY 2027-04-01..2027-04-30, Then every income and expense row has opening 0.00, "Result of earlier years not yet closed" is 24,300.00 Cr, the totals balance, the identity holds on every row, and `earlier_unclosed` is true (amber banner).
-21. Given the reports filter presets, Then "This fiscal year" on 2026-11-18 sets 2026-04-01..2027-03-31, the PDF period reads "FY 2026-27, 2026-04-01 to 2027-03-31", and "Last fiscal year" sets 2025-04-01..2026-03-31.
+21. Given the reports filter presets, Then "This fiscal year" on 2026-11-18 sets 2026-04-01..2027-03-31, the PDF period reads "FY 2026-27, 2026-04-01 to 2027-03-31" (date format `YYYY-MM-DD`; with the default format "FY 2026-27, 1 Apr 2026 to 31 Mar 2027"), and "Last fiscal year" sets 2025-04-01..2026-03-31.
 22. Given a close exists (any status), When SA changes `fiscal_year_start_month`, Then 422 "The fiscal year start cannot be changed after a year-end close." Before any close, the change is 200 and audited.
 
 **Year-end close**
@@ -421,12 +454,12 @@ Fiscal year start April unless stated. `Storage::fake('branding')`. Real image b
 26. Given AC 25, When the trial balance runs for 2026-04-01..2027-03-31, Then by default (pre-closing) it equals Y-1. With `closing_entries=1` it equals Y-2: every income and expense closes at 0.00, eliminations are 0.00, and the identity holds. With `closing_entries=1` and To 2027-03-30, Then 422.
 27. Given AC 25, When the trial balance runs for FY 2027-28 April, by branch and consolidated, Then no virtual row shows. Consolidated Retained earnings is 7,500.00 Cr, and the consolidated Dr and Cr totals equal those of the same consolidated report run before the close.
 28. Given AC 25, When SA closes FY 2026-27 again (or two close requests run at the same time), Then 422 "FY 2026-27 is already closed." Exactly one active `year_end_closes` row and one set of 15 lines exist.
-29. Given `confirm` "2026", Then 422 "Type 2026-27 to confirm." Given FY 2027-28 on 2027-05-01, Then 422 "FY 2027-28 has not ended yet." Given a line dated 2026-03-15 and FY 2025-26 not closed, When closing FY 2026-27, Then 422 "Close FY 2025-26 first."
+29. Given `confirm` "2026", Then 422 "Type 2026-27 to confirm." Given FY 2027-28 on 2027-05-01, Then 422 "FY 2027-28 has not ended yet." Given an **expense** line dated 2026-03-15 and FY 2025-26 not closed, When closing FY 2026-27, Then 422 "Close FY 2025-26 first." Given only a **capital** line dated 2026-03-15 (FY 2025-26 has no income or expense), Then the close is not blocked by FY 2025-26, and the Year-end screen shows FY 2025-26 as "No result to close" (review finding 11).
 30. Given a transaction dated ≤ 2027-03-31 whose lines do not balance (test, triggers bypassed), When closing, Then 422 "1 entries up to March 2027 are not balanced. Run ledger:verify." and nothing is posted.
 31. Given AC 25, When SA unlocks the global March 2027 lock, Then 422 "FY 2026-27 is closed. Reopen the year before unlocking March 2027." Given a global May 2027 lock above it, When SA unlocks May, Then 200 (April–May reopen) and March stays locked.
 32. Given AC 25, When any income, expense, transfer, reclass, void or reversal dated in FY 2026-27 is attempted, Then 422 and nothing is posted. When `PUT`, `void` or `reverse` is called on a `year_end_close` transaction, Then 422 "Year-end closing entries change only by reopening the year."
 33. Given AC 25, When SA reopens FY 2026-27 with the reason "Late supplier bill for March", Then 200. 15 contra lines are added (same accounts, branches and date, sides swapped, `contra_of_id` set, `origin = close`). The 3 transactions have status `void`. The `year_end_closes` row is `reopened` with who, when and reason, `year.reopened` is written, and no period lock changed. Every account's balance equals its value before AC 25. When SA then unlocks March, posts a 1,000.00 Rent expense in KDY on 2027-03-31, re-locks and closes again, Then a new close row and new transactions exist, KDY's result is +23,300.00, Retained earnings is 6,500.00 Cr, and `ledger:verify` passes.
-34. Given a reason under 10 characters, Then 422. Given FY 2026-27 and FY 2027-28 both closed, When SA reopens FY 2026-27, Then 422 "Reopen FY 2027-28 first."
+34. Given a reason under 10 characters, Then 422. Given FY 2026-27 and FY 2027-28 both closed, When SA reopens FY 2026-27, Then 422 "Reopen FY 2027-28 first." Given two reopens of FY 2026-27 at the same time, Then one succeeds with one set of 15 contras and the other gets 422 "FY 2026-27 is not closed." (review finding 9).
 35. Given BA, ACC or CSH, When calling any `/fiscal-years` route, Then 403, and the Year-end menu is hidden. ACC can open a KDY `year_end_close` transaction (read-only), and its MAIN lines show account names only.
 36. Given a year with no income or expense lines but every branch locked, When closed, Then 201 with no transactions, a `year_end_closes` row, and `year.closed` with `total_net` 0.00.
 37. Given March 2027 locked for KDY, GAL and MAIN by branch locks only, When the year is closed, Then an active global lock for 2027-03 exists, `locked_by` SA, with a `period.locked` audit row with `source: year_end_close`. Given a branch MTR created after the close, Then posting to MTR dated 2027-03-20 is refused.
@@ -437,9 +470,33 @@ Fiscal year start April unless stated. `Storage::fake('branding')`. Real image b
 40. Given AC 25, When `ledger:verify` runs, Then V1–V8 pass. V7 confirms every KDY, GAL and MAIN income and expense account nets to 0.00 at 2027-03-31, and 32000 = 7,500.00 Cr. Given a test line inserted on 2027-02-10 after `closed_at` (locks bypassed), Then V8 names it and exits 1.
 41. Given AC 25, Then V5 still matches the I&E all-time figures, and the KDY/GAL/MAIN inter-branch movement for March 2027 still equals the Transfers report "Net" (closing lines excluded).
 42. Given AC 25, Then the I&E, Branch comparison, Transfers and Cash book reports and the dashboard for any range are identical to before the close.
-43. Given the audit log, Then the "Settings" group lists the `settings.*` rows and "Year-end" lists `year.*` and `transaction.year_end_close`. ACC (KDY) sees KDY's `transaction.year_end_close` row but not `year.closed` (no branch).
+43. Given the audit log, Then the "Settings" group lists the `settings.*` rows and "Year-end" lists `year.*`, `transaction.year_end_close` and `transaction.year_end_reopened`. ACC (KDY) sees KDY's `transaction.year_end_close` and, after a reopen, KDY's `transaction.year_end_reopened` row (old `{status: posted}`, new `{status: void, reason, contra_line_ids}`), but not `year.closed` or `year.reopened` (no branch).
+
+**Accounting review findings (added before development)**
+44. (Finding 1a) Given a global April 2027 lock created before the close and March 2027 locked for all branches, When the year is closed, Then the close still creates an active global March 2027 lock and stores its id in `period_lock_id`. When SA then unlocks April 2027, Then 200: April reopens only and March stays closed.
+45. (Finding 1b) Given the AC 37 setup after the close (branch locks plus the close's global March lock), When SA unlocks the global March 2027 lock, Then 422 "FY 2026-27 is closed. Reopen the year before unlocking March 2027." After a reopen, the same unlock is 200.
+46. (Finding 2) Given the Y-dataset, Then the preview's I&E column equals the I&E report for 2026-04-01..2027-03-31 per branch (KDY +24,300.00, GAL −6,800.00, MAIN −10,000.00, total +7,500.00) with difference 0.00. Given a KDY income line whose ledger result differs from the I&E report by 100.00 (test, category lines bypassed), When closing, Then 422 "The ledger result for KDY differs from the Income & Expense report by 100.00. Run ledger:verify." and nothing is posted.
+47. (Finding 3) Given any posting path other than the close (income, expense, transfer, capital, reclass, void, reversal, back-fill), Then no line can be written on the `retained_earnings` account (the service throws), and `accounts`, `accounts/destinations` and the chart pickers never offer it as a money account. Given a test line on 32000 with `origin = posting` (service bypassed), Then `ledger:verify` V8 names it and exits 1.
+48. (Finding 4) Given AC 25, When a back-fill re-run meets an unbalanced (money lines only) transaction dated 2027-02-10, Then it stops with "Back-fill of <ref> refused: FY 2026-27 is closed.", names the entry and adds no line.
+49. (Finding 5) Given AC 25, Then every active Super Admin (the closer included) is sent a queued `YearEndNotification` with the year, the actor, the time and the total result. After AC 33's reopen, the same notification is sent with the reason. The Year-end screen lists both the close and the reopen of FY 2026-27 in its history. A trial balance of FY 2026-27 after the reopen has `meta.fiscal_year.reopened` with the date, the name and the reason (red banner). After closing again, the trial balance PDF header has "Reopened 1 time(s)".
+50. (Finding 6) Given AC 33, Then each of the 3 closing transactions has a `transaction.year_end_reopened` audit row with its branch id, old `{status: posted}` and new `{status: void, reason, contra_line_ids}`.
+51. (Finding 7) Given AC 25, Then `closed_at` is not earlier than the `created_at` of any of the 15 closing lines, and V8 passes on its own lines.
+52. (Finding 8) Given AC 25 and a `summary` changed so that KDY's net differs from its HO close lines (test), Then `ledger:verify` V7 names KDY and exits 1.
+53. (Finding 12) Given AC 25, Then the trial balance PDF title reads "Trial balance - pre-closing" by default and "Trial balance - post-closing" with `closing_entries=1`, and the PDF has the Prepared by / Checked by / Approved by block.
+54. (Finding 15) Given AC 25, Then the Transactions list shows the closing transactions with type "Year-end close" and amount "—", and no list total includes them.
 
 ## 9. Open questions (assumption in bold)
+**Decisions (accountant review 2026-11-18 and product-owner defaults), folded into the body above:**
+- Q-A1 agreed: the branch result goes to its Head office current account; 32000 exists in MAIN only (R7).
+- Q-A2 agreed: one account, "Retained earnings"; no "Current year profit" account.
+- Q-A3 agreed: every branch closed through month(E) is enough; the close keeps its own global lock for month(E) (finding 1, R8 step 7).
+- Q-A4 agreed: one close for all branches, all or nothing.
+- Q-A5: no second person in R1; the reason plus the compensating controls of R11b instead.
+- Q-A6 agreed: the trial balance default is pre-closing; the PDF states which basis it is (S6).
+- Q-A7 agreed: one fiscal year per trial balance.
+- Q-A8: go-live opening balances are balance-sheet only; only a year with income or expense lines must be closed before the next one (R8 check 3).
+- Product owner: the year-end close ships in this feature, in production before the first FY 2027-28 trial balance; currency changeable only before the first ledger entry, decimals fixed at 2; no approval thresholds stored; no US date format; Settings screen Super Admin only; no logo on the login page; no UI for `expense_negative_balance` (if added later, audited as `settings.updated`).
+
 **For the accountant (year-end close):**
 - **Q-A1 Where does a branch's result go?** **Assumed: into its Head office current account, with Retained earnings (32000) in MAIN only (R7).** This follows Q3/Q10 (a branch has no equity) and the textbook branch-account treatment. Consolidation shows one Retained earnings line. The HO current account then no longer equals "funding only", and the Transfers reconciliation excludes the closing lines. The alternative is a 32000 account in every branch, summed on consolidation: simpler branch books, but equity outside MAIN. Please confirm.
 - **Q-A2 Account name:** **"Retained earnings"** (the code was reserved under that name), or "Accumulated surplus/deficit"? Is one account enough, with no separate "Current year profit" account?
