@@ -55,10 +55,12 @@ abstract class ReportTestCase extends AccountingTestCase
     {
         $this->assertStringStartsWith('%PDF', $pdf);
         $pages = [];
-        preg_match_all('/stream\r?\n(.*?)endstream/s', $pdf, $m);
-        foreach ($m[1] as $raw) {
-            // Strip only the one end-of-line before "endstream": the zlib data itself may end in \r or \n bytes.
-            $content = @gzuncompress(preg_replace('/\r?\n\z/', '', $raw));
+        // Slice each stream by its /Length (QA/reviewer R8): the compressed bytes may themselves end in \r or \n,
+        // so trimming end-of-line characters before "endstream" corrupts some streams (flaky, timestamp-dependent).
+        preg_match_all('/\/Length (\d+)[^>]*>>\s*stream\r?\n/', $pdf, $m, PREG_OFFSET_CAPTURE | PREG_SET_ORDER);
+        foreach ($m as $hit) {
+            $raw = substr($pdf, $hit[0][1] + strlen($hit[0][0]), (int) $hit[1][0]);
+            $content = @gzuncompress($raw);
             // Page content streams are text operators; embedded font programs (DejaVu) are binary.
             if ($content === false || str_contains($content, "\0") || ! str_contains($content, ' Tf')) {
                 continue;
