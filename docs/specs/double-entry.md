@@ -636,3 +636,73 @@ Reviewed against `LedgerService.php`, the accounting/controls migrations, `Repor
 - **Q10 — Capital stays in MAIN's books only** (finding 2). Capital can still be received physically into a non-main account, but it is booked as owner's capital in MAIN and as head office funding in the branch. A single legal entity has one capital account, and consolidation then shows exactly one Owner's capital line.
 
 Spec body revised to match this review.
+
+## Accountant sign-off (accountant, 2026-11-18, after development)
+
+Build checked: `git diff eff4c65...HEAD` on `feature/double-entry` (10 commits up to 8e7571f). `php artisan test`: 251 passed (SQLite, run here). I also ran a throwaway probe test (not in the repo). Through the API it posted and read back every transaction type, a reclass on income and on expense, a void after two reclasses, a reversal of a reclassified expense, a reversal of a branch transfer, and a MAIN-only lock. It then ran `ledger:verify` and the trial balance (by branch and consolidated).
+
+### What I verified
+- **Posting lines (entry detail API), by code.** All as R3:
+  - capital into MAIN: Dr 11001 / Cr 31000;
+  - capital into KDY's main account: MAIN Dr 15002 / Cr 31000, then KDY Dr 11003 / Cr 15001;
+  - opening allocation and top-up: MAIN Cr 11001 / Dr 150BB, then branch Dr 11001 / Cr 15001;
+  - fund return GAL→MAIN: GAL Cr Cash / Dr 15001, then MAIN Dr 11001 / Cr 15003;
+  - branch transfer KDY→GAL: 6 lines, KDY Dr 15001 / Cr Cash, MAIN Dr 15003 / Cr 15002, GAL Dr Cash / Cr 15001; debits 3 × amount;
+  - internal transfer: 2 money lines only;
+  - income reclass: Dr old / Cr new. Expense reclass: Dr new / Cr old, taken from the current category.
+
+  Every set balances per branch, and the "Balanced" flag is correct.
+- **Chart and codes.** These are correct:
+  - money 11001+ per branch;
+  - Head office current account 15 + MAIN id in each non-main branch; Branch current account 15 + branch id in MAIN only;
+  - Owner's capital 31000 in MAIN only; 32000 reserved and not created;
+  - 4PPSS / 5PPSS, with the parent's own account at PP00;
+  - inter-branch accounts shown in their own group.
+
+  No new permission key, and the role templates are unchanged.
+- **Each branch balances on its own; eliminations correct.** E-6 / E-7 match: MAIN 1,000,000.00, KDY 332,500.00, GAL 139,000.00, consolidated Dr = Cr 1,091,500.00, MAIN↔KDY 270,000.00 and MAIN↔GAL 110,000.00 net to 0.00, and there is no KDY↔GAL row. On the probe data, consolidated Dr 1,007,500.00 equals total cash/bank. The subset (pair not selected) is not eliminated and carries the note.
+- **Identity on every row.** Opening + period Dr − period Cr = closing on every row and total, by branch and consolidated (AC 44 and the probe, including void and reversal periods).
+- **Void, reverse, reclassify.**
+  - A void after two reclasses posts 6 contras on the lines' own accounts and dates, and every account nets to 0.00.
+  - A reversal mirrors every line, including reclass lines; a reclassified-then-reversed expense nets on the current category only.
+  - The funds check runs on the net credit per money account only.
+  - The same category, or a payee-only edit, posts nothing.
+  - A reversal of a branch transfer has 6 lines. With only MAIN locked, a branch transfer is refused with the "head office side" message, a fund return is refused, and a KDY income is allowed.
+- **Lock exemption.** It lives only in the private `postBackfill` (`LedgerService.php:332`). That path refuses money accounts (`:336`, `:349`), writes `origin = backfill` only and runs no `assertOpen`. The public `backfill(Transaction)` takes nothing else, and no public method has a bypass parameter (AC 40 and the probe). An already-balanced entry is skipped.
+- **`ledger:verify` V1–V6.** All pass on the probe data and the migrated E-dataset. The offender tests for V1/V3 (AC 50), V2-D4 (AC 51) and V4/V5/V6 exist and pass. The period-lock refusal for unbalanced entries is in place.
+- **Back-fill audit row.** It is written once per completed run (user null, branch null) with transactions, lines, by_type, by_branch, locked_periods {branch, period, lines}, money_balances_unchanged and skipped_legacy_voids (ACs 30, 33, 34).
+- **README deploy steps.** They cover: verify first, dry run signed by the accountant, `down`, `migrate`, verify, `up`, timings (19,080 entries in 2 min 25 s, about 8 ms each, plus the dry-run estimate) and recovery for both migrations.
+
+### Deviation from R6: commit every 100 entries. ACCEPTED.
+Each entry is still all-or-nothing: it is a savepoint, and L1 re-reads the whole transaction per branch. A failure rolls back only the open batch, and a re-run completes it (AC 34: same lines and balances as a clean run). The batching does not change any figure. The maintenance-mode / `--force` guard is a good control. With `--force`, entries commit one at a time and the safety check becomes "cached = ledger" for money accounts, which is acceptable. Condition: MUST A below.
+
+### Findings 1–13 of the Accounting review
+| # | Status | Evidence |
+|---|---|---|
+| 1 Branch transfers via Head Office | DONE | `PostingRules.php:63-82`; `LedgerService.php:493` (MAIN message); PostingTest ac8, ac11, ac12; probe |
+| 2 Owner's capital only in MAIN | DONE | `PostingRules.php:42-54`; `ChartOfAccounts::ownerCapital`; PostingTest ac4/ac5; BackfillTest ac32 |
+| 3 Void / reverse fixes | DONE | `LedgerService.php:211`, `:256`, `:528`; ReclassifyTest ac14; probe |
+| 4 Reclassify rules | DONE | `LedgerService.php:169-203`; `TransactionController::update`; ReclassifyTest ac13–15 |
+| 5 Back-fill idempotency and scope | PARTLY | Skip, stop-on-unbalanced, inactive accounts and preflight are done (ac34–37). A stopped run writes **no** audit row (see MUST A). |
+| 6 Lock exemption confined | DONE | `LedgerService.php:307-364`; BackfillTest ac33, ac40 |
+| 7 Void exclusion reconciles | DONE | `DoubleEntryPreflight::lineOffenders` D4 (V2); TrialBalanceTest ac44 |
+| 8 Ledger ↔ Transfers report | DONE | BackfillTest ac29 (KDY +70,000.00, GAL +10,000.00, MAIN −80,000.00) |
+| 9 Inter-branch presentation | DONE | Groups and names as specified; branch id ≤ 999 refused. Ordering defect in consolidated rows: SHOULD B |
+| 10 Head-office detail access | DONE | `TransactionController::show`; VerifyAndControlsTest ac55; probe (MAIN user, 6 lines, read-only) |
+| 11 Year-end close | DONE for this release | 32000 reserved. AG-092 must ship before 31 March 2027. |
+| 12 Drawings / loans | FOLLOW-UP | Out of scope (section 1). The help-text item and the two backlog rows are still to be added. |
+| 13 Maintenance-mode deploy | DONE | README "Deploying the double-entry release"; back-fill command refuses while the app is up |
+
+### Must fix before sign-off
+- **A (MUST, audit trail; finding 5).** `api/app/Services/DoubleEntryBackfill.php:169-192`: if a write run stops, its committed batches stay in the ledger but no audit row is written. BackfillTest.php:341 asserts exactly that ("the stopped run wrote no row"). The `ledger.double_entry_backfilled` rows then add up to fewer lines than there are `origin = backfill` lines. Ledger lines are recorded with no audit row, which breaks the rule that every change is audited.
+
+  Fix: on a non-dry run that throws, write a row such as `ledger.double_entry_backfill_stopped` (user null, branch null) before re-throwing. It must hold the error and the counts **committed** by that run, for example the backfill lines with `created_at` ≥ run start. Then change BackfillTest ac34 to assert that the rows' line counts sum to 33.
+
+### Should fix (do not block)
+- **B.** `api/app/Services/ReportService.php:636/644/654`: consolidated rows are sorted by comparing arrays. PHP compares array length first, so the 4-element money-account keys always sort after the 2-element keys. The API rows and the consolidated **PDF** (signed at month end, F8) list Equity, Inter-branch, Income, Expenses and then Assets, under a second heading. The screen is fine because it groups by `group`. Figures and totals are correct. Fix: compare `group` first, or pad the sort keys to the same length, and assert the row order in TrialBalanceTest ac42.
+- **C.** README.md:111-113, recovery after a back-fill failure:
+  - "Fix the reported entry" gives no method. Say: do not edit data by hand; restore the backup, or escalate to the developer and the accountant.
+  - After `ledger:backfill-double-entry` completes, run `php artisan migrate --force` again. Otherwise `2026_11_22_000001` stays pending and runs again at the next deploy. The re-run is harmless (0 lines and its own audit row), but it is unexpected.
+
+### Verdict: **NOT SIGNED OFF**
+The posting rules, chart, per-branch balance, eliminations, trial balance identity, void, reverse, reclass, lock exemption and V1–V6 are correct. The batching deviation is accepted. Sign-off needs MUST A. I will sign once A is fixed and its test is updated; B and C are recommended in the same pass.
