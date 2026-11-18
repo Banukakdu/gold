@@ -67,6 +67,8 @@ Route::prefix('v1')->group(function () {
             Route::get('categories', [CategoryController::class, 'index']);
             Route::post('categories', [CategoryController::class, 'store'])->middleware('perm:category.manage');
             Route::put('categories/{category}', [CategoryController::class, 'update'])->middleware('perm:category.manage');
+            // Categories spec R9 (AG-071): a branch-only sub-category becomes global. No DELETE route (AG-072, AC 24).
+            Route::post('categories/{category}/promote', [CategoryController::class, 'promote'])->middleware('super');
 
             Route::get('transactions', [TransactionController::class, 'index'])->middleware('perm:transaction.view');
             Route::get('transactions/creators', [TransactionController::class, 'creators'])->middleware('perm:transaction.view');

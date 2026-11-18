@@ -7,11 +7,13 @@ use App\Http\Controllers\Controller;
 use App\Models\Account;
 use App\Models\AuditLog;
 use App\Models\Branch;
+use App\Models\Category;
 use App\Models\PeriodLock;
 use App\Models\Role;
 use App\Models\Transaction;
 use App\Models\User;
 use App\Models\YearEndClose;
+use App\Services\ChartOfAccounts;
 use App\Services\ReportExporter;
 use App\Services\ReportService;
 use App\Support\BranchContext;
@@ -60,6 +62,8 @@ class AuditLogController extends Controller
         // AG-092 R12
         'settings' => [['settings.'], []],
         'year_end' => [['year.'], ['transaction.year_end_close', 'transaction.year_end_reopened']],
+        // Categories spec R8
+        'categories' => [['category.'], []],
     ];
 
     public const LABELS = [
@@ -97,6 +101,9 @@ class AuditLogController extends Controller
         'year.reopened' => 'Fiscal year reopened',
         'transaction.year_end_close' => 'Year-end close recorded',
         'transaction.year_end_reopened' => 'Year-end close cancelled (year reopened)',
+        'category.created' => 'Category added',
+        'category.updated' => 'Category changed',
+        'category.promoted' => 'Category made global',
     ];
 
     public function index(Request $request)
@@ -334,6 +341,7 @@ class AuditLogController extends Controller
             'role' => Role::whereIn('id', $ids(Role::class))->pluck('name', 'id'),
             'account' => Account::withoutGlobalScopes()->whereIn('id', $ids(Account::class))->pluck('name', 'id'),
             'branch' => Branch::whereIn('id', $ids(Branch::class))->pluck('code', 'id'),
+            'category' => Category::with('parent:id,name')->whereIn('id', $ids(Category::class))->get()->keyBy('id'),
             'lock' => PeriodLock::with('branch:id,code')->whereIn('id', $ids(PeriodLock::class))->get()->keyBy('id'),
         ];
     }
@@ -348,6 +356,10 @@ class AuditLogController extends Controller
             Role::class => $s['role'][$id] ?? ($a->new_values['name'] ?? "#{$id}"),
             Account::class => $s['account'][$id] ?? "#{$id}",
             Branch::class => $s['branch'][$id] ?? "#{$id}",
+            // Current name with its code; the name at the time is in old/new values (R10).
+            Category::class => isset($s['category'][$id])
+                ? ChartOfAccounts::categoryAccountName($s['category'][$id]).' ('.$s['category'][$id]->ledger_code.')'
+                : "#{$id}",
             PeriodLock::class => isset($s['lock'][$id])
                 ? PeriodLock::label($s['lock'][$id]->period).' ('.($s['lock'][$id]->branch->code ?? 'all branches').')'
                 : "#{$id}",
