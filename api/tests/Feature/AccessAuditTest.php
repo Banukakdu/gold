@@ -221,4 +221,21 @@ class AccessAuditTest extends UsersAndRolesTestCase
         $this->admin($this->kdy)->putJson("/api/v1/roles/{$viewer->id}", ['permissions' => ['transaction.view', 'report.view']])->assertOk();
         $this->assertCount($count, Notification::sent($this->admin, AccessChangedNotification::class));
     }
+
+    public function test_super_admins_are_alerted_when_a_branch_admin_changes_email_or_status_or_resends_invite(): void
+    {
+        $badmin = $this->userIn($this->kdy, 'Branch Admin');
+        $u = $this->userIn($this->kdy, 'Cashier');
+
+        $this->as($badmin, $this->kdy)->putJson("/api/v1/users/{$u->id}", ['email' => 'changed@example.com'])->assertOk();
+        $this->as($badmin, $this->kdy)->postJson("/api/v1/users/{$u->id}/resend-invite")->assertOk();
+        $this->as($badmin, $this->kdy)->putJson("/api/v1/users/{$u->id}", ['phone' => '0771234567'])->assertOk(); // not sensitive
+
+        $sent = collect(Notification::sent($this->admin, AccessChangedNotification::class));
+        $updated = $sent->where('event', 'user.updated');
+        $this->assertCount(1, $updated);
+        $this->assertSame('changed@example.com', $updated->first()->new['email']);
+        $this->assertNotSame('changed@example.com', $updated->first()->old['email']);
+        $this->assertCount(1, $sent->where('event', 'user.invite_resent'));
+    }
 }

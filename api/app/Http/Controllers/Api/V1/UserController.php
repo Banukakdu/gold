@@ -184,6 +184,7 @@ class UserController extends Controller
         }
         AuditLog::record('user.invite_resent', $user, null, ['user_id' => $user->id, 'email' => $user->email, 'branch_id' => $branchId], $branchId);
         $this->sendInvitation($user);
+        AccessAlerts::notify('user.invite_resent', $branchId, "{$user->name} <{$user->email}>", null, ['email' => $user->email]);
 
         return ['ok' => true];
     }
@@ -226,6 +227,12 @@ class UserController extends Controller
             }
             AuditLog::record('user.updated', $user, $old, $data, $branchId);
         });
+        // Accountant follow-up: email/status changes by a Branch Admin are sensitive (e.g. redirecting an invitation).
+        $sensitive = array_intersect_key($data, array_flip(['email', 'status']));
+        $changed = array_filter($sensitive, fn ($v, $k) => ($old[$k] ?? null) !== $v, ARRAY_FILTER_USE_BOTH);
+        if ($changed) {
+            AccessAlerts::notify('user.updated', $branchId, "{$user->name} <{$user->email}>", array_intersect_key($old, $changed), $changed);
+        }
 
         return $user->fresh();
     }
