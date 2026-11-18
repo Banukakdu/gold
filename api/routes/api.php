@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\BranchController;
 use App\Http\Controllers\Api\V1\CategoryController;
 use App\Http\Controllers\Api\V1\DashboardController;
+use App\Http\Controllers\Api\V1\ReportController;
 use App\Http\Controllers\Api\V1\RoleController;
 use App\Http\Controllers\Api\V1\TransactionController;
 use App\Http\Controllers\Api\V1\TransferController;
@@ -22,6 +23,13 @@ Route::prefix('v1')->group(function () {
         // Everything below runs in the context of the branch in X-Branch-Id
         Route::middleware('branch')->group(function () {
             Route::get('dashboard', DashboardController::class)->middleware('perm:report.dashboard');
+
+            // AG-082..085 reports (docs/specs/reports.md)
+            Route::get('reports/income-expense', [ReportController::class, 'incomeExpense'])->middleware('perm:report.view');
+            Route::get('reports/branch-comparison', [ReportController::class, 'branchComparison'])->middleware('perm:report.view');
+            Route::get('reports/transfers', [ReportController::class, 'transfers'])->middleware('perm:report.view');
+            Route::get('reports/cash-book', [ReportController::class, 'cashBook'])->middleware('perm:report.view');
+            Route::post('reports/{name}/export', [ReportController::class, 'export'])->middleware('perm:report.export');
 
             Route::get('branches', [BranchController::class, 'index']);
             Route::post('branches', [BranchController::class, 'store'])->middleware('super');

@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Account;
 use App\Models\Branch;
 use App\Models\Transaction;
+use App\Services\ReportService;
 use App\Support\BranchContext;
 use App\Support\Money;
 use Illuminate\Http\Request;
@@ -21,37 +22,47 @@ class DashboardController extends Controller
         $to = $d['to'] ?? now()->toDateString();
         $ctx = app(BranchContext::class);
 
-        $posted = Transaction::where('status', 'posted')->whereDate('txn_date', '>=', $from)->whereDate('txn_date', '<=', $to);
-        $income = (clone $posted)->where('type', 'income')->sum('amount');
-        $expense = (clone $posted)->where('type', 'expense')->sum('amount');
+        // Accounting review finding 3: same basis as the reports (R3). Originals (posted or reversed) count on their
+        // date, reversals count on theirs with the opposite sign; voided entries never count.
+        $reports = app(ReportService::class);
+        $x = $reports->cents('t.amount');
+        $signed = "CASE WHEN t.type = 'reversal' THEN -$x ELSE $x END";
+        $counted = fn () => $reports->countedTransactions([Transaction::INCOME, Transaction::EXPENSE])
+            ->when($ctx->isScoped(), fn ($q) => $q->where('t.branch_id', $ctx->branchId));
+        $inPeriod = fn () => $counted()->whereDate('t.txn_date', '>=', $from)->whereDate('t.txn_date', '<=', $to);
 
-        $topExpenses = Transaction::query()
-            ->join('categories as c', 'c.id', '=', 'transactions.category_id')
+        $totals = $inPeriod()->groupByRaw('COALESCE(o.type, t.type)')
+            ->selectRaw("COALESCE(o.type, t.type) as etype, SUM($signed) as cents")->pluck('cents', 'etype');
+        $income = (int) ($totals[Transaction::INCOME] ?? 0);
+        $expense = (int) ($totals[Transaction::EXPENSE] ?? 0);
+
+        $topExpenses = $inPeriod()
+            ->join('categories as c', 'c.id', '=', DB::raw('COALESCE(o.category_id, t.category_id)'))
             ->leftJoin('categories as p', 'p.id', '=', 'c.parent_id')
-            ->where('transactions.type', 'expense')->where('transactions.status', 'posted')
-            ->whereDate('txn_date', '>=', $from)->whereDate('txn_date', '<=', $to)
+            ->whereRaw('COALESCE(o.type, t.type) = ?', [Transaction::EXPENSE])
             ->groupBy(DB::raw('COALESCE(p.name, c.name)'))
-            ->selectRaw('COALESCE(p.name, c.name) as category, SUM(transactions.amount) as total')
-            ->orderByDesc('total')->limit(5)->get();
+            ->selectRaw("COALESCE(p.name, c.name) as category, SUM($signed) as cents")
+            ->orderByDesc('cents')->limit(5)->get()
+            ->map(fn ($r) => ['category' => $r->category, 'total' => Money::fromCents((int) $r->cents)]);
 
         $months = collect(range(11, 0))->map(fn ($i) => now()->startOfMonth()->subMonths($i));
-        $trendRows = Transaction::where('status', 'posted')->whereIn('type', ['income', 'expense'])
-            ->whereDate('txn_date', '>=', $months->first()->toDateString())
-            ->get(['type', 'txn_date', 'amount'])
-            ->groupBy(fn ($t) => $t->txn_date->format('Y-m'));
+        $trendRows = $counted()->whereDate('t.txn_date', '>=', $months->first()->toDateString())
+            ->selectRaw("COALESCE(o.type, t.type) as etype, t.txn_date, $signed as cents")->get()
+            ->groupBy(fn ($t) => substr($t->txn_date, 0, 7));
+        $sum = fn (string $month, string $type) => Money::fromCents((int) ($trendRows[$month] ?? collect())->where('etype', $type)->sum(fn ($r) => (int) $r->cents));
         $trend = $months->map(fn ($m) => [
             'month' => $m->format('Y-m'),
-            'income' => Money::add(...($trendRows[$m->format('Y-m')] ?? collect())->where('type', 'income')->pluck('amount')->all() ?: [0]),
-            'expense' => Money::add(...($trendRows[$m->format('Y-m')] ?? collect())->where('type', 'expense')->pluck('amount')->all() ?: [0]),
+            'income' => $sum($m->format('Y-m'), Transaction::INCOME),
+            'expense' => $sum($m->format('Y-m'), Transaction::EXPENSE),
         ]);
 
         return [
             'scope' => $ctx->isScoped() ? 'branch' : 'all',
             'from' => $from, 'to' => $to,
             'total_balance' => Money::add(Account::sum('current_balance')),
-            'income' => Money::add($income),
-            'expense' => Money::add($expense),
-            'net' => Money::fromCents(Money::toCents($income) - Money::toCents($expense)),
+            'income' => Money::fromCents($income),
+            'expense' => Money::fromCents($expense),
+            'net' => Money::fromCents($income - $expense),
             'accounts' => Account::with('branch:id,code,name')->where('status', 'active')->get(['id', 'branch_id', 'name', 'type', 'current_balance']),
             'branch_balances' => $ctx->isScoped() ? null : Branch::orderByDesc('is_main')->orderBy('name')->get(['id', 'code', 'name'])
                 ->map(fn ($b) => $b->only(['id', 'code', 'name']) + ['balance' => Money::add(Account::withoutGlobalScopes()->where('branch_id', $b->id)->sum('current_balance'))]),

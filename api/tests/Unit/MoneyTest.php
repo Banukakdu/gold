@@ -17,4 +17,12 @@ class MoneyTest extends TestCase
         $this->assertSame('0.30', Money::add('0.10', '0.20')); // no float drift
         $this->assertSame(1, Money::cmp('10.01', '10'));
     }
+
+    public function test_format_for_display(): void
+    {
+        $this->assertSame('1,234,567.50', Money::format('1234567.5'));
+        $this->assertSame('-1,234.56', Money::format('-1234.56'));
+        $this->assertSame('-0.05', Money::format('-0.05'));
+        $this->assertSame('0.00', Money::format(null));
+    }
 }

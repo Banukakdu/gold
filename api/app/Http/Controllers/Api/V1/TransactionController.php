@@ -5,10 +5,12 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Models\Account;
 use App\Models\AuditLog;
+use App\Models\Branch;
 use App\Models\PeriodLock;
 use App\Models\Transaction;
 use App\Models\User;
 use App\Services\LedgerService;
+use App\Support\BranchContext;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -25,7 +27,19 @@ class TransactionController extends Controller
             'account_id' => 'nullable|integer', 'category_id' => 'nullable|integer',
             'created_by' => 'nullable|integer', 'min' => 'nullable|numeric', 'max' => 'nullable|numeric',
             'q' => 'nullable|string|max:100', 'per_page' => 'nullable|integer|max:200',
+            'branches' => 'nullable|array', 'branches.*' => 'integer|exists:branches,id', 'category_only' => 'nullable|boolean',
         ]);
+        // Reports spec E1: branches[] narrows All mode; in branch mode it may only name the active branch.
+        $ctx = app(BranchContext::class);
+        $branches = array_map('intval', $f['branches'] ?? []);
+        if ($ctx->isScoped()) {
+            foreach ($branches as $id) {
+                if ($id !== $ctx->branchId) {
+                    abort(403, 'You do not have access to branch '.Branch::find($id)->code.'.');
+                }
+            }
+        }
+        $categoryOnly = (bool) ($f['category_only'] ?? false);
 
         $q = Transaction::with(['branch:id,code,name', 'category:id,name,parent_id', 'category.parent:id,name',
             'account:id,name', 'fromAccount:id,name,branch_id', 'toAccount:id,name,branch_id', 'creator:id,name,status,is_super_admin'])
@@ -36,7 +50,10 @@ class TransactionController extends Controller
             ->when($f['type'] ?? null, fn ($q, $v) => $q->whereIn('type', explode(',', $v)))
             ->when($f['status'] ?? null, fn ($q, $v) => $q->where('status', $v))
             ->when($f['account_id'] ?? null, fn ($q, $v) => $q->where(fn ($w) => $w->where('account_id', $v)->orWhere('from_account_id', $v)->orWhere('to_account_id', $v)))
-            ->when($f['category_id'] ?? null, fn ($q, $v) => $q->where(fn ($w) => $w->where('category_id', $v)->orWhereIn('category_id', fn ($s) => $s->select('id')->from('categories')->where('parent_id', $v))))
+            ->when($branches, fn ($q, $v) => $q->whereIn('transactions.branch_id', $v))
+            ->when($f['category_id'] ?? null, fn ($q, $v) => $categoryOnly
+                ? $q->where('category_id', $v)
+                : $q->where(fn ($w) => $w->where('category_id', $v)->orWhereIn('category_id', fn ($s) => $s->select('id')->from('categories')->where('parent_id', $v))))
             ->when($f['created_by'] ?? null, fn ($q, $v) => $q->where('created_by', $v))
             ->when($f['min'] ?? null, fn ($q, $v) => $q->where('amount', '>=', $v))
             ->when($f['max'] ?? null, fn ($q, $v) => $q->where('amount', '<=', $v))
