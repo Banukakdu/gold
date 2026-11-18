@@ -9,6 +9,8 @@ use App\Models\Role;
 use App\Models\User;
 use Database\Seeders\DatabaseSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
 
 abstract class AccountingTestCase extends TestCase
@@ -20,6 +22,18 @@ abstract class AccountingTestCase extends TestCase
     protected Branch $main;
 
     protected Account $mainAcc;
+
+    /**
+     * MySQL keeps AUTO_INCREMENT counters when a test transaction rolls back, so branch ids would grow across the suite
+     * and pass the inter-branch code limit (id 999, double-entry R1). Reset the counter before each test's transaction
+     * (InnoDB sets it to MAX(id) + 1, i.e. 1 on the empty table). SQLite starts every test from a fresh database.
+     */
+    protected function beforeRefreshingDatabase()
+    {
+        if (DB::connection()->getDriverName() === 'mysql' && Schema::hasTable('branches')) {
+            DB::statement('ALTER TABLE branches AUTO_INCREMENT = 1');
+        }
+    }
 
     protected function setUp(): void
     {
