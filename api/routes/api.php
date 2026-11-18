@@ -1,0 +1,62 @@
+<?php
+
+use App\Http\Controllers\Api\V1\AccountController;
+use App\Http\Controllers\Api\V1\AuthController;
+use App\Http\Controllers\Api\V1\BranchController;
+use App\Http\Controllers\Api\V1\CategoryController;
+use App\Http\Controllers\Api\V1\DashboardController;
+use App\Http\Controllers\Api\V1\RoleController;
+use App\Http\Controllers\Api\V1\TransactionController;
+use App\Http\Controllers\Api\V1\TransferController;
+use App\Http\Controllers\Api\V1\UserController;
+use Illuminate\Support\Facades\Route;
+
+Route::prefix('v1')->group(function () {
+    Route::post('auth/login', [AuthController::class, 'login']);
+
+    Route::middleware('auth:sanctum')->group(function () {
+        Route::post('auth/logout', [AuthController::class, 'logout']);
+        Route::get('me', [AuthController::class, 'me']);
+
+        // Everything below runs in the context of the branch in X-Branch-Id
+        Route::middleware('branch')->group(function () {
+            Route::get('dashboard', DashboardController::class)->middleware('perm:report.dashboard');
+
+            Route::get('branches', [BranchController::class, 'index']);
+            Route::post('branches', [BranchController::class, 'store'])->middleware('super');
+            Route::put('branches/{branch}', [BranchController::class, 'update'])->middleware('super');
+
+            Route::get('accounts', [AccountController::class, 'index'])->middleware('perm:account.view');
+            Route::get('accounts/destinations', [AccountController::class, 'destinations'])->middleware('perm:transfer.create');
+            Route::post('accounts', [AccountController::class, 'store'])->middleware('perm:account.manage');
+            Route::put('accounts/{account}', [AccountController::class, 'update'])->middleware('perm:account.manage');
+            Route::get('accounts/{account}/statement', [AccountController::class, 'statement'])->middleware('perm:account.view');
+
+            Route::get('categories', [CategoryController::class, 'index']);
+            Route::post('categories', [CategoryController::class, 'store'])->middleware('perm:category.manage');
+            Route::put('categories/{category}', [CategoryController::class, 'update'])->middleware('perm:category.manage');
+
+            Route::get('transactions', [TransactionController::class, 'index'])->middleware('perm:transaction.view');
+            Route::get('transactions/{transaction}', [TransactionController::class, 'show'])->middleware('perm:transaction.view');
+            Route::put('transactions/{transaction}', [TransactionController::class, 'update']);
+            Route::post('transactions/{transaction}/void', [TransactionController::class, 'void']);
+            Route::post('transactions/{transaction}/reverse', [TransferController::class, 'reverse'])->middleware('perm:transfer.reverse');
+            Route::post('incomes', [TransactionController::class, 'storeIncome'])->middleware('perm:income.create');
+            Route::post('expenses', [TransactionController::class, 'storeExpense'])->middleware('perm:expense.create');
+
+            Route::post('capital', [TransferController::class, 'capital'])->middleware('super');
+            Route::post('allocations', [TransferController::class, 'allocate'])->middleware('super');
+            Route::post('transfers', [TransferController::class, 'transfer'])->middleware('perm:transfer.create');
+
+            Route::get('permissions', [RoleController::class, 'permissions'])->middleware('perm:role.view');
+            Route::get('roles', [RoleController::class, 'index'])->middleware('perm:role.view');
+            Route::post('roles', [RoleController::class, 'store'])->middleware('perm:role.manage');
+            Route::put('roles/{role}', [RoleController::class, 'update'])->middleware('perm:role.manage');
+
+            Route::get('users', [UserController::class, 'index'])->middleware('perm:user.view');
+            Route::post('users', [UserController::class, 'store'])->middleware('perm:user.create');
+            Route::put('users/{user}', [UserController::class, 'update'])->middleware('perm:user.edit');
+            Route::post('users/{user}/role', [UserController::class, 'assignRole'])->middleware('perm:user.edit');
+        });
+    });
+});
