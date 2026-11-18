@@ -122,21 +122,6 @@ class BackfillTest extends TestCase
     }
 
     /** Responses of the four reports, the dashboard and the branch list (reports spec E-1..E-4 periods). */
-    /** The I&E shows each category's ledger code (categories review finding 8); the back-fill assigns the codes. */
-    private function withoutCodes(array $r): array
-    {
-        foreach (['income', 'expense'] as $t) {
-            foreach ($r[$t]['categories'] ?? [] as $i => $c) {
-                unset($r[$t]['categories'][$i]['code']);
-                foreach ($c['subs'] as $j => $s) {
-                    unset($r[$t]['categories'][$i]['subs'][$j]['code']);
-                }
-            }
-        }
-
-        return $r;
-    }
-
     private function reportResponses(): array
     {
         $out = [];
@@ -165,6 +150,21 @@ class BackfillTest extends TestCase
         }
 
         return $out;
+    }
+
+    /** The I&E shows each category's ledger code (categories review finding 8); the back-fill assigns the codes. */
+    private function withoutCodes(array $r): array
+    {
+        foreach (['income', 'expense'] as $t) {
+            foreach ($r[$t]['categories'] ?? [] as $i => $c) {
+                unset($r[$t]['categories'][$i]['code']);
+                foreach ($c['subs'] as $j => $s) {
+                    unset($r[$t]['categories'][$i]['subs'][$j]['code']);
+                }
+            }
+        }
+
+        return $r;
     }
 
     public function test_e5_ac30_ac31_ac49_backfill_of_the_e_dataset_and_trial_balance_e6_e7(): void
@@ -219,8 +219,14 @@ class BackfillTest extends TestCase
     {
         $this->legacyExample();
         $before = $this->reportResponses();
+        $codes = fn () => collect($this->asAdmin()->getJson('/api/v1/reports/income-expense?from=2026-10-01&to=2026-10-31')->json('income.categories'))
+            ->flatMap(fn ($c) => [[$c['id'], $c['code']], ...array_map(fn ($s) => [$s['id'] ?? $c['id'], $s['code']], $c['subs'])])->all();
+        $this->assertSame([null], array_values(array_unique(array_column($codes(), 1))), 'no codes before the back-fill');
         $this->migrate();
         $after = $this->reportResponses();
+        foreach ($codes() as [$id, $code]) {
+            $this->assertSame(Category::find($id)->ledger_code, $code);
+        }
         foreach ($before as $key => $response) {
             $this->assertSame($response, $after[$key], $key);
         }
