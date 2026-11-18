@@ -2,7 +2,9 @@
 
 namespace App\Support;
 
+use App\Models\Account;
 use App\Models\Transaction;
+use App\Services\ChartOfAccounts;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
@@ -36,9 +38,9 @@ final class DoubleEntryPreflight
         $balances = DB::table('accounts as a')->join('branches as b', 'b.id', '=', 'a.branch_id')
             ->leftJoin('ledger_entries as le', 'le.account_id', '=', 'a.id')
             ->groupBy('a.id', 'a.name', 'b.code', 'a.current_balance')
-            ->selectRaw('a.id, a.name, b.code, a.current_balance, COALESCE(SUM(le.debit - le.credit), 0) as ledger')
+            ->selectRaw('a.id, a.name, b.code, a.current_balance, COALESCE(SUM('.Money::sqlCents('le.debit').' - '.Money::sqlCents('le.credit').'), 0) as ledger')
             ->orderBy('a.id')->get()
-            ->filter(fn ($r) => Money::cmp($r->current_balance, $r->ledger) !== 0)->values();
+            ->filter(fn ($r) => Money::toCents($r->current_balance) !== (int) $r->ledger)->values();
         if ($balances->isNotEmpty()) {
             $out[] = "{$balances->count()} account balance(s) differ from the ledger: "
                 .$list($balances, fn ($r) => "#{$r->id} {$r->code} {$r->name} (current_balance ".Money::add($r->current_balance).', ledger '.Money::add($r->ledger).')');
@@ -59,6 +61,39 @@ final class DoubleEntryPreflight
         if ($otherBranch->isNotEmpty()) {
             $out[] = "{$otherBranch->count()} income/expense entr(ies) use another branch's category: "
                 .$list($otherBranch, fn ($r) => ($r->ref_no ?? "#{$r->id}")." ({$r->name})");
+        }
+
+        return array_merge($out, self::chartLimits());
+    }
+
+    /**
+     * Chart code limits (R1), checked here so the chart step after the DDL cannot fail on them (review R1): inter-branch
+     * codes are 15 + a 3-digit branch id, money codes 11001-11999 per branch, category codes 2 digits per level.
+     *
+     * @return string[]
+     */
+    public static function chartLimits(): array
+    {
+        $out = [];
+        $max = ChartOfAccounts::MAX_BRANCH_ID;
+        $big = DB::table('branches')->where('id', '>', $max)->orderBy('id')->get(['id', 'code']);
+        if ($big->isNotEmpty()) {
+            $out[] = "{$big->count()} branch(es) have an id above {$max}, the limit of the inter-branch account codes: "
+                .$big->map(fn ($b) => "{$b->code} (id {$b->id})")->implode(', ');
+        }
+        $money = DB::table('accounts as a')->join('branches as b', 'b.id', '=', 'a.branch_id')->whereIn('a.type', Account::MONEY_TYPES)
+            ->groupBy('b.code')->havingRaw('COUNT(*) > 999')->selectRaw('b.code, COUNT(*) as n')->get();
+        foreach ($money as $m) {
+            $out[] = "Branch {$m->code} has {$m->n} cash, bank and wallet accounts; codes 11001-11999 allow 999.";
+        }
+        $parents = DB::table('categories')->whereNull('parent_id')->groupBy('type')->havingRaw('COUNT(*) > 99')->selectRaw('type, COUNT(*) as n')->get();
+        foreach ($parents as $p) {
+            $out[] = "{$p->n} top-level {$p->type} categories; category codes allow 99 per type.";
+        }
+        $subs = DB::table('categories as c')->join('categories as p', 'p.id', '=', 'c.parent_id')
+            ->groupBy('p.id', 'p.name')->havingRaw('COUNT(*) > 99')->selectRaw('p.name, COUNT(*) as n')->get();
+        foreach ($subs as $p) {
+            $out[] = "Category {$p->name} has {$p->n} sub-categories; category codes allow 99 under one parent.";
         }
 
         return $out;

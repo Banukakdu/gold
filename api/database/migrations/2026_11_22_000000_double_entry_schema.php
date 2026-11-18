@@ -21,46 +21,75 @@ return new class extends Migration
 {
     public const TRIGGER = 'ledger_entries_line_check';
 
+    /**
+     * Resumable (review R1): MySQL commits each DDL statement, so a run that stops part-way leaves some columns,
+     * keys or the trigger behind. Every step checks first and only adds what is missing, so running `migrate`
+     * again completes the schema. The preflight runs before any change, every time.
+     */
     public function up(): void
     {
-        // MySQL DDL is not transactional: refuse to start, listing the offenders, rather than stop half-way.
+        // Refuse to start, listing the offenders, rather than stop half-way (MySQL DDL is not transactional).
         MigrationPreflight::assertCanCreateTriggers();
         DoubleEntryPreflight::assertReady();
 
         $driver = DB::connection()->getDriverName();
-        Schema::table('accounts', function (Blueprint $table) {
-            $table->string('class', 10)->default('asset')->after('type');
-            $table->string('code', 10)->nullable()->after('branch_id');
-        });
-        if ($driver === 'sqlite') {
-            // Native ADD COLUMN ... REFERENCES: the schema builder would rebuild the table to add a foreign key, and a
-            // rebuild inside the migration transaction cannot switch foreign keys off (rows of transactions point here).
-            DB::statement('ALTER TABLE accounts ADD COLUMN category_id INTEGER NULL REFERENCES categories(id) ON DELETE RESTRICT');
-            DB::statement('ALTER TABLE accounts ADD COLUMN counterparty_branch_id INTEGER NULL REFERENCES branches(id) ON DELETE RESTRICT');
-        } else {
-            Schema::table('accounts', function (Blueprint $table) {
-                $table->foreignId('category_id')->nullable()->after('class')->constrained('categories')->restrictOnDelete();
-                $table->foreignId('counterparty_branch_id')->nullable()->after('category_id')->constrained('branches')->restrictOnDelete();
-            });
+        if (! Schema::hasColumn('accounts', 'class')) {
+            Schema::table('accounts', fn (Blueprint $table) => $table->string('class', 10)->default('asset')->after('type'));
+        }
+        if (! Schema::hasColumn('accounts', 'code')) {
+            Schema::table('accounts', fn (Blueprint $table) => $table->string('code', 10)->nullable()->after('branch_id'));
+        }
+        foreach (['category_id' => ['categories', 'class'], 'counterparty_branch_id' => ['branches', 'category_id']] as $column => [$on, $after]) {
+            if ($driver === 'sqlite') {
+                // Native ADD COLUMN ... REFERENCES: the schema builder would rebuild the table to add a foreign key, and a
+                // rebuild inside the migration transaction cannot switch foreign keys off (rows of transactions point here).
+                if (! Schema::hasColumn('accounts', $column)) {
+                    DB::statement("ALTER TABLE accounts ADD COLUMN {$column} INTEGER NULL REFERENCES {$on}(id) ON DELETE RESTRICT");
+                }
+
+                continue;
+            }
+            if (! Schema::hasColumn('accounts', $column)) {
+                Schema::table('accounts', fn (Blueprint $table) => $table->unsignedBigInteger($column)->nullable()->after($after));
+            }
+            if (! self::hasForeignKey('accounts', $column)) {
+                Schema::table('accounts', fn (Blueprint $table) => $table->foreign($column)->references('id')->on($on)->restrictOnDelete());
+            }
         }
 
         // The unique keys start with branch_id, so MySQL keeps a separate index for the branch_id foreign key
         // (accounts_branch_id_foreign); the new foreign keys get their own single-column indexes above.
-        Schema::table('accounts', function (Blueprint $table) {
-            $table->unique(['branch_id', 'code']);
-            $table->unique(['branch_id', 'category_id']);
-            $table->unique(['branch_id', 'counterparty_branch_id']);
-        });
+        foreach ([['branch_id', 'code'], ['branch_id', 'category_id'], ['branch_id', 'counterparty_branch_id']] as $columns) {
+            if (! Schema::hasIndex('accounts', $columns, 'unique')) {
+                Schema::table('accounts', fn (Blueprint $table) => $table->unique($columns));
+            }
+        }
 
-        Schema::table('categories', function (Blueprint $table) {
-            $table->string('ledger_code', 5)->nullable()->unique();
-        });
+        if (! Schema::hasColumn('categories', 'ledger_code')) {
+            Schema::table('categories', fn (Blueprint $table) => $table->string('ledger_code', 5)->nullable());
+        }
+        if (! Schema::hasIndex('categories', ['ledger_code'], 'unique')) {
+            Schema::table('categories', fn (Blueprint $table) => $table->unique('ledger_code'));
+        }
 
-        Schema::table('ledger_entries', function (Blueprint $table) {
-            $table->string('origin', 10)->default('posting');
-        });
+        if (! Schema::hasColumn('ledger_entries', 'origin')) {
+            Schema::table('ledger_entries', fn (Blueprint $table) => $table->string('origin', 10)->default('posting'));
+        }
 
+        // A trigger left by a run that stopped (or an older definition) is replaced, never duplicated (MySQL error 1359).
+        DB::unprepared('DROP TRIGGER IF EXISTS '.self::TRIGGER);
         DB::unprepared(self::triggerSql($driver));
+    }
+
+    private static function hasForeignKey(string $table, string $column): bool
+    {
+        foreach (Schema::getForeignKeys($table) as $fk) {
+            if ($fk['columns'] === [$column]) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public function down(): void
