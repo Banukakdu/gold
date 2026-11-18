@@ -58,7 +58,9 @@ class IsolationTest extends TransactionSearchTestCase
         $byRef = collect($sheet['rows'])->keyBy(fn ($row) => (string) $row['Ref no']->getValue());
         $this->assertSame('Reversal (in)', $byRef[$this->e['E7']->ref_no]['Type']->getValue());
         $this->assertSame('Branch transfer (in)', $byRef[$this->e['E6']->ref_no]['Type']->getValue());
-        $this->assertSame('In', $byRef[$this->e['E7']->ref_no]['Direction']->getValue());
+        // Sign-off C1: GAL received E6 and the reversal E7 sent the money back.
+        $this->assertSame('Out', $byRef[$this->e['E7']->ref_no]['Direction']->getValue());
+        $this->assertSame('In', $byRef[$this->e['E6']->ref_no]['Direction']->getValue());
     }
 
     public function test_ac9_creators_follow_the_scope_set(): void

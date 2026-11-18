@@ -44,20 +44,28 @@ final class TransactionFilters
     }
 
     /**
-     * Accounting review finding 6 (export Direction column): In = received from outside the scope set, Out = sent to a
-     * branch outside it, null = no other branch (income, expense, capital, internal) or both sides in scope.
+     * Export Direction column (accounting review finding 6, sign-off C1): the way the money moved for the branches in
+     * scope. The sender is branch_id and the receiver related_branch_id, swapped on a reversal row (it sends the money
+     * back). In = only the receiver is in scope, Out = only the sender is, null = no other branch (income, expense,
+     * capital, internal transfer, year-end close) or both sides in scope (All mode without branches[]).
      */
     public function direction(Transaction $t): ?string
     {
-        if ($this->isIncoming($t)) {
-            return 'In';
+        if ($this->scope === null || $t->related_branch_id === null) {
+            return null;
         }
-        $related = $t->related_branch_id === null ? null : (int) $t->related_branch_id;
-        if ($this->scope !== null && $related !== null && $related !== (int) $t->branch_id && ! in_array($related, $this->scope, true)) {
-            return 'Out';
+        [$sender, $receiver] = [(int) $t->branch_id, (int) $t->related_branch_id];
+        if ($t->type === Transaction::REVERSAL) {
+            [$sender, $receiver] = [$receiver, $sender];
         }
+        $senderIn = in_array($sender, $this->scope, true);
+        $receiverIn = in_array($receiver, $this->scope, true);
 
-        return null;
+        return match (true) {
+            $receiverIn && ! $senderIn => 'In',
+            $senderIn && ! $receiverIn => 'Out',
+            default => null,
+        };
     }
 
     /** Void / Reverse / Edit / Files follow transactions.branch_id (double-entry R10). */

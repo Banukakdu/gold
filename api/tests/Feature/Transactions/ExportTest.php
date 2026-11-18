@@ -124,7 +124,44 @@ class ExportTest extends TransactionSearchTestCase
         $e7 = $by[$this->e['E7']->ref_no];
         $this->assertSame('Reversal of '.$this->e['E6']->ref_no, $e7['Status']->getValue());
         $this->assertSame($this->e['E6']->ref_no, $e7['Reversal of']->getValue());
+        $this->assertSame('In', $e7['Direction']->getValue()); // C1: the reversal brings the money back to KDY
         $this->assertSame('Posted', $by[$this->e['E1']->ref_no]['Status']->getValue());
+        $this->assertContains(TransactionExporter::DIRECTION_LEGEND, $sheet['lines']);
+    }
+
+    /** AC 30a (accountant sign-off C1): Direction is the way the money moved, swapped on reversal rows. */
+    public function test_ac30a_direction_follows_the_money(): void
+    {
+        $dir = function ($response) {
+            $sheet = $this->sheet($response);
+            $this->assertContains(TransactionExporter::DIRECTION_LEGEND, $sheet['lines']);
+            $legend = array_search(TransactionExporter::DIRECTION_LEGEND, $sheet['lines'], true);
+            $this->assertSame('Amounts in LKR', $sheet['lines'][$legend - 1]);
+
+            return collect($sheet['rows'])->mapWithKeys(fn ($row) => [(string) $row['Ref no']->getValue() => [
+                (string) $row['Type']->getValue(), $row['Direction']->getValue()]])->all();
+        };
+        $ref = fn (string $k) => $this->e[$k]->ref_no;
+
+        $kdy = $dir($this->exportAs($this->nimal, $this->kdy->id));
+        $this->assertSame('Out', $kdy[$ref('E6')][1]);
+        $this->assertSame('In', $kdy[$ref('E7')][1]);
+        $this->assertSame('In', $kdy[$ref('E5')][1]);
+        foreach (['E1', 'E2', 'E3', 'E4', 'E9'] as $k) {
+            $this->assertNull($kdy[$ref($k)][1], $k);
+        }
+
+        $galAdmin = $this->userIn($this->gal, 'Branch Admin');
+        $gal = $dir($this->exportAs($galAdmin, $this->gal->id));
+        $this->assertSame(['Branch transfer (in)', 'In'], $gal[$ref('E6')]);
+        $this->assertSame(['Reversal (in)', 'Out'], $gal[$ref('E7')]);
+        $this->assertNull($gal[$ref('E8')][1]);
+
+        $all = $dir($this->asAdmin()->postJson('/api/v1/transactions/export'));
+        $this->assertNotEmpty($all);
+        foreach ($all as $refNo => [$type, $direction]) {
+            $this->assertNull($direction, $refNo); // capital included
+        }
     }
 
     public function test_ac31_typed_formula_stays_text(): void

@@ -30,6 +30,9 @@ class TransactionExporter
 
     public const FILES_LABELS = ['with' => 'Has files', 'none' => 'No files', 'removed' => 'Has removed files'];
 
+    /** R14 (sign-off C1): the header line after "Amounts in". */
+    public const DIRECTION_LEGEND = 'Direction: In = money received from a branch outside this list, Out = money sent to one. "(in)" after the Type = entered by another branch, read-only here.';
+
     public const YEAR_END_NOTE = 'Year-end close amounts are not money moved and are shown as —.';
 
     public function __construct(private TransactionSearch $search) {}
@@ -206,6 +209,7 @@ class TransactionExporter
             'Sort: '.self::SORT_LABELS[$p->sort.':'.$p->dir],
             'Rows: '.number_format($rows->count()),
             'Amounts in '.$settings->currencyCode(),
+            self::DIRECTION_LEGEND,
             'Printed by '.$user->name.' at '.$settings->formatDate($now->format('Y-m-d')).' '.$now->format('H:i').' (Asia/Colombo)',
             $rows->contains('type', Transaction::YEAR_END_CLOSE) ? self::YEAR_END_NOTE : null,
         ]));
