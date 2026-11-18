@@ -1,0 +1,182 @@
+# Spec: Categories and sub-categories
+
+## 1. Goal and scope
+- **AG-070** (E8, Must, R1): "As a Super Admin, I want to manage income and expense categories with sub-categories so that reports are meaningful." Backlog: two levels (Category > Sub-category); each has a type, Income or Expense; name unique within parent; seed common defaults.
+- **AG-071** (E8, Should, R2): "As a Branch Admin, I want to add branch-only sub-categories so that local needs are covered without cluttering other branches." Backlog: a sub-category may be global or scoped to one branch; branch-scoped items are visible only in that branch; Super Admin can promote a branch sub-category to global.
+- **AG-072** (E8, Must, R1): "As an admin, I want to deactivate (not delete) used categories so that history stays intact." Backlog: categories with transactions cannot be deleted; inactive categories are hidden in entry forms and still shown in reports.
+
+**Today (code on `feature/categories`).**
+- `GET /v1/categories` (any signed-in branch user), `POST /v1/categories` and `PUT /v1/categories/{id}` (`perm:category.manage`) in `CategoryController`. There is no DELETE route.
+- `index` returns active top-level categories with their `children`: global ones plus the active branch's own. `type` and `include_inactive` filters exist. In All mode only global rows are returned, so Super Admin cannot see any branch-only sub-category.
+- `store`: top level is Super Admin only. A sub-category takes its parent's type. A Super Admin's sub-category is global; anyone else's is branch-only (`branch_id` = active branch). The parent must be top level. Duplicate check is case-sensitive on SQLite, ignores type for top-level rows, and does not compare a new global sub with other branches' branch-only subs. The parent's `is_active` is not checked.
+- `update`: `name` and `is_active` only (`type` and `parent_id` are silently ignored). Non-Super Admins may change only their branch's own rows. **No duplicate-name check on rename.**
+- **No audit row** is written for a category create or update (only the system `account.created` / `account.updated` rows of its ledger accounts).
+- Double entry (`docs/specs/double-entry.md` R1, `ChartOfAccounts`): every node has a 5-digit `ledger_code` (4PPSS income, 5PPSS expense; parent = PP00). The code is assigned on create, is the same in every branch, is never reused or edited, and has a 99-per-level limit (one SS sequence per parent, shared by global and all branch-only subs). A global node has an account in every branch; a branch-only sub has one in its own branch. Rename renames the accounts (a parent rename also renames its subs' accounts); (de)activate sets the accounts `inactive`/`active`.
+- Posting (`LedgerService::incomeOrExpense`, `reclassify`) needs an active category of the right type, global or of the entry's branch. It does **not** check the parent's status.
+- `CategorySeeder` seeds 3 income and 10 expense parents with sub-categories (Sales, Service income, Other income; Salaries & wages, Rent, Utilities, Transport, ...). AG-070's "seed defaults" is done.
+- Web: the entry form (`features/transactions/entry-form.component.ts`) loads `GET /categories?type=` and requires a sub-category. The I&E report already shows inactive categories with an "Inactive" tag. **There is no category management screen.**
+
+**Out of scope:** hard delete of any category (none, even unused, per CLAUDE.md); moving a sub-category to another parent; changing type; merging two categories; bulk reclassification; demoting a global sub-category to branch-only; a third level; editable ledger codes; hiding a global category for one branch only.
+
+## 2. Personas and permissions
+No new permission key. `category.manage` is held by the **Branch Admin** (`*`) and **Accountant** templates (users-and-roles finding 6). Cashier and Viewer do not have it.
+
+| Action | Who |
+|---|---|
+| Read the tree for entry forms (`GET /categories`, no params) | every signed-in user in branch mode |
+| Open the Categories screen (`GET /categories?manage=1`) | `category.manage` (Super Admin always) |
+| Add / rename / deactivate / reactivate a **top-level category** | Super Admin only |
+| Add / rename / deactivate / reactivate a **global sub-category** | Super Admin only |
+| Add / rename / deactivate / reactivate a **branch-only sub-category** | `category.manage` in that branch (Branch Admin, Accountant, custom roles with the key); Super Admin in any mode |
+| Promote a branch-only sub-category to global | Super Admin only |
+
+A user with `category.manage` in KDY only can never see or change GAL's branch-only sub-categories.
+
+## 3. User flows
+**F1 Super Admin, All branches mode.** Categories → tabs Income / Expense → tree of all parents, global subs and every branch's branch-only subs (with a branch badge) → "Add category" (top level) or "Add sub-category" on a parent → name → Save. The new node appears in every branch's entry form and on every branch's chart of accounts.
+
+**F2 Super Admin, branch mode (KDY).** Same screen, but only global rows and KDY's branch-only subs are listed. New sub-categories are global (Q3).
+
+**F3 Branch Admin / Accountant in KDY.** Categories → Expense → on "Transport", "Add sub-category" → "Tuk-tuk hire" → Save. It is created branch-only for KDY with badge "KDY only". Global rows show no Edit/Deactivate actions for this user (read-only, with a lock hint "Managed by Super Admin").
+
+**F4 Deactivate.** On a row, "Deactivate" → confirm dialog shows the usage count and, for a parent, the number of active sub-categories that will be hidden with it → Confirm. The row shows "Inactive" (greyed) and is hidden from entry forms. "Show inactive" toggle (default on in this screen) lets the user hide them. "Reactivate" reverses it.
+
+**F5 Rename.** "Edit" → change name → Save. Every list, report and the chart show the new name from now on, also for past entries. The old name is kept in the audit log.
+
+**F6 Promote (Super Admin).** On a branch-only row, "Make global" → dialog: "'Tuk-tuk hire' (KDY only, code 50403) will be available in every branch with the same code. Its past entries stay in KDY." → Confirm. The badge disappears; other branches get the account with a zero balance.
+
+**F7 Wrong parent or type.** There is no Move and no type field on Edit. The user creates the correct node, deactivates the wrong one, and changes the category of each affected entry (reclassify, `PUT /transactions/{id}`), which posts reclass lines on the original dates.
+
+## 4. Screens
+### S1 Categories — route `/categories`
+- Guard: `permissionGuard('category.manage')`. Nav link "Categories" under "Chart of accounts" (`class="subnav"`), shown when `auth.can('category.manage')`. Works in All mode and branch mode.
+- Header: "Categories", tabs **Income** / **Expense** (remembered in the URL `?type=`), checkbox "Show inactive" (default checked), button "Add category" (Super Admin only).
+- **Tree** (one card per parent, sorted by name; subs sorted by name inside):
+
+| Column | Content |
+|---|---|
+| Name | parent bold; sub indented. Badges: `KDY only` (branch-only; in branch mode just "This branch only"), `Inactive`, `Hidden: parent inactive` (sub active, parent inactive) |
+| Code | `ledger_code` (mono), e.g. 50400, 50403 |
+| Used in | usage count: number of income and expense entries (any status) whose current category is this node, in the active branch (branch mode) or all branches (All mode). For a parent: its own entries + its subs'. "0" shown as "Not used" |
+| Actions | Add sub-category (parent rows, if the parent is active), Edit, Deactivate / Reactivate, Make global (branch-only rows, Super Admin only). Actions the user may not perform are not shown |
+
+- Empty state per tab: "No income categories yet." plus "Add category" for Super Admin, or "Ask a Super Admin to add categories." otherwise.
+- Error state: the API message in the page alert (`errorText`), list unchanged.
+- **Dialogs** (one form component, modal; full-width sheet at ≤ 760px):
+  - *Add category*: Name (text, required, trimmed, 1–100 chars). Type is the current tab, shown read-only. Save / Cancel.
+  - *Add sub-category*: Parent shown read-only, Name (as above). Scope shown read-only: "All branches" (Super Admin) or "This branch only (KDY)" (others).
+  - *Edit*: Name only. Info text: "Type, parent and code cannot be changed. To move entries, create the right category and change the category on each entry."
+  - *Deactivate*: "Deactivate 'Utilities'? It will be hidden from entry forms. Past entries and reports keep it. 4 active sub-categories will also be hidden. Used in 132 entries." Confirm / Cancel.
+  - *Make global*: text from F6. Confirm / Cancel.
+  - Buttons are disabled while saving (no double submit). On success: toast/`ok` line "Saved.", tree reloads.
+- **390px layout:** no horizontal scroll. Each row becomes two lines: name + badges on line 1; code · "Used in N" on line 2; actions in a single "⋯" menu button (min 44×44 px tap target). Tabs and the "Show inactive" toggle wrap onto one line under the title.
+
+### S2 Entry form (existing) — `/transactions/new/:kind`
+- Category select: only active parents of the kind that have at least one active sub-category visible in this branch. Sub-category select: only active subs, global or of the active branch. (API already filters; the parent-with-no-subs rule is new and client-side.)
+
+### S3 Reports, transaction list and detail (existing)
+- Unchanged: they show every category used, active or not, with the current name; I&E keeps the "Inactive" tag. Transaction list and detail show the current name.
+
+### S4 Chart of accounts (existing)
+- A sub-category's accounts show `Inactive` when the sub or its parent is inactive (R6).
+
+## 5. API
+| Method, path | Guard | Change |
+|---|---|---|
+| `GET /v1/categories` | auth, branch | Unchanged for entry forms (active only, global + active branch). **Plus** `manage=1` (requires `category.manage`, else 403): includes inactive rows, adds per node `ledger_code`, `branch:{id,code}\|null`, `is_active`, `usage_count`, `can_edit` (bool), `can_promote` (bool). In All mode with `manage=1`, branch-only subs of every branch are included. Children of an inactive parent are returned under it. |
+| `POST /v1/categories` | `perm:category.manage` | Adds rules R2, R3, R4, R7 and audit R8. Response 201 = the node in the `manage=1` shape. |
+| `PUT /v1/categories/{id}` | `perm:category.manage` | `name`, `is_active` only. `type` or `parent_id` or `branch_id` present → 422 (R4/R5). Rename runs the duplicate check (R3). Access: R1. Audit R8. |
+| `POST /v1/categories/{id}/promote` | `super` | **New.** R9. 200 = the node. Errors: 422 "Only a branch-only sub-category can be made global.", 422 "Reactivate it before making it global.", 422 duplicate message (R9). |
+| `DELETE /v1/categories/{id}` | — | Not added. Route stays absent (405). |
+
+Error texts:
+- 403 "Only Super Admin can change global categories."
+- 422 "A category with this name already exists here." / "A sub-category with this name already exists in <branch codes>. Rename it first."
+- 422 "The type of a category cannot be changed." / "A sub-category cannot be moved to another category. Create it under the new category and change the category on each entry."
+- 422 "This category is inactive. Reactivate it before adding sub-categories."
+- 422 "No more category codes are available under <parent>. Ask the accountant." (existing).
+
+## 6. Business rules
+- **R1 Access.** Top-level rows and global subs: Super Admin only (403 otherwise). A branch-only sub: Super Admin, or a user with `category.manage` whose active branch is that sub's branch (else 404, so other branches' rows are not revealed). Super Admin in All mode may edit any row.
+- **R2 Two levels.** `parent_id` must be an active top-level node of the same type (a sub's type is always its parent's). A sub of a sub → 422 (existing).
+- **R3 Unique name within parent.** Compare trimmed and case-insensitive, inactive rows included (so a reactivation can never create a duplicate). Top level: unique per type (an income "Rent" and an expense "Rent" may both exist). Sub-category: a name clashes with any global sibling; a branch-only sub also clashes with its own branch's siblings; a new **global** sub also clashes with every branch's branch-only siblings (else that branch would see two). The same branch-only name may exist in two different branches. Applies to create, rename and promote.
+- **R4 Type is fixed from creation.** The type picks the 4/5 code prefix and the account class in every branch when the node is created, so it is never editable (stricter than "after first use", Q2).
+- **R5 No move.** `parent_id` and `branch_id` are not editable. Moving would change the code (PP) and split history. Use reclassify per entry (F7).
+- **R6 Deactivate / reactivate.** Sets `is_active` only on that node; children keep their own flag. A sub is **effectively inactive** when it or its parent is inactive. Effectively inactive nodes: hidden in entry forms and in `GET /categories` without `manage=1`; posting and reclassifying to them is refused (**new**: `LedgerService::incomeOrExpense` and `reclassify` and the controls R5 rule must also check the parent's `is_active`); their ledger accounts are `inactive` (`syncCategoryAccounts` on a parent's status change also re-syncs its subs' accounts; a sub's account is active only when sub and parent are active; `closed` stays `closed`). Reactivating a parent brings back exactly those subs whose own flag is active. Deactivating a node that is used or unused is allowed; nothing is deleted.
+- **R7 Branch scope on create.** Super Admin creates global rows. Any other user creates a branch-only sub for the active branch. Branch-only subs share their parent's SS sequence (99 per parent across all branches).
+- **R8 Audit.** In the same DB transaction: `category.created` (new: name, type, parent_id, branch_id, ledger_code); `category.updated` (old/new of the changed fields among name, is_active); `category.promoted` (old branch_id, new null, ledger_code, ids of accounts created). Audit `branch_id` = the category's branch (global rows → null, Super Admin only, per controls R9). The existing system `account.created` / `account.updated` rows continue.
+- **R9 Promote to global** (Q1, needs accountant). Only an active branch-only sub. In one DB transaction: re-check R3 against global siblings **and every other branch's** branch-only siblings (refuse and list the branch codes; no merge); set `branch_id = null`; keep `ledger_code` unchanged (codes are already unique across branches, so consolidation simply adds the branches from now on); create the account in every other branch (active and inactive branches, zero balance, status per R6) via `createCategoryAccounts`; the origin branch's account and all its lines are untouched. No posting is made, so period locks and year-end closes are not affected. Not reversible in this release.
+- **R10 History shows the current name.** Entries reference `category_id`, so lists, reports, exports and the chart show the new name for past periods too. The old name is only in the audit log.
+- **R11 Existing entries in an inactive category** stay there. Editing such an entry's other fields is allowed; changing its category needs an active target (existing reclassify rule).
+- **R12 Branch isolation.** A branch-only sub never appears in another branch's form, tree, usage count or chart. Usage count in branch mode counts only that branch's entries, even for global nodes.
+
+## 7. Acceptance criteria
+Fixtures: branches MAIN, KDY, GAL; seeded categories; users: SA (Super Admin), KBA (Branch Admin, KDY), KACC (Accountant, KDY), KCASH (Cashier, KDY), GBA (Branch Admin, GAL).
+
+**Create and uniqueness**
+1. Given SA in All mode, When POST `{name:"Insurance", type:"expense"}`, Then 201, a top-level expense node with the next 5PP00 code, an account in every branch, and one `category.created` audit row with `branch_id` null.
+2. Given KBA in KDY, When POST a top-level category, Then 403 and nothing is created.
+3. Given KBA in KDY, When POST `{name:"Tuk-tuk hire", parent_id: Transport}`, Then 201 with `branch_id` = KDY, type expense, code 504SS, an account in KDY only, and `category.created` with `branch_id` = KDY.
+4. Given KCASH in KDY, When POST any category, Then 403.
+5. Given Utilities has "Water", When POST "water " under Utilities (any user allowed to), Then 422 "A category with this name already exists here."
+6. Given expense top-level "Rent", When SA POSTs income top-level "Rent", Then 201.
+7. Given KDY has branch-only "Tuk-tuk hire" under Transport, When GBA POSTs "Tuk-tuk hire" under Transport in GAL, Then 201 with a different code.
+8. Given AC 7, When SA POSTs global "Tuk-tuk hire" under Transport, Then 422 "A sub-category with this name already exists in GAL, KDY. Rename it first."
+9. Given Utilities is inactive, When POST a sub-category under it, Then 422 "This category is inactive. Reactivate it before adding sub-categories."
+10. Given a sub-category as `parent_id`, When POST, Then 422 "Only two levels are allowed (Category > Sub-category)."
+
+**Edit, type, move**
+11. Given SA, When PUT Electricity `{name:"Power"}`, Then 200, every branch's account is named "Utilities > Power", one `category.updated` row has old name "Electricity" and new "Power", and an I&E report for last month lists "Power".
+12. Given Utilities has "Water", When PUT Electricity `{name:"WATER"}`, Then 422 duplicate and the name is unchanged.
+13. Given any category, When PUT with `type` set (even the same value), Then 422 "The type of a category cannot be changed." and nothing changes.
+14. Given any sub-category, When PUT with `parent_id` or `branch_id`, Then 422 with the move message and nothing changes.
+15. Given KBA in KDY, When PUT a global category or sub-category, Then 403 "Only Super Admin can change global categories."
+16. Given KBA in KDY, When PUT GAL's branch-only sub, Then 404.
+17. Given KACC in KDY, When PUT KDY's branch-only sub `{name:"Three-wheeler hire"}`, Then 200 and `category.updated` with `branch_id` KDY.
+
+**Deactivate / reactivate**
+18. Given Electricity used by 5 entries, When PUT `{is_active:false}`, Then 200, `category.updated` old true / new false, its accounts in every branch are `inactive`, and no row or transaction is deleted.
+19. Given AC 18, When KCASH opens Record expense and picks Utilities, Then Electricity is not in the sub-category list; When POST /v1/expenses with Electricity, Then 422 "Category must be an active expense category."
+20. Given AC 18, When the I&E report covers those 5 entries, Then Electricity is listed with its amount and an "Inactive" tag; the transaction list still shows "Utilities › Electricity".
+21. Given Utilities (active subs Electricity, Water; Internet already inactive), When SA deactivates Utilities, Then Utilities is not in the entry form, posting or reclassifying to Water returns 422, and the accounts of Utilities, Electricity and Water are `inactive` in every branch; the `is_active` flags of Electricity, Water and Internet are unchanged.
+22. Given AC 21, When SA reactivates Utilities, Then Utilities, Electricity and Water are back in entry forms with active accounts, and Internet stays inactive.
+23. Given an inactive category, When an entry in it is edited (description only), Then 200; When its category is changed to another inactive category, Then 422 "Choose an active expense category of this branch."
+24. Given any category, When DELETE `/v1/categories/{id}`, Then 405 and the row remains.
+
+**Visibility and branch isolation**
+25. Given KDY's "Tuk-tuk hire", When a GAL user calls GET /categories (or opens the entry form), Then it is not returned; a KDY user sees it.
+26. Given SA in All mode, When GET /categories?manage=1&type=expense, Then the result includes KDY's and GAL's branch-only subs, each with `branch:{id,code}`, plus inactive nodes, with `ledger_code` and `usage_count`.
+27. Given KBA in KDY, When GET /categories?manage=1, Then only global nodes and KDY's branch-only subs are returned, and `usage_count` counts KDY entries only.
+28. Given KCASH, When GET /categories?manage=1, Then 403.
+29. Given a global sub with 3 KDY and 2 GAL entries (one voided), Then `usage_count` is 3 in KDY mode and 5 in All mode; its parent's count includes them.
+
+**Promote (AG-071)**
+30. Given KDY's active "Tuk-tuk hire" (code 50403) with 4 KDY entries, When SA POSTs promote, Then 200, `branch_id` null, code still 50403, MAIN and GAL (and any inactive branch) get "Transport > Tuk-tuk hire" with code 50403 and zero balance, the KDY account and its lines are unchanged, one `category.promoted` row is written, and the sub now appears in GAL's entry form.
+31. Given AC 30, Then the consolidated trial balance shows one 50403 line, and KDY's I&E figures for past periods are unchanged.
+32. Given GAL also has a branch-only "Tuk-tuk hire", When SA promotes KDY's, Then 422 listing GAL and nothing changes.
+33. Given an inactive branch-only sub, When promote, Then 422 "Reactivate it before making it global."; given a global sub, Then 422 "Only a branch-only sub-category can be made global."
+34. Given KBA, When POST promote, Then 403.
+35. Given a promote in a month that is locked, Then it succeeds and no ledger line is posted.
+
+**Screen (S1)**
+36. Given KCASH, Then the "Categories" nav link is hidden and `/categories` redirects (guard).
+37. Given KBA in KDY on Expense, Then global rows show no Edit/Deactivate actions, KDY's subs show Edit, Deactivate, and "This branch only"; "Add category" and "Make global" are not shown.
+38. Given SA in All mode, Then branch-only rows show the badge "<code> only", and "Make global" appears only on them.
+39. Given an inactive parent, Then its active subs show "Hidden: parent inactive"; with "Show inactive" unchecked, the parent and its subs are not listed.
+40. Given the Deactivate dialog for Utilities (4 active subs, 132 entries), Then the text states both numbers; Cancel changes nothing.
+41. Given a 390px-wide viewport, Then the page has no horizontal scroll, each row shows name/badges and code/usage on two lines, actions are in a "⋯" menu, and dialogs fill the width.
+42. Given a double click on Save in any dialog, Then exactly one request is sent.
+43. Given a 100th sub-category under one parent, When Save, Then the dialog shows "No more category codes are available under <parent>. Ask the accountant." and nothing is created.
+
+**Entry form**
+44. Given a parent whose subs are all inactive (or all other branches' only), Then that parent is not in the entry form's Category list.
+
+## 8. Open questions (with assumptions)
+- **Q1 Promote and double entry (accountant).** Assumed: the code is kept, accounts are added in other branches with zero balance, history stays in the origin branch, no merge with same-name branch subs (refuse instead), not reversible. Is a consolidated line that has history in one branch only acceptable? Should same-name subs in other branches be merged (reclassify their entries) instead of refused?
+- **Q2 Type change before first use.** Backlog/brief say "fixed after first use". Assumed: fixed from creation, because the code and the accounts in every branch are created with the type. Fix = deactivate and re-create.
+- **Q3 Super Admin creating a branch-only sub.** Assumed: not offered; Super Admin rows are global (as today).
+- **Q4 Delete of unused categories.** AG-072 implies unused ones could be deleted. Assumed: no delete at all (CLAUDE.md "nothing is hard-deleted"); deactivate instead.
+- **Q5 Hiding a global category in one branch.** Assumed out of scope; only Super Admin deactivates global rows, for every branch.
+- **Q6 Accountant.** The Accountant template holds `category.manage`, so Accountants get the same rights as a Branch Admin here. Assumed intended (users-and-roles finding 6).
+- **Q7 Usage count basis.** Assumed: entries whose current `category_id` is the node (income and expense, any status; reversal rows not counted). Entries reclassified away are not counted, though the ledger account keeps their lines.
+- **Q8 AG-071 is R2.** It is already built in the API; this spec adds the R2 promote. Assumed it ships with AG-070/072 in R1.
