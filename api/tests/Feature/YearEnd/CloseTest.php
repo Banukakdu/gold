@@ -95,7 +95,8 @@ class CloseTest extends YearEndTestCase
         $audit = AuditLog::where('event', 'year.closed')->sole();
         $this->assertNull($audit->branch_id);
         $this->assertSame('7500.00', $audit->new_values['total_net']);
-        $this->assertSame(['income' => '62500.00', 'expense' => '38200.00', 'net' => '24300.00', 'transaction_id' => $kdy->id, 'ref_no' => $kdy->ref_no, 'lines' => 7],
+        // JSON column: MySQL does not keep the key order.
+        $this->assertEquals(['income' => '62500.00', 'expense' => '38200.00', 'net' => '24300.00', 'transaction_id' => $kdy->id, 'ref_no' => $kdy->ref_no, 'lines' => 7],
             $audit->new_values['by_branch']['KDY']);
         $this->assertFalse($audit->new_values['global_lock_created'], 'the March lock for all branches already existed');
         foreach ($txns as $t) {

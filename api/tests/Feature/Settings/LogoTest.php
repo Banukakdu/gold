@@ -39,7 +39,8 @@ class LogoTest extends SettingsTestCase
         $this->assertSame($logo['sha256'], $res->json('sha256'));
         $row = AuditLog::where('event', 'settings.logo_uploaded')->sole();
         $this->assertNull($row->old_values);
-        $this->assertSame(['original_name' => 'logo.png', 'mime' => 'image/png', 'size_bytes' => strlen($bytes), 'width' => 600, 'height' => 200, 'sha256' => $logo['sha256']], $row->new_values);
+        // JSON column: MySQL does not keep the key order.
+        $this->assertEquals(['original_name' => 'logo.png', 'mime' => 'image/png', 'size_bytes' => strlen($bytes), 'width' => 600, 'height' => 200, 'sha256' => $logo['sha256']], $row->new_values);
 
         $this->upload($this->file('logo.jpg', $this->jpeg(), 'image/jpeg'))->assertCreated()->assertJsonPath('mime', 'image/jpeg');
         $this->assertStringEndsWith('.jpg', $this->logo()['path']);
