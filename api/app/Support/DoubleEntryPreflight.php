@@ -43,7 +43,7 @@ final class DoubleEntryPreflight
             ->filter(fn ($r) => Money::toCents($r->current_balance) !== (int) $r->ledger)->values();
         if ($balances->isNotEmpty()) {
             $out[] = "{$balances->count()} account balance(s) differ from the ledger: "
-                .$list($balances, fn ($r) => "#{$r->id} {$r->code} {$r->name} (current_balance ".Money::add($r->current_balance).', ledger '.Money::add($r->ledger).')');
+                .$list($balances, fn ($r) => "#{$r->id} {$r->code} {$r->name} (current_balance ".Money::add($r->current_balance).', ledger '.Money::fromCents((int) $r->ledger).')');
         }
 
         foreach (self::lineOffenders() as $rule => $rows) {
