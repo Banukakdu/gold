@@ -117,7 +117,7 @@ export class AuditLogComponent implements OnInit {
   private http = inject(HttpClient);
   groups: [string, string][] = [['', 'All events'], ['transactions', 'Transactions'], ['voids', 'Voids and reversals'], ['users', 'Users'],
     ['roles', 'Roles'], ['accounts', 'Accounts'], ['branches', 'Branches'], ['periods', 'Period locks'], ['reports', 'Reports'], ['logins', 'Logins'],
-    ['attachments', 'Attachments'], ['settings', 'Settings'], ['year_end', 'Year-end']];
+    ['attachments', 'Attachments'], ['settings', 'Settings'], ['year_end', 'Year-end'], ['categories', 'Categories']];
   f = { from: colomboToday().slice(0, 8) + '01', to: colomboToday(), event_group: '', user_id: '', self: false, ref_no: '' };
   branches: string[] = [];
   page = signal<AuditPage | null>(null);
