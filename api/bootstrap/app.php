@@ -6,6 +6,8 @@ use App\Http\Middleware\SuperAdminOnly;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Http\Exceptions\PostTooLargeException;
+use Illuminate\Http\Request;
 use Illuminate\Routing\Middleware\SubstituteBindings;
 
 return Application::configure(basePath: dirname(__DIR__))
@@ -28,5 +30,13 @@ return Application::configure(basePath: dirname(__DIR__))
         );
     })
     ->withExceptions(function (Exceptions $exceptions) {
-        //
+        // AG-062 R4.1 (QA Q2): a file larger than post_max_size makes PHP drop the whole body and Laravel answer 413
+        // before routing. On the attachment upload route, answer like any other too-large file.
+        $exceptions->render(function (PostTooLargeException $e, Request $request) {
+            if ($request->isMethod('POST') && preg_match('#^api/v1/transactions/\d+/attachments$#', $request->path())) {
+                return response()->json(['message' => 'Each file may be at most 5 MB.', 'errors' => ['file' => ['Each file may be at most 5 MB.']]], 422);
+            }
+
+            return null;
+        });
     })->create();

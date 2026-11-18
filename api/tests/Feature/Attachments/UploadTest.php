@@ -182,6 +182,9 @@ class UploadTest extends AttachmentsTestCase
         });
         // Two uploads for E: the count check runs inside a DB transaction holding the entry row lock, so the second
         // one sees the first one's row and is refused.
+        // Reviewer N5: this is NOT a truly parallel test. Feature tests run requests one after another in one process
+        // (and SQLite ignores FOR UPDATE), so it proves the count rule plus, on MySQL, that the entry row is read with
+        // FOR UPDATE inside the upload transaction - which is what serialises real concurrent uploads.
         $this->upload($this->csh, $this->kdy, $this->e['id'], $this->file('a.jpg', self::jpeg(seed: 'a5')))->assertCreated();
         $this->upload($this->csh, $this->kdy, $this->e['id'], $this->file('b.jpg', self::jpeg(seed: 'b5')))->assertStatus(422);
         $this->assertSame(5, Attachment::whereNull('removed_at')->count());

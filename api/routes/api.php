@@ -58,8 +58,9 @@ Route::prefix('v1')->group(function () {
             // action; there is deliberately no DELETE route. {attachment} must belong to {transaction} (404 otherwise).
             Route::scopeBindings()->middleware('perm:transaction.view')->group(function () {
                 Route::get('transactions/{transaction}/attachments', [AttachmentController::class, 'index']);
-                Route::post('transactions/{transaction}/attachments', [AttachmentController::class, 'store'])->middleware('throttle:30,1');
-                Route::get('transactions/{transaction}/attachments/{attachment}/download', [AttachmentController::class, 'download']);
+                Route::post('transactions/{transaction}/attachments', [AttachmentController::class, 'store'])->middleware('throttle:attachments-upload');
+                Route::get('transactions/{transaction}/attachments/{attachment}/download', [AttachmentController::class, 'download'])
+                    ->middleware('throttle:attachments-download');
                 Route::post('transactions/{transaction}/attachments/{attachment}/remove', [AttachmentController::class, 'remove']);
             });
             Route::post('incomes', [TransactionController::class, 'storeIncome'])->middleware('perm:income.create');

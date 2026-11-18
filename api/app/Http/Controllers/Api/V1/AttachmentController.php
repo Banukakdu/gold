@@ -153,11 +153,14 @@ class AttachmentController extends Controller
         try {
             $disk = Storage::disk($attachment->disk);
             $bytes = $disk->exists($attachment->path) ? $disk->get($attachment->path) : null;
-        } catch (Throwable) {
+        } catch (Throwable $e) {
             $bytes = null;
+            $readError = $e->getMessage();
         }
         if ($bytes === null) {
-            Log::error("Attachment #{$attachment->id} ({$transaction->ref_no}): file missing from storage.", ['path' => $attachment->path]);
+            // Reviewer N6: keep the reason a read failed (permissions, I/O) for the administrator.
+            Log::error("Attachment #{$attachment->id} ({$transaction->ref_no}): file missing from storage.",
+                ['path' => $attachment->path, 'error' => $readError ?? 'file does not exist']);
             AuditLog::record('attachment.missing', $transaction, null, $ids + ['sha256' => $attachment->sha256], $transaction->branch_id);
 
             return response()->json(['message' => 'The file is missing from storage. Tell your administrator.'], 410);

@@ -123,10 +123,17 @@ final class AttachmentFile
     /** ASCII-only `filename=` fallback for Content-Disposition (RFC 6266); the real name goes in `filename*`. */
     public static function asciiFallback(string $name): string
     {
-        $ascii = Str::ascii($name);
-        $ascii = (string) preg_replace('/[^\x20-\x7E]/', '_', $ascii);
+        $dot = mb_strrpos($name, '.');
+        $stem = $dot === false ? $name : mb_substr($name, 0, $dot);
+        $ext = $dot === false ? '' : '.'.mb_substr($name, $dot + 1);
+        $clean = fn (string $v) => trim(str_replace(['%', '/', '\\', '"'], '_', (string) preg_replace('/[^\x20-\x7E]/', '_', Str::ascii($v))));
+        $stem = $clean($stem);
+        // A name in a non-Latin script can leave nothing readable (reviewer N1): never a bare ".pdf".
+        if (! preg_match('/[A-Za-z0-9]/', $stem)) {
+            $stem = 'attachment';
+        }
 
-        return str_replace(['%', '/', '\\', '"'], '_', $ascii);
+        return $stem.$clean($ext);
     }
 
     private static function basename(string $name): string
