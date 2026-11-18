@@ -6,6 +6,7 @@ use App\Models\Account;
 use App\Models\Branch;
 use App\Models\Category;
 use App\Models\PeriodLock;
+use App\Models\Setting;
 use App\Models\Transaction;
 use App\Support\BranchContext;
 use App\Support\Money;
@@ -124,6 +125,7 @@ class ReportService
     public function meta(ReportParams $p): array
     {
         return [
+            'company' => (string) Setting::get('company_name', config('app.name')),
             'from' => $p->from,
             'to' => $p->to,
             'branches' => $p->branches->map(fn (Branch $b) => ['id' => $b->id, 'code' => $b->code, 'name' => $b->name, 'status' => $b->status])->values()->all(),

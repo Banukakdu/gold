@@ -3,6 +3,8 @@
 namespace Tests\Feature\Reports;
 
 use App\Support\Money;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /** AG-083 Branch Comparison (R5 + accounting review finding 1 and 2). */
 class BranchComparisonReportTest extends ReportTestCase
@@ -121,5 +123,24 @@ class BranchComparisonReportTest extends ReportTestCase
     private function vals(array $row): array
     {
         return array_map(fn ($k) => $row[$k], self::COLS);
+    }
+
+    /** R5: the server asserts Closing = ledger balance; a mismatch is a 500 and is logged. */
+    public function test_unreconciled_ledger_is_a_server_error(): void
+    {
+        $cash = $this->acc($this->kdy, 'Cash');
+        $id = DB::table('transactions')->insertGetId(['branch_id' => $this->kdy->id, 'type' => 'adjustment', 'txn_date' => '2026-10-09',
+            'amount' => '1.00', 'status' => 'posted', 'created_by' => $this->admin->id, 'created_at' => now(), 'updated_at' => now()]);
+        DB::table('ledger_entries')->insert(['transaction_id' => $id, 'account_id' => $cash->id, 'branch_id' => $this->kdy->id,
+            'entry_date' => '2026-10-09', 'debit' => '1.00', 'credit' => '0.00']);
+        Log::spy();
+
+        $this->withoutExceptionHandling();
+        $this->expectException(\RuntimeException::class);
+        try {
+            $this->report('branch-comparison', $this->october());
+        } finally {
+            Log::shouldHaveReceived('error')->once();
+        }
     }
 }
