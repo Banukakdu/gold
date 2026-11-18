@@ -256,3 +256,34 @@ Reviewed against the code on `feature/controls` (`LedgerService`, `PeriodLock`, 
 37. Given KDY October has 2 voids by their own authors, when SA opens the Lock confirm for KDY October, then it shows "2 self-voids this month - review the audit log first." and the lock still works.
 38. Given two concurrent `POST /period-locks {period:"2026-10", branch_id:null}`, then exactly one active row exists afterwards.
 39. Given an audit row whose `new_values` contains a nested key `token` or `password`, then the list, the detail and the Excel file show `••••`, and the API response never contains the value.
+
+## Accountant sign-off
+Checked on `feature/controls` at `c0f5059` (`git diff d239f85...HEAD`). `php artisan test`: 150 passed. QA: 37/39 passed, none failed. A probe test (scratch only, not committed) was re-run against the lock check with non-ISO dates.
+
+**Findings from the Accounting review**
+1. Cumulative locks: **DONE.** `PeriodLock::lockedQuery` (`period >= month`, branch or global), `ReportService::provisional` (closed-through), unlock from the latest month down (`PeriodLockController::doUnlock`), the S2 "Closed (through …)" cells, and the unlock response listing the months that reopen (`PeriodLock::reopens`). Tests: `test_ac16_*`, `test_ac19_*`, `test_ac30_*`, `test_ac31_*`, `test_ac16_non_iso_dates_are_refused_on_every_path`.
+2. DB immutability triggers: **DONE.** Migration triggers, `test_ac32_database_triggers_refuse_raw_update_and_delete`, and the transaction FK is set to restrict.
+3. Export and actors use the list's scope: **DONE.** `AuditLogController::scoped`/`branchScope`, `test_ac33_*`.
+4. Reversal date rules: **DONE.** `TransferController::reverse` (`date_format:Y-m-d`, after_or_equal original, before_or_equal Colombo today), `LedgerService::reverse` re-checks, and `assertOpen` runs for every entry's branch. `test_ac17_*`, `test_ac18_*`.
+5. Void audit row is complete: **DONE.** It records ref_no, type, amount, account_id, txn_date, reason, self and contra_entry_ids. `test_ac1_ac34_*`.
+6. Legacy voids: **DONE.** No entries are rebuilt. There is one `ledger.legacy_voids_identified` row. `ledger:verify` lists ref/date/amount/account/voided-by/voided-at, flags rows with no audit row, and exits 1 on any balance difference. The README deploy note covers the run before and after, the re-print of signed reports, and the rollback limit. `test_ac8_ac35_*`.
+7. Self-void detective control: **DONE.** There is a Self filter, a self flag on voids and reversals, and the lock confirm shows the count (`test_ac37_*`). Since `c0f5059`, `/period-locks/review` counts over every month the lock newly closes for each branch and returns `closes_from`.
+8. Reversal of capital/allocations by Super Admin only, and income/expense reversal needing `{type}.void`: **DONE.** `TransferController::SUPER_ADMIN_TYPES`, `test_ac36_reversal_rights`.
+9. `(float)` removed: **DONE** (`Money::cmp`).
+10. "Void only for errors" wording: **DONE.**
+11. Export header with filters and "Rows: N": **DONE.**
+12. Masking is recursive and done on the server: **DONE.** `test_ac39_*`.
+13. One active lock per scope: **DONE** by design. There is a unique generated `active_key` (MySQL) or a partial unique index (SQLite), plus a branch row lock and deadlock retry. AC38 could not be run concurrently. The unique index makes a second active row impossible, so I accept it.
+14. `before_or_equal:today` on capital/allocations, in Asia/Colombo: **DONE.**
+
+**Void and reconciliation.** Contra entries are posted on the original date with the same account and branch, debit and credit swapped, and `contra_of_id` set. Balances move by integer cents. Reports exclude by status. Statement opening and closing are the same with the flag on or off. `ledger:verify` = 0. Fine.
+
+**Must-fix A from the first sign-off (period lock bypass with non-ISO dates): DONE in `c0f5059`.**
+- Every money date (income/expense, capital, allocations, transfers, reversals) uses `date_format:Y-m-d`.
+- `LedgerService` normalises the date with `BusinessDate::normalize` (strict, real calendar day) before `assertOpen` and the insert.
+- `PeriodLock::lockedQuery` refuses any other format.
+- Re-running the probe with KDY October locked, `2026/10/05`, `5 October 2026`, `05-10-2026`, `2026-10-05 00:00:00` and `20261005` are all refused with 422 on expense, transfer and capital, and `2026-10-05` gets "The period 2026-10 is locked.".
+
+**Should items: DONE.** The lock confirm now says "This closes <month> and every earlier open month…" (or names the range from `closes_from`), and the self-void count covers that range.
+
+**Verdict: SIGNED OFF.** Remaining for operations: run `ledger:verify` before and after deploy and review the legacy void list as in the README. AC38 is covered by the unique index, not by a concurrent test.
