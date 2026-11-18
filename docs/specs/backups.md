@@ -7,11 +7,13 @@ Backlog acceptance: nightly mysqldump (or spatie/laravel-backup) to off-server s
 Built on `feature/transaction-search`. Fixed decisions:
 - **One backup = one encrypted archive** that holds the database dump **and** the private files (`attachments` and `branding` disks), written in the same run. The attachments and settings specs already require this ("backed up together, so a restore never pairs rows with older files").
 - **Built in the app, no new composer package.** A `backup:run` command uses `mysqldump` (MySQL) or `VACUUM INTO` (SQLite dev) and PHP `ZipArchive` (AES-256). We need our own `backups` table, audit rows, alerts and restore test, so spatie/laravel-backup would add a package and still need most of this code (Q1).
-- **Off-server copy** to an S3-compatible disk when one is configured. **The app never deletes off-server copies.** Off-server retention is a bucket lifecycle rule, so the app's key needs no delete right, and a compromised server cannot wipe the off-server backups.
+- **Off-server copy** to an S3-compatible disk when one is configured. **The app never deletes or overwrites off-server copies** (it checks that a key is free before every write, review F3). Off-server retention is a bucket lifecycle rule, so the app's key needs no delete right. The bucket must have **versioning** on, and **object lock (compliance mode)** at least for `yearly/` (review F3), so neither a compromised server nor an overwrite can remove the off-server backups.
+- **Retention (review Q5, F1):** 30 daily and 12 first-of-month backups on this server and off-server, plus a **year-end snapshot of every closed fiscal year kept off-server for 8 years** (`yearly/`). The year-end snapshot is the statutory copy of the closed books; the live database remains the book of account.
+- **Every archive carries proof that the books balanced** (`control.json`, review F2), and every run checks that the database was not rolled back without a recorded restore (review F4).
 - **Nothing in the app deletes a backup except local retention** (`backup:prune`). There is no API or screen action to delete, download, or start a backup.
 - The Super Admin screen is **read-only status**. Restoring is an operator task on the server, done by following the README.
 
-Out of scope: restoring from the UI, downloading from the UI (Q2), "Back up now" button (Q3), incremental or point-in-time (binlog) backups, backing up `.env` or code, heartbeat or uptime monitoring of cron itself (Q4), per-branch backups.
+Out of scope: restoring from the UI, downloading from the UI (Q2), "Back up now" button (Q3), incremental or point-in-time (binlog) backups, backing up `.env` or code, heartbeat or uptime monitoring of cron itself (Q4), per-branch backups, administering the bucket (versioning, object lock and lifecycle rules are set by ops; the app only checks them where the provider's API allows, with `backup:offsite-check`).
 
 ## 2. Personas and permissions
 - **Super Admin** (`is_super_admin`): the only user who sees the Backups screen and API. They use the existing `super` middleware and `superAdminGuard`, in any switcher mode, because backups are global like Settings. They also receive the failure emails.
@@ -22,44 +24,52 @@ Out of scope: restoring from the UI, downloading from the UI (Q2), "Back up now"
 ## 3. User flows
 **F1 Nightly backup (scheduler, no user).** At 01:30 Asia/Colombo, `backup:run` runs:
 1. Lock.
-2. Precheck.
-3. Dump the DB.
-4. Add the files.
-5. Encrypt and zip.
-6. Checksum and self-check.
-7. Copy off-server.
-8. Record the row and the audit row.
-9. Run `backup:prune`.
-On any failure, the row is `failed`, a `backup.failed` audit row is written, and every active Super Admin gets an email.
+2. Precheck (password, disk space, InnoDB only, continuity check R13).
+3. Decide whether this run is a year-end snapshot (R14).
+4. Dump the DB.
+5. Compute `control.json` (R3a) and add the files.
+6. Encrypt and zip.
+7. Checksum and self-check.
+8. Copy off-server.
+9. Record the row and the audit row.
+10. A year-end snapshot is restore-tested at once (`backup:verify {filename}`, review F7) and its hash is emailed to the Super Admins (review F8).
+11. Run `backup:prune`.
+On any failure, the row is `failed` (with its `failed_stage`), a `backup.failed` audit row is written, and every active Super Admin gets an email.
 
 **F2 Super Admin checks backups.** Nav "Backups" (next to Settings) -> S1. They see a green line "Last successful backup: today 01:31 (3.2 GB), copied off-server." and the list. If last night failed, they see a red banner and the error on the row, and they also received the email.
 
 **F3 Weekly restore test (scheduler).** Sunday 03:00 Asia/Colombo, `backup:verify --latest`:
 1. Restore the newest successful backup into the scratch DB and a temp folder.
-2. Run `ledger:verify` and `attachments:verify` against them.
+2. Recompute `control.json` and the row counts, and run `ledger:verify` and `attachments:verify` against them.
 3. Record Passed or Failed on the backup row.
 Failures alert the Super Admins.
 
-**F4 Release restore drill (operator, once per release; backlog AC).** On staging, follow README "Restoring a backup" end to end with the latest production backup. Then run `ledger:verify` and `attachments:verify`. The accountant compares the trial balance and the Main account balance with production as of the backup time. Record the result in the release notes.
+**F3a Monthly old-archive test (scheduler, review F7).** First Sunday of the month, 04:00 Asia/Colombo, `backup:verify --oldest-offsite` restores the oldest `yearly/` object on the off-server disk (else the oldest `monthly/`), with the same checks as F3. This proves that an old archive, possibly encrypted with an older password (R12), still opens and balances.
 
-**F5 Real restore (operator).** Follow README "Restoring a backup" (R10). Then run `php artisan backup:restored <filename> --reason="..."` so the audit trail shows that a restore happened and from which backup.
+**F4 Release restore drill (operator, once per release; backlog AC).** On staging, follow README "Restoring a backup" end to end with the latest production backup. Then run `ledger:verify` and `attachments:verify`. The accountant compares the restored trial balance with the archive's `control.json` (an exact comparison, review F2; `backup:verify` does the same automatically). Record the result in the release notes.
 
-**F6 Before a risky deploy (operator).** Run `php artisan backup:run` by hand. It behaves the same as F1, with `triggered_by = console`.
+**F5 Real restore (operator).** Follow README "Restoring a backup" (R10). Then run `php artisan backup:restored <filename> --reason="..."` so the audit trail shows that a restore happened and from which backup. It signs everyone out (all API tokens are revoked) and emails the Super Admins, who re-apply the access and control changes made after the backup (review F5).
+
+**F6 Before a risky deploy (operator).** Run `php artisan backup:run` by hand. It behaves the same as F1, with `triggered_by = console`. `php artisan backup:run --year-end` takes the year-end snapshot of the last ended fiscal year at once (`--year-end=2026` names the start year); it refuses with "FY 2026-27 is not closed." when that year is not closed.
+
+**F7 Closing a month or a year (Super Admin, review F9).** The period-lock Lock confirm and the year-end Close dialog show a non-blocking warning when the last succeeded backup is older than 26 h, or no restore test passed in the last 8 days, e.g. "Last successful backup 3 days ago. Fix backups before closing." Locking and closing still work.
 
 ## 4. Screens
 ### S1 Backups `/backups` (new, `superAdminGuard`; nav link "Backups" shown only to Super Admins, after "Settings")
 **Status banner** (top, first matching rule wins, from `summary`):
 | Condition | Style | Text |
 |---|---|---|
+| Latest backup failed at stage `continuity` (R13) | red | "The database has fewer ledger or audit rows than backup {filename}, and no restore was recorded. Investigate before anything else." |
+| Latest backup has stage `control` (R3a) | red | "The books did not balance in last night's backup: {error}. Run `php artisan ledger:verify`." |
 | No `succeeded` backup ever | red | "No backup has completed yet. Check that cron runs `php artisan schedule:run` every minute." |
 | Last `succeeded` older than 26 h | red | "The last successful backup was {age} ago ({date time}). Check the scheduler and the failure emails." |
-| Off-server disk not configured | amber | "Backups are kept only on this server. Configure off-server storage (BACKUP_OFFSITE_DISK) before go-live." |
+| Off-server disk not configured | red in production, amber elsewhere (review F3) | "Backups are kept only on this server. Configure off-server storage (BACKUP_OFFSITE_DISK) before go-live." |
 | Latest backup's off-server copy `failed` | amber | "Last night's backup was not copied off-server: {error}." |
 | Archive password not set (non-production only) | amber | "Backups are not encrypted (BACKUP_ARCHIVE_PASSWORD is empty). Production refuses to run without it." |
 | Last restore test `failed`, or none in 8 days | amber | "The last restore test failed on {date}." / "No restore test in the last 8 days." |
 | otherwise | green | "Last successful backup: {date time} ({size}), {copied off-server / local only}." |
 
-**Summary line** (under the banner): "Runs daily at 01:30 · Restore test Sundays 03:00 · Keeps 30 daily and 12 monthly backups on this server".
+**Summary line** (under the banner): "Runs daily at 01:30 · Restore test Sundays 03:00 · Keeps 30 daily and 12 first-of-month backups on this server, and every year-end snapshot for 8 years off-server" (review F1, F13: the monthly backup is the state at 01:30 on the 1st, not the closed month).
 
 **Table** (newest first, 50 per page, filter Status: All / Succeeded / Failed):
 | Column | Content |
@@ -71,7 +81,7 @@ Failures alert the Super Admins.
 | Contents | "DB + 1,204 files" (attachments + branding file count) |
 | SHA-256 | first 12 hex characters, monospaced, with a "Copy" button for the full 64; the title tooltip shows the full value |
 | Off-server | Copied / Failed (tooltip: error) / Not configured |
-| Kept as | Daily / Monthly |
+| Kept as | Daily / First of month / Year-end FY 2026-27 |
 | On this server | Yes / "Pruned {date}" |
 | Restore test | Passed {date} / Failed {date} (tooltip: first error line) / — |
 | By | Scheduler / Console |
@@ -86,13 +96,13 @@ Failures alert the Super Admins.
 |---|---|---|---|
 | `GET /v1/backups` | `auth:sanctum` + `super` (in the same group as `settings`, outside `branch`) | `status` (optional, `succeeded`/`failed`), `page` | `{data:[Backup], meta:{pagination}, summary}` |
 
-- `Backup` = `{id, filename, status, triggered_by, started_at, finished_at, duration_seconds, size_bytes, sha256, db_driver, encrypted, files_count, kept_as ('daily'|'monthly'), offsite_status ('copied'|'failed'|'not_configured'), offsite_error, local_pruned_at, verify_status (null|'passed'|'failed'), verified_at, verify_error, error}`. No paths, no disk names, no URLs.
-- `summary` = `{last_success_at, offsite_configured, encrypted_configured, schedule:{backup:'01:30', verify:'Sun 03:00', timezone:'Asia/Colombo'}, retention:{daily:30, monthly:12, min_keep:7}, last_verify:{at, status}|null}`.
+- `Backup` = `{id, filename, status, triggered_by, started_at, finished_at, duration_seconds, size_bytes, sha256, db_driver, encrypted, files_count, kept_as ('daily'|'monthly'|'year_end'), fiscal_year, fiscal_year_label ('FY 2026-27' or null), offsite_status ('copied'|'failed'|'not_configured'), offsite_error, local_pruned_at, verify_status (null|'passed'|'failed'), verified_at, verify_error, failed_stage, error}`. No paths, no disk names, no URLs (error texts are cleaned of paths, URLs and disk names before they are returned).
+- `summary` = `{last_success_at, last_success:{started_at, size_bytes, offsite_status}|null, latest:{filename, status, failed_stage, error, offsite_status, offsite_error}|null, offsite_configured, offsite_required (true in production), encrypted_configured, schedule:{backup:'01:30', verify:'Sun 03:00', verify_oldest:'1st Sun 04:00', timezone:'Asia/Colombo'}, retention:{daily:30, monthly:12, min_keep:7, year_end_years:8}, last_verify:{at, status}|null}`.
 - Errors: 401 unauthenticated; 403 "Super Admin only." for everyone else.
 - There are no POST, PUT or DELETE routes for backups.
 
 **Schema (one migration)** `backups`:
-- `id`, `filename` (string 100, unique), `status` (string 12: `running`/`succeeded`/`failed`), `triggered_by` (string 10: `scheduler`/`console`), `started_at`, `finished_at` (null), `size_bytes` (unsigned bigint null), `sha256` (char 64 null), `db_driver` (string 10), `encrypted` (bool), `files_count` (unsigned int null), `kept_as` (string 8 null), `offsite_status` (string 16 null), `offsite_error` (text null), `local_pruned_at` (timestamp null), `verify_status` (string 8 null), `verified_at` (null), `verify_error` (text null), `error` (text null), `manifest` (json null), timestamps.
+- `id`, `filename` (string 100, unique), `status` (string 12: `running`/`succeeded`/`failed`), `triggered_by` (string 10: `scheduler`/`console`), `started_at`, `finished_at` (null), `size_bytes` (unsigned bigint null), `sha256` (char 64 null), `db_driver` (string 10), `encrypted` (bool), `files_count` (unsigned int null), `kept_as` (string 8 null: `daily`/`monthly`/`year_end`), `fiscal_year` (unsigned smallint null, the start year of a year-end snapshot, review F1), `year_end_close_id` (FK `year_end_closes`, null, restrict, own index), `offsite_status` (string 16 null), `offsite_error` (text null), `local_pruned_at` (timestamp null), `verify_status` (string 8 null), `verified_at` (null), `verify_error` (text null), `failed_stage` (string 16 null), `error` (text null), `manifest` (json null), timestamps.
 - A DB trigger refuses DELETE on `backups`, as for `attachments` (MySQL `SIGNAL`, SQLite `RAISE(ABORT)`). The model's `deleting` throws `ImmutableRecordException`. Updates are allowed: the status changes as the run progresses.
 
 **Config** `config/backup.php` (env in brackets, defaults shown):
@@ -100,13 +110,15 @@ Failures alert the Super Admins.
 - `local_disk` = `backups`. New disk: local, root `storage_path('app/backups')`, private, `serve` false, `throw` true.
 - `offsite_disk` (`BACKUP_OFFSITE_DISK`, empty = not configured). The value names a disk. New disk `backups_offsite`: driver `s3` with its own `BACKUP_S3_*` key, secret, region, bucket, endpoint and path-style settings, so that the main `AWS_*` key is not reused.
 - `password` (`BACKUP_ARCHIVE_PASSWORD`, at least 20 characters).
-- `keep_daily` (30), `keep_monthly` (12), `min_keep` (7).
+- `keep_daily` (30), `keep_monthly` (12), `min_keep` (7), `keep_year_end_months` (13, local copy), `year_end_years` (8, off-server, a bucket rule).
+- `old_passwords` (`BACKUP_ARCHIVE_OLD_PASSWORDS`, comma-separated): earlier archive passwords, tried by `backup:verify` after the current one (R12, review F7).
 - `verify_connection` = `backup_verify`. New connection in `config/database.php`: copy of `mysql` with `BACKUP_VERIFY_DB_DATABASE` (default `account_gold_verify`), and for SQLite a temp file.
 - `mysqldump_path` (`BACKUP_MYSQLDUMP`, `mysqldump`) and `mysql_path` (`BACKUP_MYSQL`, `mysql`).
 
 **Schedule** (`routes/console.php`, which today has only `inspire`):
 - `Schedule::command('backup:run')->dailyAt(time)->timezone(tz)->withoutOverlapping(360)->onOneServer()`.
 - `Schedule::command('backup:verify --latest')->weeklyOn(0, '03:00')->timezone(tz)->withoutOverlapping(360)`.
+- `Schedule::command('backup:verify --oldest-offsite')->weeklyOn(0, '04:00')->when(day of month <= 7)->timezone(tz)->withoutOverlapping(360)`, described as "monthly, first Sunday 04:00" (review F7). Cron cannot express "first Sunday" (day-of-month and day-of-week are OR-ed), hence the filter.
 - README: the cron line `* * * * * cd /path/api && php artisan schedule:run >> /dev/null 2>&1`.
 
 ## 6. Business rules and edge cases
@@ -118,8 +130,11 @@ Failures alert the Super Admins.
    - Password set (production: required, else fail "BACKUP_ARCHIVE_PASSWORD is not set.").
    - The DB is not `:memory:`.
    - Free space on the local disk is at least 2 × the last succeeded size (first run: 1 GB). Otherwise fail with "Not enough free disk space: {free} free, {need} needed."
+   - **InnoDB only (review F6).** `--single-transaction` gives one point in time only for InnoDB tables. On MySQL, fail with "Table {t} is not InnoDB." if any base table in the app schema uses another engine.
+   - **Continuity (R13, review F4).** Recorded here, acted on at the end of the run.
 5. **Dump the DB first, then copy files.** This order is consistent because attachment and logo files are written before their rows and are never deleted (removed or replaced files stay on disk). Every row in the snapshot therefore has its file. A file uploaded during the run may be in the archive without a row, which is harmless.
 6. Build the archive in `storage/app/backup-temp/{uuid}/` (mode 0700). Then move it to the `backups` disk. The temp folder is deleted in `finally`, on success or failure.
+7. The live max ids of `ledger_entries`, `transactions` and `audit_logs` are read **before** the dump. `control.json` and the manifest row counts are computed over rows with `id <=` those ids, so they describe exactly the rows the dump is sure to hold, even while users keep posting (these tables are append-only). `backup:verify` applies the same bounds to the restored DB.
 
 **R2 Database dump.**
 - **MySQL:** run `mysqldump --single-transaction --quick --routines --triggers --events --hex-blob --no-tablespaces --set-gtid-purged=OFF --default-character-set=utf8mb4 {db}` through Symfony `Process` (no shell), with stdout to `db.sql`.
@@ -141,12 +156,23 @@ Failures alert the Super Admins.
   - `db_driver`.
   - `last_migration`.
   - `db_sha256`.
-  - Row counts of `transactions`, `ledger_entries`, `accounts`, `attachments`, `audit_logs`, `users`, `branches`.
+  - Row counts of `transactions`, `ledger_entries`, `accounts`, `attachments`, `audit_logs`, `users`, `branches` (bounded by `max_ids`, R1 step 7).
+  - `max_ids` of `ledger_entries`, `transactions` and `audit_logs`.
+  - `control_sha256`: sha256 of `control.json`.
+  - `year_end`: `{fiscal_year, label, close_id, closed_at, closed_by}` for a year-end snapshot, else null (review F1).
   - `files_count` and `files_bytes` per disk.
+- `control.json` (R3a).
 - Not included: the `local` and `public` disks, `.env`, logs, cache, sessions and code. The README says to keep `.env` (APP_KEY, the archive password) in the password manager.
+- Next to the archive (locally and off-server) are two sidecars: `{filename}.sha256` (R5) and `{filename}.manifest.json`, a plain copy of the manifest. The manifest sidecar survives a DB restore; R13 and `backup:restored` read it. It holds counts and ids only, no amounts.
+
+**R3a `control.json` (review F2).** Proof that the snapshot's books balanced, computed with the same `LedgerChecks` code as `ledger:verify` (one definition of "balanced"), in integer cents:
+- `branches`: per branch code, sum of debits and sum of credits of `ledger_entries`; `total`: the same over all branches;
+- `accounts`: per account, id, code, name, branch code and ledger balance (debit - credit), i.e. the trial balance at the dump;
+- `max_ids` (as in the manifest).
+If debits ≠ credits in any branch, the run records stage `control` on the row and its error, writes `backup.control_failed`, alerts the Super Admins and exits 1. The archive is still kept and the row is `succeeded`: an unbalanced ledger is a ledger fault that must be noticed, not a reason to lose the snapshot.
 
 **R4 Compression and encryption.**
-- `ZipArchive`: `db.*` and `manifest.json` deflated; attachment and logo files stored without compression (`CM_STORE`), because JPG, PNG and PDF are already compressed. ZIP64 is used automatically above 4 GB.
+- `ZipArchive`: `db.*`, `manifest.json` and `control.json` deflated; attachment and logo files stored without compression (`CM_STORE`), because JPG, PNG and PDF are already compressed. ZIP64 is used automatically above 4 GB.
 - Every entry is encrypted with AES-256 (`EM_AES_256`) using `BACKUP_ARCHIVE_PASSWORD`. The password is separate from APP_KEY and must also be kept off the server.
 - Entry names are not encrypted (zip format). They are only uuids and numeric ids.
 - Outside production, an empty password is allowed: the archive is unencrypted, `encrypted = false`, and S1 shows the amber banner.
@@ -154,32 +180,38 @@ Failures alert the Super Admins.
 
 **R5 Checksums and self-check.**
 - `sha256` of the whole archive is stored on the row and in a sidecar `{filename}.sha256` (`sha256sum` format) next to it, both locally and off-server.
-- After writing, reopen the archive with `ZipArchive::CHECKCONS` and the password. Check that the entry count = 2 + files_count, and that `db.*` hashes to `manifest.db_sha256`. Any mismatch fails the run with stage `verify_archive`, and the archive is deleted (it was never a succeeded backup).
+- After writing, reopen the archive with `ZipArchive::CHECKCONS` and the password. Check that the entry count = 3 + files_count, that `db.*` hashes to `manifest.db_sha256` and `control.json` to `manifest.control_sha256`. Any mismatch fails the run with stage `verify_archive`. The self-check runs on the temp copy before the archive is moved to the `backups` disk, so a failed archive never reaches it.
 
 **R6 Off-server copy.**
-- If `offsite_disk` is set, the archive goes to `daily/{filename}` with `writeStream`, followed by the sidecar.
+- If `offsite_disk` is set, the archive goes to `daily/{filename}` with `writeStream`, followed by the sidecars.
 - The first succeeded backup of a calendar month (business tz) is also written to `monthly/{filename}`.
+- A year-end snapshot is also written to `yearly/FY{short label}/{filename}` (e.g. `yearly/FY2026-27/`) with its sidecars (review F1).
+- **Never overwrite (review F3).** An S3 `PutObject` on an existing key replaces it. The app checks `exists()` before every write and never writes to a key that is taken: it fails the copy with "Off-server object already exists." and leaves the existing object unchanged.
 - After upload, the remote size must equal the local size. Otherwise `offsite_status = failed`.
 - An off-server failure **does not fail the backup** (the local archive is good): `status = succeeded`, `offsite_status = failed`, `offsite_error` set, plus an alert and an audit row.
-- **The app never calls delete on the off-server disk.** README: give the key Put, Get and List only. Set the bucket lifecycle so that `daily/` expires after 31 days and `monthly/` after 366 days. Turn on versioning or object lock if the provider has it.
+- **The app never calls delete on the off-server disk.** README: give the key Put, Get and List only. Set the bucket lifecycle so that `daily/` expires after 31 days, `monthly/` after 366 days and `yearly/` after 2,922 days (8 years). **Versioning is required**; object lock in compliance mode is required for `yearly/` and recommended for the rest; the provider must support both (Q7). `php artisan backup:offsite-check` reads the bucket's versioning and object-lock settings where the provider's API allows it, and exits 1 when versioning is off; it is a go-live checklist item.
 
 **R7 Local retention** (`backup:prune`, run at the end of every `backup:run`; can also be run alone):
-- `kept_as = monthly` for the first succeeded backup of each calendar month, `daily` otherwise (set when the run succeeds).
+- `kept_as = year_end` for a year-end snapshot (R14), else `monthly` for the first succeeded backup of each calendar month, `daily` otherwise (set when the run succeeds).
 - The local file of a succeeded backup is deleted when **all** of these hold:
-  - (a) it is a daily older than 30 days, or a monthly older than 12 months, by `started_at`;
+  - (a) it is a daily older than 30 days, or a monthly older than 12 months, or a year-end older than 13 months whose off-server copy is `copied` (a year-end archive is never pruned locally while off-server is not configured or its copy failed, review F1), by `started_at`;
   - (b) it is not among the newest 7 succeeded backups (`min_keep`), so a stopped scheduler never prunes the last good copies;
   - (c) it has not already been pruned.
-- Pruning deletes the archive and sidecar from the `backups` disk and sets `local_pruned_at`. The row is kept. Each pruned file writes `backup.pruned`.
-- Failed runs keep no archive (R5), so nothing is pruned for them.
+- Pruning deletes the archive and its sidecars from the `backups` disk and sets `local_pruned_at`. The row is kept. Each pruned file writes `backup.pruned` (`rule` = `daily_30`, `monthly_12` or `year_end_13`).
+- Failed runs keep no archive (R5), so nothing is pruned for them. The exception is a run failed at stage `continuity` (R13): its archive is kept on purpose as evidence and is never pruned by the app.
 - `backup:prune` is the only code that calls `delete` on the `backups` disk. A test greps `app/` for this (AC 19).
 
 **R8 Failure alerts.**
 - New `BackupAlertNotification` (mail) is sent to every active Super Admin (`is_super_admin`, `status = active`), as in `AccessAlerts::notify`.
 - Events that alert:
-  - backup failed (any stage, including stale `running`);
+  - backup failed (any stage, including stale `running` and `continuity`);
+  - books not balanced in the snapshot (stage `control`);
   - off-server copy failed;
   - prune failed;
   - restore test failed.
+- Two further emails, also with `sendNow`, to every active Super Admin:
+  - **Year-end snapshot taken (review F8):** subject "Account-gold year-end snapshot FY 2026-27 taken", body with the filename, the full SHA-256 (64 hex) and "debits = credits = {total}". The accountant files it with the year-end pack, so the business holds the hash independently of the server.
+  - **Backup restored (review F5):** subject "Account-gold database restored from a backup", body with the filename, the backup time (start of the lost window), the reason, the operator and the R10 re-apply instruction.
 - Subject "Account-gold backup FAILED: {stage}" or "Account-gold restore test FAILED". The body has the filename, time, stage, error (first 500 chars), and "See Backups in Account-gold or the server log."
 - **Sent with `sendNow`, not queued.** The queue is the database, and a backup failure is often a database or disk problem, so a queued mail might never leave. If sending throws, `report($e)` is called, and the command still exits 1, so cron output and the log show it. Success sends no email.
 
@@ -188,34 +220,39 @@ Failures alert the Super Admins.
 |---|---|---|
 | `backup.created` | Backup created | `filename, size_bytes, sha256, db_driver, encrypted, files_count, kept_as, offsite_status, duration_seconds, triggered_by` |
 | `backup.failed` | Backup failed | `filename, stage, error` |
+| `backup.control_failed` | Backup: books not balanced | `filename, error, branches` (the unbalanced branches) |
+| `backup.continuity_failed` | Database rolled back without a recorded restore | `filename, newer_backup, table, live_max_id, backup_max_id` |
+| `backup.year_end` | Year-end snapshot taken | `filename, fiscal_year, label, close_id, sha256, total_debit, total_credit` |
 | `backup.offsite_failed` | Backup not copied off-server | `filename, error` |
 | `backup.pruned` | Backup pruned | `filename, started_at, kept_as, rule` (`daily_30` / `monthly_12`) |
 | `backup.verified` | Restore test passed | `filename, duration_seconds, counts` |
 | `backup.verify_failed` | Restore test failed | `filename, stage, error` |
-| `backup.restored` | Backup restored | `filename, sha256, reason, restored_at, operator` (OS user) |
+| `backup.restored` | Backup restored | `filename, sha256, reason, restored_at, operator` (OS user), `backup_started_at` (start of the lost window, review F5), `tokens_revoked`, `rows_recreated` |
 - Add the group `backups => [['backup.'], []]` to `AuditLogController::GROUPS`, and the labels above to `LABELS`.
 - The `backup.created` row is written after the dump, so it appears in the next night's backup and not in its own.
 
 **R10 Restore procedure** (README section "Restoring a backup"; the developer writes it, and the accountant checks it at sign-off):
 1. `php artisan down`. Stop the queue worker and remove the cron line.
 2. Pick the backup (S1 or `ls storage/app/backups`, or the bucket). Check `sha256sum -c {file}.sha256`.
-3. `7z x -p{password} {file} -o/tmp/restore`.
+3. Make a fresh folder `storage/app/backup-temp/restore` with mode 0700 (not `/tmp`, review F11), then `7z x -p{password} {file} -o{that folder}`.
 4. Create an empty database. Load it with `mysql {db} < db.sql`, as a user with TRIGGER rights.
 5. Replace `storage/app/attachments` and `storage/app/branding` with `files/attachments` and `files/branding`. Keep the old folders aside until step 9 passes.
 6. If the code is newer than `manifest.last_migration`, run `php artisan migrate --force`.
 7. `php artisan ledger:verify` and `php artisan attachments:verify`. Both must exit 0.
-8. The accountant checks the trial balance and Main account balance against the last printed reports.
-9. `php artisan backup:restored {filename} --reason="..."`. This writes the `backup.restored` audit row and re-creates the `backups` rows for newer archives still on the local disk, using their sidecar and manifest, so S1 lists them again.
-10. Restore cron and the worker, then `php artisan up`. Tell the users: entries made after `{backup time}` are not in the system and must be entered again from the paper evidence.
+8. The accountant compares the restored trial balance with the archive's `control.json` (review F2). They must be equal to the cent.
+9. `php artisan backup:restored {filename} --reason="..."`. This writes the `backup.restored` audit row, **revokes every API token** (everyone signs in again, review F5), emails the Super Admins, completes the restored backup's own row (it was `running` at dump time) and re-creates the `backups` rows for newer archives still on the local disk, using their sidecars and manifest, so S1 lists them again.
+10. **Before `up` (review F5):** the Super Admin re-applies every user deactivation, role change, period lock and year-end close made after {backup time}, using the access-alert and year-end emails received since then, and records them in the restore note.
+11. Restore cron and the worker, then `php artisan up`. Delete the restore folder from step 3. Tell the users: entries made after `{backup time}` are not in the system and must be entered again from the paper evidence, with "Re-entered after restore of {file}; original ref {X}" in the description (review F12). The accountant reviews them against the paper vouchers before the month is locked.
 - Restore never deletes anything in the backups folder.
+- **Segregation (review F10):** the operator must not be a user who records or voids entries (Cashier or Accountant). The archive password is held by two people (the operator, and the owner or a director in the business password manager). The off-server account's root credentials are held by the business, not the IT vendor alone.
 
 **R11 Restore test** (`backup:verify {filename?} {--latest}`):
-1. Pick the backup. Its local archive must exist; if it has been pruned locally, read `daily/` or `monthly/` from the off-server disk. Check the sha256 against the row.
-2. Extract it to a temp folder (0700).
+1. Pick the backup: `{filename}`, `--latest` (newest succeeded) or `--oldest-offsite` (the oldest `yearly/` object off-server, else the oldest `monthly/`). Its local archive is used if present; if it has been pruned locally, read `daily/`, `monthly/` or `yearly/` from the off-server disk. Check the sha256 against the row (or the off-server sidecar when the live DB has no row).
+2. Extract it to a temp folder (0700), trying the current password and then each of `old_passwords`.
 3. **Safety:** refuse with "The verify database must not be the live database." when the `backup_verify` connection points at the same host + database as the default connection (or the same SQLite file).
 4. Drop all tables in the verify DB, then load `db.sql` with the `mysql` client, or copy `db.sqlite`.
 5. Switch `database.default` to `backup_verify`, and point the `attachments` and `branding` disks at the extracted `files/` folders, for the rest of the process only.
-6. Run `ledger:verify` and `attachments:verify`. Compare the row counts with the manifest.
+6. In this order, each failure naming its stage: compare the row counts with the manifest (`counts`); recompute `control.json` from the restored DB with the manifest's `max_ids` and compare it with the archive's, failing on **any** difference and naming the account or branch (`control`, review F2); run `ledger:verify` (`ledger`) and `attachments:verify` (`attachments`), which compares each restored file's sha256 with `attachments.sha256` (review F6).
 7. Switch back, and record `verify_status`, `verified_at` and `verify_error` on the backup row in the **live** DB. Write the audit row and alert on failure.
 8. Drop the verify tables and delete the temp folder in `finally`.
 - Exit 0 on pass, 1 on fail.
@@ -228,6 +265,22 @@ Failures alert the Super Admins.
 - The archive password changes: old archives need the old password. README: keep every password used, with the date it started.
 - A deactivated Super Admin gets no email and cannot open S1.
 - A branch user calling `GET /v1/backups` with any `X-Branch-Id` -> 403.
+
+**R13 Continuity check: an undeclared restore or rollback (review F4).** Anyone with shell access could load an older backup to erase entries together with their audit rows.
+- At precheck, `backup:run` reads the newest manifest sidecar on the `backups` disk; if there is none, the newest one off-server (`daily/`). These files survive a DB restore.
+- If the live max id of `audit_logs` or `ledger_entries` is **lower** than that manifest's `max_ids`, and no `backup.restored` audit row written after that backup names a backup at or before it, the condition is raised.
+- The backup itself is still taken (the archive is kept and copied off-server, so the state is preserved). At the end the row is `failed` with stage `continuity`, `backup.continuity_failed` is written, every active Super Admin is alerted with `sendNow`, the command exits 1, and S1 goes red.
+- `backup:restored` with a matching filename clears the condition.
+
+**R14 Year-end snapshot (review F1).**
+- The first `backup:run` that **starts after** a `year.closed` (a `year_end_closes` row with `status = closed` and `closed_at` before the run start, and no succeeded `year_end` backup for that close id) is a year-end snapshot: `kept_as = year_end`, `fiscal_year` and `year_end_close_id` set, manifest `year_end` filled.
+- The close must still be in force at dump time: the run re-reads the close row after the dump. If the year was reopened in the meantime, the backup is a plain daily (or first-of-month).
+- A reopen followed by a new close produces a **new** year-end snapshot (a new close id). The earlier one is kept as evidence of what was closed first.
+- `backup:run --year-end[=start year]` takes it at once; it refuses with "FY … is not closed." (exit 1, no row) if the year is not closed. Without a value it means the last ended fiscal year.
+- After it succeeds, the same command runs `backup:verify {filename}` (review F7), writes `backup.year_end`, and emails the hash (R8, review F8).
+- Every year-end snapshot stays self-contained (DB plus every file), even if daily file backups later become incremental (review Q6).
+
+**R15 Backup status at the closing points (review F9).** `GET /period-locks/review` and `GET /fiscal-years/{y}/preview` return `backup_warning` (string or null). It is set when there is no succeeded backup, the last succeeded backup is older than 26 h ("Last successful backup 3 days ago. Fix backups before closing."), or no restore test passed in the last 8 days ("No restore test has passed in the last 8 days. Fix backups before closing."). The web shows it in the Lock confirm and the Close dialog. It never blocks the lock or the close.
 
 ## 7. Acceptance criteria
 Setup: users SA (Super Admin), SA2 (Super Admin, active), SA3 (Super Admin, deactivated), BA (Branch Admin KDY), ACC (Accountant KDY).
@@ -289,14 +342,25 @@ Setup: users SA (Super Admin), SA2 (Super Admin, active), SA3 (Super Admin, deac
 39. Given S1 at 360px width, Then rows are cards, there is no horizontal scroll, and there are no download, delete or run controls anywhere on the page.
 40. `GET /v1/backups?status=failed` returns only failed rows. Then `status=foo` -> 422.
 
-## 8. Open questions (assumption made so work is not blocked)
+**Accounting review additions**
+41. (F1) Given FY 2026-27 closed at 2027-04-10 15:00, When `backup:run` runs at 2027-04-11 01:30, Then the row has `kept_as = year_end`, `fiscal_year = 2026`, and the manifest's `year_end.close_id` set. `yearly/FY2026-27/{file}`, its sidecar and `daily/{file}` exist off-server, and the next run is a plain `daily`. Given the year is reopened before the run, Then the run is `daily`. Given it is closed again, Then the next run is a second `year_end` and the first is kept.
+42. (F1) Given a 14-month-old `year_end` backup whose off-server copy is `not_configured` or `failed`, When `backup:prune` runs, Then it is not pruned. Given its copy is `copied`, Then it is pruned with `rule = year_end_13`. `summary.retention.year_end_years = 8`.
+43. (F2) Given the AC 1 archive, Then `control.json` holds per-branch and total debit and credit sums that are equal, a trial-balance row per account equal to `ledger:verify`'s ledger balance, and `max_id` for the three tables, and its sha256 is in the manifest. Given a fixture where one ledger line is changed in the archive's DB, When `backup:verify` runs, Then it fails at stage `control` and names the account.
+44. (F3) Given `daily/{file}` already exists on the fake off-server disk, When the run uploads, Then nothing is written, `offsite_status = failed` with "Off-server object already exists.", and the existing object is unchanged. Given `APP_ENV=production` and no off-server disk, Then the S1 banner is red.
+45. (F4) Given a succeeded backup whose `control.json` has `audit_logs.max_id = 500`, and the live `audit_logs` max id is now 420 with no `backup.restored` row, When `backup:run` runs, Then the archive is kept, the row is `failed` with stage `continuity`, `backup.continuity_failed` is written, and SA and SA2 are notified with `sendNow`. After `backup:restored {that older file} --reason="..."`, the next run succeeds.
+46. (F5) Given SA, BA and ACC hold tokens, When `backup:restored` runs, Then every `personal_access_tokens` row is gone, and `backup.restored` has `backup_started_at`. SA and SA2 receive the restore notification with `sendNow`.
+47. (F6) Given a MyISAM table in the schema (MySQL, staging), When `backup:run` runs, Then it fails at `precheck` naming the table. Given a restored attachment file with one byte changed, Then `attachments:verify` in `backup:verify` fails on a sha256 mismatch.
+48. (F7) Given a `year_end` backup succeeds, Then `verify_status` is set by the same command. `schedule:list` shows `backup:verify --oldest-offsite` monthly, and given only an off-server `yearly/` object, it restores and passes.
+49. (F8, F9) Given a `year_end` backup succeeds, Then SA and SA2 receive the snapshot email with the full SHA-256 and the debit and credit total. Given the last succeeded backup is 3 days old, When SA opens the Lock confirm or the year-end preview, Then the warning shows and Lock or Close still works.
+
+## 8. Open questions (assumption made so work is not blocked; the accountant's decisions are in "Accounting review" below and are folded into the sections above)
 - **Q1 spatie/laravel-backup instead of our own command?** Assumed no: we need our own row, audit, alerts, prune rules and restore test, and the dump flags are a few lines. Revisit if the code grows past about 400 lines.
 - **Q2 Download from S1?** Assumed no. A stolen Super Admin session would otherwise get every branch's data in one file, and restoring needs server access anyway. If the accountant wants an extra copy outside the server, a later item can add a download that is audited and needs password re-entry.
 - **Q3 "Back up now" button?** Assumed no. Operators run `backup:run` before deploys (F6).
 - **Q4 Who notices if cron itself is dead?** No code runs to send an alert. Assumed: the red S1 banner after 26 h, plus the go-live checklist item "schedule:run in cron". An external heartbeat ping (`BACKUP_HEARTBEAT_URL`) is a cheap follow-up if ops wants it.
-- **Q5 Retention.** The backlog says 30 days. We keep 30 daily plus 12 month-end (first of month) backups, so last year's closed months can still be restored. The accountant should confirm 12 months is enough, or ask for 7 years for statutory needs (that would be a bucket rule only).
+- **Q5 Retention.** Decided (review Q5, F1): 30 daily plus 12 first-of-month backups for operational recovery, plus a year-end snapshot of every closed fiscal year kept off-server for 8 years (2,922 days) for statutory record-keeping. The company secretary and tax adviser confirm the exact statutory periods.
 - **Q6 Archive size.** Every night is a full copy of all attachments (up to 25 MB per entry). Assumed acceptable for R1. Incremental file backups are for a later release if `files_bytes` grows past about 20 GB.
-- **Q7 Off-server provider and bucket region** (data residency for Sri Lankan financial records). Ops and the business decide. The code is provider-neutral (S3 API).
+- **Q7 Off-server provider and bucket region** (data residency for Sri Lankan financial records). Ops and the business decide. The code is provider-neutral (S3 API). The provider must support versioning and object lock (review F3), and records must be producible to the Inland Revenue on request within a reasonable time.
 
 ## Accounting review (accountant, 2026-11-18, before development)
 
