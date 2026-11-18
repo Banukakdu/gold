@@ -6,6 +6,7 @@ use App\Models\Account;
 use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\Category;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 
 /** Double-entry spec ACs 20-26: chart of accounts per branch (R1, S1, section 5). */
@@ -33,6 +34,42 @@ class ChartOfAccountsTest extends DoubleEntryTestCase
         $this->assertSame($this->kdy->id, $own->branch_id);
         $this->assertSame([$this->kdy->id], Account::withoutGlobalScopes()->where('category_id', $own->id)->pluck('branch_id')->all());
         $this->assertNotSame($global->ledger_code, $own->ledger_code);
+    }
+
+    /** QA B1: a category created through the API (no is_active in the request) gets active accounts. */
+    public function test_new_category_accounts_are_active(): void
+    {
+        $this->sa()->postJson('/api/v1/categories', ['type' => 'income', 'name' => 'Training fees'])->assertCreated();
+        $parent = Category::where('name', 'Training fees')->sole();
+        $this->sa()->postJson('/api/v1/categories', ['name' => 'Remote', 'parent_id' => $parent->id])->assertCreated();
+        $this->accKdy()->postJson('/api/v1/categories', ['name' => 'On site', 'parent_id' => $parent->id])->assertCreated();
+        $ids = Category::whereIn('name', ['Training fees', 'Remote', 'On site'])->pluck('id')->all();
+        $accounts = Account::withoutGlobalScopes()->whereIn('category_id', $ids)->get();
+        $this->assertCount(2 * Branch::count() + 1, $accounts);
+        $this->assertSame(['active'], $accounts->pluck('status')->unique()->values()->all());
+        $income = collect($this->chart($this->accKdy())['groups'])->firstWhere('group', 'income')['accounts'];
+        $this->assertSame(['active', 'active', 'active'], collect($income)->whereIn('category_id', $ids)->pluck('status')->values()->all());
+    }
+
+    /** Review R4: a branch or category inserted without model events gets its chart from ledger:chart-sync. */
+    public function test_chart_sync_creates_missing_accounts(): void
+    {
+        $this->artisan('ledger:chart-sync')->expectsOutputToContain('Nothing was added')->assertExitCode(0);
+        $raw = Model::withoutEvents(fn () => Branch::create(['code' => 'RAW', 'name' => 'Raw', 'status' => 'active']));
+        $cat = Model::withoutEvents(fn () => Category::create(['type' => 'expense', 'name' => 'Raw cost']));
+        $this->assertSame(0, Account::withoutGlobalScopes()->where('branch_id', $raw->id)->count());
+
+        $this->artisan('ledger:chart-sync')->expectsOutputToContain('Chart accounts added')->assertExitCode(0);
+        $this->assertSame($this->main->id, $this->ho($raw)->counterparty_branch_id);
+        $this->assertSame('Branch current account – RAW', $this->bca($raw)->name);
+        $this->assertSame(Category::whereNull('branch_id')->count(), Account::withoutGlobalScopes()->where('branch_id', $raw->id)->where('type', 'category')->count());
+        $this->assertNotNull($cat->fresh()->ledger_code);
+        $this->assertSame(Branch::count(), Account::withoutGlobalScopes()->where('category_id', $cat->id)->count());
+        $this->assertSame('sync', AuditLog::where('event', 'ledger.chart_created')->latest('id')->first()->new_values['source']);
+
+        $count = Account::withoutGlobalScopes()->count();
+        $this->artisan('ledger:chart-sync')->expectsOutputToContain('Nothing was added')->assertExitCode(0);
+        $this->assertSame($count, Account::withoutGlobalScopes()->count());
     }
 
     public function test_ac21_rename_and_deactivate_follow_the_category(): void
@@ -63,6 +100,9 @@ class ChartOfAccountsTest extends DoubleEntryTestCase
         $before = Account::withoutGlobalScopes()->whereIn('branch_id', [$this->kdy->id, $this->gal->id])->count();
         $mtr = $this->makeBranch('MTR');
         $acc = Account::withoutGlobalScopes()->where('branch_id', $mtr->id)->get();
+        // Review N7: the create response lists the branch's cash, bank and wallet accounts only.
+        $this->assertSame([['Cash', 'cash']], array_map(fn ($a) => [$a['name'], $a['type']],
+            $this->sa()->postJson('/api/v1/branches', ['code' => 'NUW', 'name' => 'Nuwara'])->assertCreated()->json('accounts')));
         $this->assertSame('11001', $acc->firstWhere('name', 'Cash')->code);
         $ho = $acc->firstWhere('type', 'head_office');
         $this->assertSame(['Head office current account', '15'.str_pad((string) $this->main->id, 3, '0', STR_PAD_LEFT), $this->main->id],

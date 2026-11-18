@@ -9,6 +9,7 @@ use App\Models\Category;
 use App\Models\LedgerEntry;
 use App\Models\Transaction;
 use App\Models\User;
+use App\Services\DoubleEntryBackfill;
 use App\Services\LedgerService;
 use Database\Seeders\DatabaseSeeder;
 use Database\Seeders\ReportExampleSeeder;
@@ -300,6 +301,10 @@ class BackfillTest extends TestCase
         $this->toPreFeature();
         $this->legacyExample();
         $this->schema->up();
+        // Commit every 3 entries, so the stop leaves committed work behind (the default batch is 100).
+        $backfill = app(DoubleEntryBackfill::class);
+        $backfill->batch = 3;
+        $this->app->instance(DoubleEntryBackfill::class, $backfill);
         $inserts = 0;
         $armed = true;
         DB::listen(function ($q) use (&$inserts, &$armed) {
@@ -318,12 +323,19 @@ class BackfillTest extends TestCase
         $this->assertGreaterThan(0, $partial);
         $this->assertLessThan(33, $partial);
 
-        $this->artisan('ledger:backfill-double-entry')->assertExitCode(0);
+        // Review R5: refused while the app is up, unless --force; runs in maintenance mode.
+        $this->artisan('ledger:backfill-double-entry')->expectsOutputToContain('The application is up')->assertExitCode(1);
+        $this->app->maintenanceMode()->activate([]);
+        try {
+            $this->artisan('ledger:backfill-double-entry')->expectsOutputToContain('Back-fill took')->assertExitCode(0);
+        } finally {
+            $this->app->maintenanceMode()->deactivate();
+        }
         $this->assertSame($clean, [$this->describeLines(), $this->allBalances()]);
 
         // A re-run adds nothing and writes its own audit row.
         $before = LedgerEntry::count();
-        $this->artisan('ledger:backfill-double-entry')->expectsOutputToContain('lines added: 0')->assertExitCode(0);
+        $this->artisan('ledger:backfill-double-entry', ['--force' => true])->expectsOutputToContain('lines added: 0')->assertExitCode(0);
         $this->assertSame($before, LedgerEntry::count());
         $runs = AuditLog::where('event', 'ledger.double_entry_backfilled')->orderBy('id')->get()->map(fn ($a) => $a->new_values['lines'])->all();
         $this->assertSame([33 - $partial, 0], $runs, 'the stopped run wrote no row; the completing run and the re-run wrote one each');
@@ -360,7 +372,7 @@ class BackfillTest extends TestCase
         DB::table('accounts')->where('id', $cash->id)->update(['current_balance' => DB::raw('current_balance + 100')]);
         DB::table('accounts')->where('id', $catAcc->id)->update(['current_balance' => DB::raw('current_balance - 60')]);
 
-        $this->artisan('ledger:backfill-double-entry')->expectsOutputToContain('BAD-1 has back-filled lines but does not balance')->assertExitCode(1);
+        $this->artisan('ledger:backfill-double-entry', ['--force' => true])->expectsOutputToContain('BAD-1 has back-filled lines but does not balance')->assertExitCode(1);
         $this->assertSame(1, LedgerEntry::where('transaction_id', $id)->where('origin', 'backfill')->count());
         $this->assertSame(1, AuditLog::where('event', 'ledger.double_entry_backfilled')->count());
     }
@@ -401,8 +413,17 @@ class BackfillTest extends TestCase
                 $own = Model::withoutEvents(fn () => Category::create(['type' => 'income', 'name' => 'GAL only', 'parent_id' => Category::where('name', 'Sales')->first()->id, 'branch_id' => $gal->id]));
                 DB::table('transactions')->where('id', $this->t(2)->id)->update(['category_id' => $own->id]);
             },
+            // Review R1: the chart code limits are checked before the DDL too.
+            'branch id over 999' => fn () => DB::table('branches')->insert(['id' => 1000, 'code' => 'BIG', 'name' => 'Big', 'is_main' => false,
+                'status' => 'active', 'created_at' => now(), 'updated_at' => now()]),
+            'too many categories' => fn () => DB::table('categories')->insert(array_map(fn ($i) => ['type' => 'income', 'name' => "Extra {$i}",
+                'is_active' => true, 'created_at' => now(), 'updated_at' => now()], range(1, 100))),
+            'too many sub-categories' => fn () => DB::table('categories')->insert(array_map(fn ($i) => ['type' => 'expense', 'name' => "Rent {$i}",
+                'parent_id' => Category::where('name', 'Rent')->value('id'), 'is_active' => true, 'created_at' => now(), 'updated_at' => now()], range(1, 100))),
         ];
-        $names = ['account balance' => 'KDY Bank', 'no category' => $this->t(1)->ref_no, "another branch's category" => $this->t(2)->ref_no.' (GAL only)'];
+        $names = ['account balance' => 'KDY Bank', 'no category' => $this->t(1)->ref_no, "another branch's category" => $this->t(2)->ref_no.' (GAL only)',
+            'branch id over 999' => 'BIG (id 1000)', 'too many categories' => 'top-level income categories; category codes allow 99 per type',
+            'too many sub-categories' => 'sub-categories; category codes allow 99 under one parent'];
         foreach ($cases as $label => $break) {
             DB::beginTransaction();
             $break();
@@ -441,6 +462,7 @@ class BackfillTest extends TestCase
         $this->artisan('ledger:backfill-double-entry --dry-run')
             ->expectsOutputToContain('DRY RUN (nothing written). Transactions to complete: 19; lines to add: 33')
             ->expectsOutputToContain("Owner's capital (MAIN)")
+            ->expectsOutputToContain('Estimated time for the back-fill: about')
             ->assertExitCode(0);
         $this->assertSame($before, $state());
 
@@ -448,6 +470,46 @@ class BackfillTest extends TestCase
         $after = $state();
         $this->artisan('ledger:backfill-double-entry --dry-run')->expectsOutputToContain('lines to add: 0')->assertExitCode(0);
         $this->assertSame($after, $state());
+    }
+
+    /**
+     * Review R1: MySQL commits each DDL statement, so a schema migration that stops part-way leaves columns, keys or the
+     * trigger behind. Each case stops right after one step (the statement has run); `php artisan migrate` then completes.
+     */
+    public function test_schema_migration_resumes_after_stopping_part_way(): void
+    {
+        $stopAfter = null;
+        DB::listen(function ($q) use (&$stopAfter) {
+            if ($stopAfter !== null && preg_match($stopAfter, strtolower($q->sql))) {
+                $stopAfter = null;
+                throw new RuntimeException('Simulated DDL failure');
+            }
+        });
+        $steps = [
+            'accounts.class' => '/^alter table [`"]?accounts[`"]? add (column )?[`"]?class[`"]?/',
+            'accounts.category_id' => '/^alter table [`"]?accounts[`"]? add (column )?[`"]?category_id[`"]?/',
+            'accounts unique key' => '/accounts_branch_id_category_id_unique/',
+            'categories.ledger_code' => '/^alter table [`"]?categories[`"]? add (column )?[`"]?ledger_code[`"]?/',
+            'ledger_entries.origin' => '/^alter table [`"]?ledger_entries[`"]? add (column )?[`"]?origin[`"]?/',
+            'trigger' => '/^create trigger ledger_entries_line_check/',
+        ];
+        foreach ($steps as $label => $pattern) {
+            $this->toPreFeature();
+            $this->legacyExample();
+            $stopAfter = $pattern;
+            try {
+                $this->schema->up();
+                $this->fail("{$label}: the simulated failure did not happen");
+            } catch (RuntimeException $e) {
+                $this->assertSame('Simulated DDL failure', $e->getMessage(), $label);
+            }
+            $this->assertTrue(Schema::hasColumn('accounts', 'class'), "{$label}: partial schema left behind");
+
+            $this->migrate();
+            $this->assertSame(33, LedgerEntry::where('origin', 'backfill')->count(), $label);
+            $this->artisan('ledger:verify')->expectsOutputToContain('ledger:verify passed.')->assertExitCode(0);
+            $this->assertTrue(Schema::hasIndex('accounts', ['branch_id', 'counterparty_branch_id'], 'unique'), $label);
+        }
     }
 
     public function test_ac54_detail_of_a_backfilled_void(): void

@@ -127,6 +127,10 @@ class TrialBalanceTest extends ReportTestCase
         $this->assertSame('Trial Balance', $rows[1][0]);
         $total = collect($rows)->first(fn ($r) => ($r[1] ?? null) === 'Total');
         $this->assertEquals([332500, 332500], [$total[7], $total[8]]);
+        // QA B3: the Class column shows the account class, as on the screen (not the group).
+        $this->assertSame('Asset', collect($rows)->first(fn ($r) => ($r[1] ?? null) === 'Head office current account')[2]);
+        $classes = collect($rows)->filter(fn ($r) => is_numeric($r[0] ?? null))->pluck(2)->unique()->sort()->values()->all();
+        $this->assertSame(['Asset', 'Expense', 'Income'], $classes);
 
         $cons = $this->asAdmin()->post('/api/v1/reports/trial-balance/export', $q + ['format' => 'xlsx', 'view' => 'consolidated'])->assertOk();
         $rows = $this->xlsx($cons)->getSheet(0)->toArray(null, true, false);
