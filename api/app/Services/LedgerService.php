@@ -37,6 +37,11 @@ class LedgerService
 
     public const MONEY_ONLY = 'Choose a cash, bank or wallet account.';
 
+    public const WRONG_BRANCH = 'A ledger line is on an account of another branch. Nothing was posted.';
+
+    /** Back-fill only: account id per posting-rule reference (see postBackfill). */
+    private array $backfillRefs = [];
+
     public function __construct(private PostingRules $rules, private ChartOfAccounts $chart, private BackfillPlanner $planner) {}
 
     /**
@@ -293,22 +298,32 @@ class LedgerService
      * side itself (BackfillPlanner) and may insert only `origin = backfill` lines, never on a money account, so no
      * cash / bank / wallet balance can change. The transaction must balance per branch afterwards.
      *
-     * @return LedgerEntry[] the lines added (none when the transaction already balances or is a legacy void)
+     * The plan is made once, under the transaction's row lock, and returned with the lines written, so the caller
+     * (DoubleEntryBackfill) never plans twice (review R2).
+     *
+     * @return array{status: string, lines: array, entries: LedgerEntry[]} status is a BackfillPlanner status; entries
+     *                                                                     are the lines added (none for skip / legacy void)
      */
     public function backfill(Transaction $txn): array
     {
-        return DB::transaction(function () use ($txn) {
-            $txn = Transaction::withoutGlobalScopes()->lockForUpdate()->findOrFail($txn->id);
-            $plan = $this->planner->plan($txn);
-            if ($plan['status'] === BackfillPlanner::ERROR) {
-                throw new LedgerException($plan['error']);
-            }
-            if ($plan['status'] !== BackfillPlanner::PLAN) {
-                return [];
-            }
+        try {
+            return DB::transaction(function () use ($txn) {
+                $txn = Transaction::withoutGlobalScopes()->lockForUpdate()->findOrFail($txn->id);
+                $plan = $this->planner->plan($txn);
+                if ($plan['status'] === BackfillPlanner::ERROR) {
+                    throw new LedgerException($plan['error']);
+                }
+                if ($plan['status'] !== BackfillPlanner::PLAN) {
+                    return ['status' => $plan['status'], 'lines' => [], 'entries' => []];
+                }
 
-            return $this->postBackfill($txn, $plan['lines']);
-        });
+                return ['status' => $plan['status'], 'lines' => $plan['lines'], 'entries' => $this->postBackfill($txn, $plan['lines'])];
+            });
+        } catch (\Throwable $e) {
+            // An account created inside the rolled-back DB transaction no longer exists.
+            $this->backfillRefs = [];
+            throw $e;
+        }
     }
 
     // ---------------------------------------------------------------- helpers
@@ -321,21 +336,29 @@ class LedgerService
             if ($p['ref'][0] === PostingRules::MONEY) {
                 throw new LedgerException("Back-fill of {$txn->ref_no} refused: it may not post to a money account.");
             }
-            $ids[] = $this->chart->resolve($p['ref'])->id;
+            // Memoised per reference for the run (review R2): chart accounts are never deleted.
+            $key = implode(':', $p['ref']);
+            $ids[] = $this->backfillRefs[$key] ??= $this->chart->resolve($p['ref'])->id;
         }
-        $accounts = $this->lock(array_unique($ids));
+        $accounts = $this->lock(array_unique($ids), false);
 
         $written = [];
+        $net = [];
         foreach ($planned as $i => $p) {
             $acc = $accounts[$ids[$i]];
             if ($acc->isMoney() || (int) $acc->branch_id !== (int) $p['branch_id']) {
                 throw new LedgerException("Back-fill of {$txn->ref_no} refused: line on account #{$acc->id} is not allowed.");
             }
             $contraOf = isset($p['contra_of_new']) ? $written[$p['contra_of_new']]->id : null;
-            $written[$i] = $this->entry($txn, $this->line($acc, $p['debit'], $p['credit'], $p['date'], $contraOf, 'backfill'));
+            $written[$i] = $this->entry($txn, $this->line($acc, $p['debit'], $p['credit'], $p['date'], $contraOf, 'backfill'), false);
+            $net[$acc->id] = ($net[$acc->id] ?? 0) + $p['debit'] - $p['credit'];
+        }
+        // One balance update per account (review R2); a voided entry's line and its contra net to zero.
+        foreach ($net as $id => $cents) {
+            $this->applyBalance($accounts[$id], $cents);
         }
         // L1 for the back-fill: the set completes the transaction, so the whole transaction must now balance per branch.
-        $this->assertWrittenBalanced(LedgerEntry::where('transaction_id', $txn->id)->pluck('id')->all());
+        $this->assertTransactionBalanced($txn->id);
 
         return array_values($written);
     }
@@ -355,7 +378,7 @@ class LedgerService
         foreach ($spec as $i => $s) {
             $acc = $locked[$ids[$i]];
             if ((int) $acc->branch_id !== (int) $s['branch_id']) {
-                throw new LedgerException(self::NOT_BALANCED);
+                throw new LedgerException(self::WRONG_BRANCH);
             }
             $lines[] = $this->line($acc, $s['debit'], $s['credit'], $date, null, $origin);
         }
@@ -394,6 +417,19 @@ class LedgerService
         }
     }
 
+    /** Every line of the transaction, per branch, in one query (back-fill). */
+    private function assertTransactionBalanced(int $txnId): void
+    {
+        $dr = Money::sqlCents('debit');
+        $cr = Money::sqlCents('credit');
+        $rows = LedgerEntry::where('transaction_id', $txnId)->groupBy('branch_id')->selectRaw("branch_id, SUM($dr) as dr, SUM($cr) as cr")->get();
+        foreach ($rows as $r) {
+            if ((int) $r->dr !== (int) $r->cr) {
+                throw new LedgerException(self::NOT_BALANCED);
+            }
+        }
+    }
+
     /** L1 step 4: SUM(debit) = SUM(credit) per branch for the written lines, read back inside the DB transaction. */
     private function assertWrittenBalanced(array $ids): void
     {
@@ -422,10 +458,10 @@ class LedgerService
     }
 
     /** @return array<int, Account> keyed by id, locked FOR UPDATE in id order to avoid deadlocks */
-    private function lock(array $ids): array
+    private function lock(array $ids, bool $withBranch = true): array
     {
         sort($ids);
-        $rows = Account::withoutGlobalScopes()->with('branch')->whereIn('id', $ids)->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+        $rows = Account::withoutGlobalScopes()->when($withBranch, fn ($q) => $q->with('branch'))->whereIn('id', $ids)->orderBy('id')->lockForUpdate()->get()->keyBy('id');
         if ($rows->count() !== count(array_unique($ids))) {
             throw new LedgerException('Account not found.');
         }
@@ -536,7 +572,8 @@ class LedgerService
     }
 
     /** The only writer of ledger_entries and current_balance. */
-    private function entry(Transaction $txn, array $l): LedgerEntry
+    /** Writes the line and, unless $applyBalance is false (the back-fill applies the net per account), the cached balance. */
+    private function entry(Transaction $txn, array $l, bool $applyBalance = true): LedgerEntry
     {
         $acc = $l['account'];
         $entry = LedgerEntry::create([
@@ -549,10 +586,21 @@ class LedgerService
             'credit' => Money::fromCents($l['credit']),
             'origin' => $l['origin'],
         ]);
-        $acc->current_balance = Money::fromCents(Money::toCents($acc->current_balance) + $l['debit'] - $l['credit']);
-        $acc->save();
+        if ($applyBalance) {
+            $this->applyBalance($acc, $l['debit'] - $l['credit']);
+        }
 
         return $entry;
+    }
+
+    /** The only writer of accounts.current_balance (CLAUDE.md): debit - credit, in integer cents, on a locked account. */
+    private function applyBalance(Account $acc, int $cents): void
+    {
+        if ($cents === 0) {
+            return;
+        }
+        $acc->current_balance = Money::fromCents(Money::toCents($acc->current_balance) + $cents);
+        $acc->save();
     }
 
     private function finish(Transaction $txn): Transaction

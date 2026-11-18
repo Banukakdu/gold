@@ -35,6 +35,9 @@ class BackfillPlanner
 
     private ?int $mainId = null;
 
+    /** @var array<int, int> */
+    private array $branchOf = [];
+
     public function __construct(private PostingRules $rules) {}
 
     /**
@@ -138,9 +141,10 @@ class BackfillPlanner
         };
     }
 
+    /** Memoised (review R2): an account never changes branch. */
     private function branchOf(int|string|null $accountId): int
     {
-        return (int) DB::table('accounts')->where('id', $accountId)->value('branch_id');
+        return $this->branchOf[(int) $accountId] ??= (int) DB::table('accounts')->where('id', $accountId)->value('branch_id');
     }
 
     private function mainId(): int

@@ -25,6 +25,14 @@ class DoubleEntryBackfill
 {
     public const SAMPLE = 20;
 
+    public const BATCH = 100;
+
+    /** Entries per commit in a write run (tests use a small batch to stop part-way). */
+    public int $batch = self::BATCH;
+
+    /** See estimateSeconds(); set from the 20k-transaction measurement in the README. */
+    public const MS_PER_TRANSACTION = 8;
+
     public function __construct(private LedgerService $ledger, private BackfillPlanner $planner, private ChartOfAccounts $chart) {}
 
     /** What the migration does: preflight, chart, back-fill. Returns the run summary. */
@@ -41,7 +49,7 @@ class DoubleEntryBackfill
      * for every non-main branch, Owner's capital in MAIN and the category accounts. One `ledger.chart_created` row when
      * anything was created (user null, branch null).
      */
-    public function setupChart(): array
+    public function setupChart(string $source = 'migration'): array
     {
         $this->chart->takeCreated();
         DB::transaction(function () {
@@ -84,7 +92,7 @@ class DoubleEntryBackfill
         $created = $this->chart->takeCreated();
         if ($created) {
             AuditLog::create(['user_id' => null, 'branch_id' => null, 'event' => 'ledger.chart_created',
-                'new_values' => ['source' => 'migration', 'by_branch' => ChartOfAccounts::countByBranch($created)]]);
+                'new_values' => ['source' => $source, 'by_branch' => ChartOfAccounts::countByBranch($created)]]);
         }
 
         return ChartOfAccounts::countByBranch($created);
@@ -94,59 +102,83 @@ class DoubleEntryBackfill
      * Back-fill every transaction in id order, one DB transaction each. With $dryRun nothing is written (and this works
      * before `migrate`): the same counts and a sample of SAMPLE transactions are returned.
      *
-     * @return array{transactions:int, lines:int, by_type:array, by_branch:array, locked_periods:array, money_balances_unchanged:bool, skipped_legacy_voids:int, sample:array}
+     * The safety check compares money balances before and after; with $concurrent (other postings may run) it checks
+     * that cached and ledger balances still agree instead (review R5).
+     *
+     * A write run plans each transaction once, inside LedgerService::backfill under its row lock (review R2).
+     *
+     * @return array{transactions:int, lines:int, by_type:array, by_branch:array, locked_periods:array, money_balances_unchanged:bool, skipped_legacy_voids:int, sample:array, seconds:float}
      */
-    public function run(bool $dryRun): array
+    public function run(bool $dryRun, bool $concurrent = false): array
     {
+        $started = microtime(true);
         $before = $this->moneyBalances();
         $codes = Branch::pluck('code', 'id');
         $sum = ['transactions' => 0, 'lines' => 0, 'by_type' => [], 'by_branch' => [], 'locked_periods' => [], 'skipped_legacy_voids' => 0];
         $sample = [];
+        $locked = [];
+        $isLocked = fn (int $branchId, string $month) => $locked["{$branchId}|{$month}"] ??= PeriodLock::isLocked($branchId, "{$month}-01");
 
-        Transaction::withoutGlobalScopes()->orderBy('id')->chunkById(500, function ($txns) use ($dryRun, $codes, &$sum, &$sample) {
-            foreach ($txns as $t) {
+        $one = function (Transaction $t) use ($dryRun, $codes, $isLocked, &$sum, &$sample) {
+            if ($dryRun) {
                 $plan = $this->planner->plan($t);
-                if ($plan['status'] === BackfillPlanner::LEGACY_VOID) {
-                    $sum['skipped_legacy_voids']++;
-
-                    continue;
-                }
                 if ($plan['status'] === BackfillPlanner::ERROR) {
                     throw new LedgerException($plan['error']);
                 }
-                if ($plan['status'] !== BackfillPlanner::PLAN) {
-                    continue;
+            } else {
+                $plan = $this->ledger->backfill($t);
+                if (count($plan['entries']) !== count($plan['lines'])) {
+                    throw new LedgerException("Back-fill of {$t->ref_no} wrote ".count($plan['entries']).' lines, '.count($plan['lines']).' were planned.');
                 }
-                if (! $dryRun) {
-                    $written = $this->ledger->backfill($t);
-                    if (count($written) !== count($plan['lines'])) {
-                        throw new LedgerException("Back-fill of {$t->ref_no} wrote ".count($written).' lines, '.count($plan['lines']).' were planned.');
-                    }
+            }
+            if ($plan['status'] === BackfillPlanner::LEGACY_VOID) {
+                $sum['skipped_legacy_voids']++;
+
+                return;
+            }
+            if ($plan['status'] !== BackfillPlanner::PLAN) {
+                return;
+            }
+            $n = count($plan['lines']);
+            $sum['transactions']++;
+            $sum['lines'] += $n;
+            $sum['by_type'][$t->type] = ($sum['by_type'][$t->type] ?? 0) + $n;
+            foreach ($plan['lines'] as $l) {
+                $code = $codes[$l['branch_id']] ?? (string) $l['branch_id'];
+                $sum['by_branch'][$code] = ($sum['by_branch'][$code] ?? 0) + 1;
+                $month = substr($l['date'], 0, 7);
+                if ($isLocked((int) $l['branch_id'], $month)) {
+                    $key = $code.'|'.$month;
+                    $sum['locked_periods'][$key] ??= ['branch' => $code, 'period' => $month, 'lines' => 0];
+                    $sum['locked_periods'][$key]['lines']++;
                 }
-                $n = count($plan['lines']);
-                $sum['transactions']++;
-                $sum['lines'] += $n;
-                $sum['by_type'][$t->type] = ($sum['by_type'][$t->type] ?? 0) + $n;
-                foreach ($plan['lines'] as $l) {
-                    $code = $codes[$l['branch_id']] ?? (string) $l['branch_id'];
-                    $sum['by_branch'][$code] = ($sum['by_branch'][$code] ?? 0) + 1;
-                    if (PeriodLock::isLocked((int) $l['branch_id'], $l['date'])) {
-                        $key = $code.'|'.substr($l['date'], 0, 7);
-                        $sum['locked_periods'][$key] ??= ['branch' => $code, 'period' => substr($l['date'], 0, 7), 'lines' => 0];
-                        $sum['locked_periods'][$key]['lines']++;
-                    }
-                }
-                if (count($sample) < self::SAMPLE) {
-                    $sample[] = ['ref_no' => $t->ref_no ?? "#{$t->id}", 'type' => $t->type, 'status' => $t->status,
-                        'lines' => array_map(fn ($l) => ['date' => $l['date'], 'account' => $this->planner->describe($l['ref'], (int) $l['branch_id']),
-                            'debit' => Money::fromCents($l['debit']), 'credit' => Money::fromCents($l['credit']), 'contra' => isset($l['contra_of_new'])], $plan['lines'])];
-                }
+            }
+            if (count($sample) < self::SAMPLE) {
+                $sample[] = ['ref_no' => $t->ref_no ?? "#{$t->id}", 'type' => $t->type, 'status' => $t->status,
+                    'lines' => array_map(fn ($l) => ['date' => $l['date'], 'account' => $this->planner->describe($l['ref'], (int) $l['branch_id']),
+                        'debit' => Money::fromCents($l['debit']), 'credit' => Money::fromCents($l['credit']), 'contra' => isset($l['contra_of_new'])], $plan['lines'])];
+            }
+        };
+
+        // Review R2: a write run commits every BATCH transactions (each still all-or-nothing, as a savepoint), which
+        // saves a disk flush per entry. A stop rolls back the open batch only; a re-run completes it. While other
+        // postings may run ($concurrent), every entry commits on its own so no account lock is held for long.
+        $batch = $dryRun || $concurrent ? 1 : max(1, $this->batch);
+        Transaction::withoutGlobalScopes()->orderBy('id')->chunkById(500, function ($txns) use ($one, $batch, $dryRun) {
+            foreach ($txns->chunk($batch) as $group) {
+                $dryRun ? $group->each($one) : DB::transaction(fn () => $group->each($one));
             }
         });
 
-        // R6 safety: no cash / bank / wallet balance may change.
+        // R6 safety: no cash / bank / wallet balance may change. Valid only while nothing else posts (maintenance mode,
+        // or the migration); `ledger:backfill-double-entry` refuses otherwise unless --force (review R5).
+        // With $concurrent (--force while the app is up) other postings move balances legitimately, so only the
+        // invariant is checked: every money account's cached balance still equals its ledger (no back-fill line on it).
         $after = $this->moneyBalances();
-        if ($before !== $after) {
+        $broken = $concurrent
+            ? array_filter($after, fn ($v) => explode('|', $v)[0] !== explode('|', $v)[1])
+            : ($before !== $after);
+        if ($broken) {
             throw new RuntimeException('The back-fill changed a cash, bank or wallet balance. This must never happen; restore the backup and report it.');
         }
         ksort($sum['by_type']);
@@ -160,7 +192,16 @@ class DoubleEntryBackfill
             AuditLog::create(['user_id' => null, 'branch_id' => null, 'event' => 'ledger.double_entry_backfilled', 'new_values' => $sum]);
         }
 
-        return $sum + ['sample' => $sample];
+        return $sum + ['sample' => $sample, 'seconds' => round(microtime(true) - $started, 1)];
+    }
+
+    /**
+     * Rough duration of a write run, for the dry run (review R2): measured on MySQL 8.4 (Docker, default durability
+     * settings) at about MS_PER_TRANSACTION per transaction to complete. A slow disk or a busy server takes longer.
+     */
+    public static function estimateSeconds(int $transactions): int
+    {
+        return (int) ceil($transactions * self::MS_PER_TRANSACTION / 1000);
     }
 
     /** @return array<int, string> cached and ledger balance of every money account, by id */
@@ -170,6 +211,6 @@ class DoubleEntryBackfill
             ->leftJoin('ledger_entries as le', 'le.account_id', '=', 'a.id')
             ->groupBy('a.id', 'a.current_balance')->orderBy('a.id')
             ->selectRaw('a.id, a.current_balance, COALESCE(SUM('.Money::sqlCents('le.debit').' - '.Money::sqlCents('le.credit').'), 0) as ledger')
-            ->get()->mapWithKeys(fn ($r) => [$r->id => Money::add($r->current_balance).'|'.(int) $r->ledger])->all();
+            ->get()->mapWithKeys(fn ($r) => [$r->id => Money::toCents($r->current_balance).'|'.(int) $r->ledger])->all();
     }
 }
