@@ -46,7 +46,9 @@ class ConsoleResetTest extends PasswordResetTestCase
         $row = AuditLog::where('event', 'auth.password_reset')->sole();
         $this->assertNull($row->user_id);
         $this->assertSame($sa->id, $row->auditable_id);
-        $this->assertSame(['user_id' => $sa->id, 'email' => $sa->email, 'via' => 'console', 'tokens_revoked' => 2], $row->new_values);
+        $this->assertSame([null, 'console'], [$row->ip, $row->user_agent]); // reviewer N6
+        // assertEquals: MySQL's JSON column does not keep key order.
+        $this->assertEquals(['user_id' => $sa->id, 'email' => $sa->email, 'via' => 'console', 'tokens_revoked' => 2], $row->new_values);
 
         Notification::assertSentTo($sa, PasswordChangedNotification::class, fn ($n) => $n->ip === null && str_contains($n->text(), 'from the server console'));
         Notification::assertSentTo($b, PasswordResetAlertNotification::class, fn ($n) => $n->kind === 'reset' && $n->via === 'console');

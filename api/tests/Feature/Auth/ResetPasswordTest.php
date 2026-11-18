@@ -106,7 +106,9 @@ class ResetPasswordTest extends PasswordResetTestCase
         $row = AuditLog::where('event', 'auth.password_reset')->sole();
         $this->assertSame($u->id, $row->user_id);
         $this->assertSame([User::class, $u->id], [$row->auditable_type, $row->auditable_id]);
-        $this->assertSame(['user_id' => $u->id, 'email' => 'u@x.com', 'first_password' => false, 'tokens_revoked' => 0], $row->new_values);
+        // assertEquals: MySQL's JSON column does not keep key order.
+        $this->assertEquals(['user_id' => $u->id, 'email' => 'u@x.com', 'first_password' => false, 'tokens_revoked' => 0], $row->new_values);
+        $this->assertFalse($row->new_values['first_password']);
         $this->assertSame('10.4.4.4', $row->ip);
         $this->assertNotNull($row->created_at);
         $this->assertNull($row->branch_id);
@@ -162,7 +164,7 @@ class ResetPasswordTest extends PasswordResetTestCase
             $this->reset("p$n@x.com", 'bogus', 'newpass123', null, '10.6.0.1')->assertStatus(422);
         }
         $this->reset('p11@x.com', 'bogus', 'newpass123', null, '10.6.0.1')->assertStatus(429)
-            ->assertJsonPath('message', 'Too many requests. Try again in 1 minutes.');
+            ->assertJsonPath('message', 'Too many requests. Try again in 1 minute.');
     }
 
     public function test_ac23_reset_clears_the_login_lock_of_the_request_ip(): void
@@ -188,5 +190,17 @@ class ResetPasswordTest extends PasswordResetTestCase
         $this->public()->postJson('/api/v1/auth/set-password', ['token' => $token, 'email' => $this->admin->email, 'password' => 'newpass123', 'password_confirmation' => 'newpass123'])
             ->assertStatus(422)->assertJsonValidationErrors('token');
         $this->login($this->admin->email, 'ChangeMe123')->assertOk();
+    }
+
+    public function test_n8_super_admin_link_refused_once_no_other_super_admin_is_active(): void
+    {
+        config(['auth.super_admin_email_reset' => true]);
+        $b = $this->secondSuperAdmin();
+        $token = $this->tokenFor($this->admin);
+        $b->forceFill(['status' => 'inactive'])->save();
+
+        $this->reset($this->admin->email, $token)->assertStatus(422)->assertJsonPath('errors.token.0', self::TOKEN_MESSAGE);
+        $b->forceFill(['status' => 'active'])->save();
+        $this->reset($this->admin->email, $token)->assertNoContent();
     }
 }

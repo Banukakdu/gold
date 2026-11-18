@@ -41,7 +41,8 @@ class AuditLogController extends Controller
 
     public const MASK = '••••';
 
-    /** Keys that match the mask pattern but hold no secret (password reset spec R12: a flag and a count). */
+    /** Keys that match the mask pattern but hold no secret (password reset spec R12: a flag and a count), shown only
+     * when the value really is a bool or an int (reviewer N7). */
     public const NOT_SECRET = ['first_password', 'tokens_revoked'];
 
     /** Event groups of the filter: [prefixes, exact events]. */
@@ -369,7 +370,8 @@ class AuditLogController extends Controller
             return $values;
         }
         foreach ($values as $k => $v) {
-            $secret = is_string($k) && ! in_array($k, self::NOT_SECRET, true) && preg_match('/password|token|secret/i', $k);
+            $plain = in_array($k, self::NOT_SECRET, true) && (is_bool($v) || is_int($v));
+            $secret = is_string($k) && ! $plain && preg_match('/password|token|secret/i', $k);
             $values[$k] = $secret ? self::MASK : self::mask($v);
         }
 

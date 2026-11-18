@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Support\BranchContext;
+use App\Support\Minutes;
 use App\Support\Settings;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
@@ -55,11 +56,11 @@ class AppServiceProvider extends ServiceProvider
         return is_string($email) ? mb_strtolower(trim($email)) : '';
     }
 
-    /** R4: "Too many requests. Try again in N minutes." with N rounded up, minimum 1. */
+    /** R4: "Too many requests. Try again in N minutes." with N rounded up, minimum 1 ("1 minute"). */
     private static function tooMany(Request $r, array $headers)
     {
-        $minutes = max(1, (int) ceil(((int) ($headers['Retry-After'] ?? 60)) / 60));
+        $wait = Minutes::text((int) ($headers['Retry-After'] ?? 60));
 
-        return response()->json(['message' => "Too many requests. Try again in {$minutes} minutes."], 429, $headers);
+        return response()->json(['message' => "Too many requests. Try again in {$wait}."], 429, $headers);
     }
 }

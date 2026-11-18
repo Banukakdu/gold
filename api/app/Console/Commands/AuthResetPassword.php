@@ -24,8 +24,7 @@ class AuthResetPassword extends Command
 
     public function handle(): int
     {
-        $email = mb_strtolower(trim((string) $this->argument('email')));
-        $user = User::whereRaw('lower(email) = ?', [$email])->first();
+        $user = User::findByEmail((string) $this->argument('email'));
         if (! $user) {
             $this->error('No user with this email.');
 
@@ -49,7 +48,7 @@ class AuthResetPassword extends Command
             // No actor: the console has no signed-in user (auth()->id() is null).
             AuditLog::record('auth.password_reset', $user, null, [
                 'user_id' => $user->id, 'email' => $user->email, 'via' => 'console', 'tokens_revoked' => $revoked,
-            ]);
+            ], null, ['ip' => null, 'user_agent' => 'console']); // reviewer N6: not the CLI's 127.0.0.1 / Symfony agent
 
             return $revoked;
         });

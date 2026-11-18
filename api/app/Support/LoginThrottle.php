@@ -7,8 +7,11 @@ use Illuminate\Support\Facades\RateLimiter;
 
 /**
  * AG-001 login lockout, keyed by email|ip (password reset spec section 7).
- * G1: the 5th failure within 15 minutes starts a separate 15-minute lock from that moment, so the lock always lasts
- * the full 15 minutes. The IPs seen for an email are remembered so the console recovery command can clear every lock.
+ * - G1: the 5th failure within 15 minutes starts a separate 15-minute lock from that moment.
+ * - Reviewer R2: an attempt is counted BEFORE the slow password check, so parallel guesses cannot all pass the
+ *   check-then-count gap; attempts over the limit are refused without a password check.
+ * - The lock is written with Cache::add, so exactly one request starts it (G4: one auth.locked_out row per lock).
+ * - Reviewer R4: the keys carry a per-email generation; clearAll() bumps it, which drops every IP's counter and lock.
  */
 final class LoginThrottle
 {
@@ -19,57 +22,60 @@ final class LoginThrottle
     /** Seconds left on the lock, or null when not locked. */
     public static function lockedFor(string $email, string $ip): ?int
     {
-        $lock = self::lockKey($email, $ip);
+        $until = (int) Cache::get(self::lockKey($email, $ip), 0);
+        $left = $until - now()->getTimestamp();
 
-        return RateLimiter::tooManyAttempts($lock, 1) ? max(1, RateLimiter::availableIn($lock)) : null;
+        return $left > 0 ? $left : null;
     }
 
-    /** Count a failure. Returns true when this failure started a lock (G4: audit it once). */
-    public static function fail(string $email, string $ip): bool
+    /** Count an attempt before checking the password. Returns the attempt number within the window. */
+    public static function hit(string $email, string $ip): int
     {
-        $attempts = self::attemptsKey($email, $ip);
-        RateLimiter::hit($attempts, self::DECAY_SECONDS);
-        $ips = Cache::get(self::ipsKey($email), []);
-        if (! in_array($ip, $ips, true)) {
-            $ips[] = $ip;
-        }
-        Cache::put(self::ipsKey($email), $ips, now()->addSeconds(2 * self::DECAY_SECONDS));
+        return RateLimiter::hit(self::attemptsKey($email, $ip), self::DECAY_SECONDS);
+    }
 
-        if (RateLimiter::attempts($attempts) < self::MAX_FAILURES) {
-            return false;
+    /** Start the lock. True only for the one request that started it (audit it then). */
+    public static function lock(string $email, string $ip): bool
+    {
+        $started = Cache::add(self::lockKey($email, $ip), now()->getTimestamp() + self::DECAY_SECONDS, self::DECAY_SECONDS);
+        if ($started) {
+            RateLimiter::clear(self::attemptsKey($email, $ip)); // a fresh window after the lock ends
         }
-        RateLimiter::hit(self::lockKey($email, $ip), self::DECAY_SECONDS);
-        RateLimiter::clear($attempts); // a fresh window after the lock ends
 
-        return true;
+        return $started;
     }
 
     public static function clear(string $email, string $ip): void
     {
         RateLimiter::clear(self::attemptsKey($email, $ip));
-        RateLimiter::clear(self::lockKey($email, $ip));
+        Cache::forget(self::lockKey($email, $ip));
     }
 
-    /** Clear the failures and locks of every IP seen for the email (console recovery, accounting review finding 2). */
+    /** Clear the counters and locks of every IP for the email (console recovery, accounting review finding 2). */
     public static function clearAll(string $email): void
     {
-        foreach (Cache::pull(self::ipsKey($email), []) as $ip) {
-            self::clear($email, $ip);
-        }
+        $key = self::generationKey($email);
+        Cache::add($key, 0);
+        Cache::increment($key);
     }
 
     private static function attemptsKey(string $email, string $ip): string
     {
-        return 'login:'.mb_strtolower($email).'|'.$ip;
+        return 'login:'.self::generation($email).':'.mb_strtolower($email).'|'.$ip;
     }
 
     private static function lockKey(string $email, string $ip): string
     {
-        return 'login-lock:'.mb_strtolower($email).'|'.$ip;
+        return 'login-lock:'.self::generation($email).':'.mb_strtolower($email).'|'.$ip;
     }
 
-    private static function ipsKey(string $email): string
+    private static function generation(string $email): int
     {
-        return 'login-ips:'.mb_strtolower($email);
+        return (int) Cache::get(self::generationKey($email), 0);
+    }
+
+    private static function generationKey(string $email): string
+    {
+        return 'login-gen:'.mb_strtolower($email);
     }
 }

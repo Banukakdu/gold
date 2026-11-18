@@ -115,7 +115,7 @@ class ForgotPasswordTest extends PasswordResetTestCase
         for ($n = 1; $n <= 5; $n++) {
             $this->forgot("person$n@x.com", '10.2.0.1')->assertStatus(202);
         }
-        $this->forgot('person6@x.com', '10.2.0.1')->assertStatus(429)->assertJsonPath('message', 'Too many requests. Try again in 1 minutes.');
+        $this->forgot('person6@x.com', '10.2.0.1')->assertStatus(429)->assertJsonPath('message', 'Too many requests. Try again in 1 minute.');
         $this->forgot('person6@x.com', '10.2.0.2')->assertStatus(202);
     }
 

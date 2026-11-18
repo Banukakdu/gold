@@ -34,7 +34,7 @@ abstract class PasswordResetTestCase extends AccountingTestCase
     protected function member(string $email, string $role = 'Cashier', array $attrs = []): User
     {
         $u = $this->userIn($this->kdy, $role);
-        $u->forceFill(['email' => $email, 'password' => 'oldpass123', 'last_login_at' => now()->subDay()] + $attrs)->save();
+        $u->forceFill($attrs + ['email' => $email, 'password' => 'oldpass123', 'last_login_at' => now()->subDay()])->save();
 
         return $u->fresh();
     }

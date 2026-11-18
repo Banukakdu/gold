@@ -8,13 +8,13 @@ use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\User;
 use App\Services\PasswordResets;
+use App\Support\DummyHash;
 use App\Support\LoginThrottle;
+use App\Support\Minutes;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
-use Illuminate\Support\Str;
 use Illuminate\Validation\Rules\Password as PasswordRule;
 use Illuminate\Validation\ValidationException;
 
@@ -29,19 +29,27 @@ class AuthController extends Controller
         $ip = (string) $request->ip();
 
         if ($seconds = LoginThrottle::lockedFor($email, $ip)) {
-            return response()->json(['message' => 'Too many failed attempts. Try again in '.ceil($seconds / 60).' minutes.'], 429);
+            return $this->lockedResponse($seconds);
+        }
+        // Reviewer R2: count first, so parallel guesses cannot all get past the limit during the slow check.
+        $attempt = LoginThrottle::hit($email, $ip);
+        if ($attempt > LoginThrottle::MAX_FAILURES) {
+            $this->lock($email, $ip);
+
+            return $this->lockedResponse(LoginThrottle::lockedFor($email, $ip) ?? LoginThrottle::DECAY_SECONDS);
         }
 
-        $user = User::whereRaw('lower(email) = ?', [$email])->first();
-        // G3: an unknown email is checked against a dummy hash, so it takes as long as a known one.
-        $valid = $user ? Hash::check($data['password'], $user->password) : Hash::check($data['password'], self::dummyHash());
+        $user = User::findByEmail($email);
+        // G3: an unknown email is checked against the dummy hash, so it takes as long as a known one.
+        $valid = $user ? Hash::check($data['password'], $user->password) : DummyHash::check($data['password']);
         if (! $user || ! $valid) {
-            if (LoginThrottle::fail($email, $ip)) {
-                AuditLog::record('auth.locked_out', $user, null, ['email' => $email]); // G4: once per lock
+            if ($attempt >= LoginThrottle::MAX_FAILURES) {
+                $this->lock($email, $ip);
             }
 
             return response()->json(['message' => 'Invalid email or password.'], 422);
         }
+        LoginThrottle::clear($email, $ip);
         if ($user->status !== 'active') {
             return response()->json(['message' => 'Your account is inactive. Contact your administrator.'], 403);
         }
@@ -50,12 +58,24 @@ class AuthController extends Controller
             return response()->json(['message' => 'You do not have access to any branch. Contact your administrator.'], 403); // B12
         }
 
-        LoginThrottle::clear($email, $ip);
         $user->forceFill(['last_login_at' => now()])->save();
         auth()->setUser($user);
         AuditLog::record('auth.login', $user);
 
         return ['token' => $user->createToken('web')->plainTextToken, 'user' => $this->profile($user)];
+    }
+
+    /** G4: one auth.locked_out row per lock, written by the one request whose Cache::add started it. */
+    private function lock(string $email, string $ip): void
+    {
+        if (LoginThrottle::lock($email, $ip)) {
+            AuditLog::record('auth.locked_out', User::findByEmail($email), null, ['email' => $email]);
+        }
+    }
+
+    private function lockedResponse(int $seconds)
+    {
+        return response()->json(['message' => 'Too many failed attempts. Try again in '.Minutes::text($seconds).'.'], 429);
     }
 
     /** N5: invited user sets their password with the emailed token (AG-020, 60-minute link, single use). */
@@ -66,23 +86,18 @@ class AuthController extends Controller
             'email' => 'required|email',
             'password' => ['required', 'string', PasswordRule::defaults(), 'confirmed'],
         ]);
-        $data['email'] = mb_strtolower($data['email']);
-        $expired = fn () => ValidationException::withMessages(['token' => 'This link has expired. Ask your administrator to resend the invitation.']);
+        $user = User::findByEmail($data['email']);
+        // R9: invitations only; a user who has logged in before uses the reset flow (its audit row and alerts). A Super
+        // Admin is never invited, so their link goes through here only when an email reset would be allowed (R11).
+        $allowed = $user && $user->last_login_at === null && (! $user->is_super_admin || PasswordResets::emailResetAllowed($user));
 
-        // R9: invitations only. A user who has logged in before must use the reset flow (its audit row and alerts).
-        $user = User::whereRaw('lower(email) = ?', [$data['email']])->first();
-        // A Super Admin is never invited; a reset link of theirs must not get through here while the R11 switch is off.
-        if ($user && ($user->last_login_at !== null || ($user->is_super_admin && ! config('auth.super_admin_email_reset')))) {
-            throw $expired();
-        }
-
-        $status = DB::transaction(fn () => Password::reset($data, function (User $user, string $password) {
-            PasswordResets::setPassword($user, $password); // also deletes any API token (none expected)
+        $ok = PasswordResets::consume($user, mb_strtolower($data['email']), $data['token'], (bool) $allowed, function (User $user) use ($data) {
+            PasswordResets::setPassword($user, $data['password']); // also deletes any API token (none expected)
             auth()->setUser($user);
             AuditLog::record('user.password_set', $user);
-        }));
-        if ($status !== Password::PASSWORD_RESET) {
-            throw $expired();
+        });
+        if (! $ok) {
+            throw ValidationException::withMessages(['token' => 'This link has expired. Ask your administrator to resend the invitation.']);
         }
 
         return response()->noContent();
@@ -112,27 +127,23 @@ class AuthController extends Controller
             'email' => 'required|email',
             'password' => ['required', 'string', PasswordRule::defaults(), 'confirmed'],
         ]);
-        $data['email'] = mb_strtolower($data['email']);
-        $invalid = fn () => ValidationException::withMessages(['token' => PasswordResets::TOKEN_MESSAGE]);
+        $user = User::findByEmail($data['email']);
+        // Unknown, inactive (R5) and refused Super Admin (R11) all end in the same token error, after the same one check.
+        $allowed = $user && PasswordResets::emailResetAllowed($user);
 
-        $user = User::whereRaw('lower(email) = ?', [$data['email']])->first();
-        if ($user && ! PasswordResets::emailResetAllowed($user)) {
-            throw $invalid(); // inactive (R5) or a Super Admin while email reset is off (R11)
-        }
-
-        $status = DB::transaction(fn () => Password::reset($data, function (User $user, string $password) {
+        $ok = PasswordResets::consume($user, mb_strtolower($data['email']), $data['token'], (bool) $allowed, function (User $user) use ($data) {
             $firstPassword = $user->last_login_at === null; // R7
-            $revoked = PasswordResets::setPassword($user, $password);
+            $revoked = PasswordResets::setPassword($user, $data['password']);
             auth()->setUser($user); // accounting review finding 4: the actor is the user
             AuditLog::record('auth.password_reset', $user, null, [
                 'user_id' => $user->id, 'email' => $user->email, 'first_password' => $firstPassword, 'tokens_revoked' => $revoked,
             ]);
-        }));
-        if ($status !== Password::PASSWORD_RESET) {
-            throw $invalid();
+        });
+        if (! $ok) {
+            throw ValidationException::withMessages(['token' => PasswordResets::TOKEN_MESSAGE]);
         }
 
-        LoginThrottle::clear($data['email'], (string) $request->ip());
+        LoginThrottle::clear($user->email, (string) $request->ip());
         PasswordResets::notify($user, $request->ip(), 'email');
 
         return response()->noContent();
@@ -174,13 +185,5 @@ class AuthController extends Controller
                 ];
             })->values(),
         ];
-    }
-
-    /** G3: a bcrypt hash of a random value at the configured cost, made once and kept in the cache. */
-    private static function dummyHash(): string
-    {
-        $key = 'auth:dummy-hash:'.config('hashing.driver').':'.config('hashing.bcrypt.rounds');
-
-        return Cache::rememberForever($key, fn () => Hash::make(Str::random(40)));
     }
 }

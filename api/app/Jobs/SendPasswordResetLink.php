@@ -22,11 +22,14 @@ class SendPasswordResetLink implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable;
 
+    /** Reviewer N9: never retried, so a failure after the token was made cannot make a second token or audit row. */
+    public $tries = 1;
+
     public function __construct(public string $email, public ?string $ip, public ?string $userAgent) {}
 
     public function handle(): void
     {
-        $user = User::whereRaw('lower(email) = ?', [mb_strtolower($this->email)])->first();
+        $user = User::findByEmail($this->email); // exact match only (reviewer R3)
         if (! $user) {
             return; // no audit row: unknown addresses stay out of the log (Q8)
         }
@@ -42,9 +45,10 @@ class SendPasswordResetLink implements ShouldQueue
         if ($broker->getRepository()->recentlyCreatedToken($user)) {
             return; // Password::RESET_THROTTLED: quietly, 60 s per account
         }
-        // Replaces any older row for the email (an invitation included, R6). Only a hash is stored (R1).
-        $token = $broker->createToken($user);
         $this->audit('auth.password_reset_requested', $user, ['email' => $user->email]);
+        // Last step before the send (N9). Replaces any older row for the email (an invitation included, R6). Only a
+        // hash is stored (R1).
+        $token = $broker->createToken($user);
         try {
             $user->notify(new PasswordResetLinkNotification($token));
         } catch (\Throwable $e) {
@@ -54,6 +58,6 @@ class SendPasswordResetLink implements ShouldQueue
 
     private function audit(string $event, User $user, array $new): void
     {
-        AuditLog::record($event, $user, null, $new, null, $this->ip, $this->userAgent);
+        AuditLog::record($event, $user, null, $new, null, ['ip' => $this->ip, 'user_agent' => $this->userAgent]);
     }
 }
