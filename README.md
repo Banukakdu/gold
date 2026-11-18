@@ -53,6 +53,28 @@ The migration `2026_11_20_000000_accounting_controls` adds database triggers tha
    old copy superseded. No ledger correction is made.
 5. Rolling back is possible only while no lock has been unlocked (unlock history has two rows per branch and month).
 
+### Deploying the attachments release (AG-062 receipts and invoices)
+
+The migration `2026_11_21_000000_create_attachments_table` adds the `attachments` table with triggers that refuse
+DELETE and any UPDATE other than the one-time removal (same MySQL trigger privilege as above). Files are stored on the
+private `attachments` disk (`api/storage/app/attachments`, never under `public/`, no `storage:link`) and are only
+streamed by the API after an access check.
+
+1. **PHP upload limits.** Each file may be 5 MB. Set `upload_max_filesize = 6M` and `post_max_size = 8M` (or more) in
+   the PHP-FPM `php.ini`; PHP's default 2M refuses most phone photos and scanned PDFs. Allow a request body of at least
+   8 MB in the web server too (nginx `client_max_body_size 8m;`, Apache `LimitRequestBody 8388608`).
+2. **Storage.** `storage/app/attachments` must exist and be writable by the PHP user (files are written read-only,
+   `0440`). Do not serve it from the web server.
+3. **Backups.** Back up `storage/app/attachments` **together with** the database, in the same backup run, so a
+   restore never pairs attachment rows with older files. Rows and files are never deleted by the app; keep them at
+   least as long as the statutory record period (confirm with the tax adviser; normally at least 5 years).
+4. `php artisan migrate --force`, then **`php artisan attachments:verify`**. It checks that every attachment row
+   (removed ones included) has its file on disk with the stored sha256, lists missing or changed files by entry ref
+   and attachment id, and exits 1 on any problem. Run it after every deploy and after every backup restore, next to
+   `php artisan ledger:verify`.
+5. Rolling back the migration is refused once any attachment exists (rows and files are evidence); restore a backup
+   taken before the migration instead.
+
 ## How it works
 
 **Branch context.** The app sends the active branch in an `X-Branch-Id` header. Middleware checks the user belongs
@@ -88,6 +110,8 @@ All under `/api/v1`, bearer token from `POST auth/login`, plus `X-Branch-Id`.
 `GET accounts/{id}/statement?from&to` · `GET accounts/destinations` · `GET|POST categories` · `PUT categories/{id}` ·
 `GET transactions` · `GET|PUT transactions/{id}` · `POST transactions/{id}/void` · `POST transactions/{id}/reverse` ·
 `POST incomes` · `POST expenses` · `POST capital` · `POST allocations` · `POST transfers` ·
+`GET|POST transactions/{id}/attachments` · `GET transactions/{id}/attachments/{attachment}/download` ·
+`POST transactions/{id}/attachments/{attachment}/remove` ·
 `GET permissions` · `GET|POST roles` · `PUT roles/{id}` · `GET|POST users` · `PUT users/{id}` · `POST users/{id}/role`
 
 ## Status against the backlog (docs/Account-gold_Product_Backlog.xlsx)
@@ -99,5 +123,7 @@ AG-040/041/043 opening balance, top-up, capital, AG-042 fund return, AG-050/053/
 AG-060/061/063/065 income, expense, void, list and filters, AG-070/072 categories (API; tree editor UI next),
 AG-080/081 dashboards, AG-090 audit log (writing; viewer UI next), AG-092 settings table, AG-091 period lock (enforced; UI next).
 
-Next up: users and roles screens, category editor, attachments (AG-062), reports AG-082 to AG-085 with PDF/Excel export,
+AG-062 attachments on income and expense entries (private files, soft removal, `attachments:verify`).
+
+Next up: users and roles screens, category editor, reports AG-082 to AG-085 with PDF/Excel export,
 password reset (AG-002), audit log viewer, then the R2 approval workflow.
