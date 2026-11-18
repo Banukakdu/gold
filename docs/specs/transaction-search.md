@@ -235,3 +235,26 @@ Fixture (KDY branch, unless stated): E1 income 2026-10-05 "Retail" › "Walk-in"
 - **Q5 Branch-only sub-categories in All mode.** The Category options in All mode are global only (categories spec), so a Super Admin can filter by a branch-only sub only in branch mode or via a drill-down link. **Assumed acceptable for R1**; the parent filter already includes them.
 - **Q6 Export throttle.** **Assumed none**, as for report exports (cap 5,000, synchronous). Add `throttle` if exports become heavy.
 - **Q7 Text search scope.** **Assumed: ref no, payee/payer, reference, description only**, one phrase, no word splitting. Adding account or category names would duplicate their filters.
+
+## Accounting review
+Reviewed against double entry (`docs/specs/double-entry.md`), `LedgerService`, `PostingRules::transfer` and the existing report exports. Search and export change no data (R15), so the review is about completeness, isolation and audit evidence.
+
+**Answers to the open questions**
+- **Q1 Confirmed: show received top-ups, allocations, fund returns and branch transfers, read-only, tagged "In".** They move the branch's cash, the branch can already open them (double-entry R10), and without them the list cannot be ticked against the cash book or a bank statement. Reversals of those rows must come in the same way (they copy `related_branch_id`, `LedgerService` line ~264). Void/Reverse/Edit/Files stay with the sending branch.
+- **Q2 Confirmed: every status shown by default**, void struck through, reversed and reversal rows linked, closing entries with "—". Hiding voids by default would hide exactly what an auditor looks for. No "hide void" toggle in R1; the Status filter covers it.
+- **Q3 Confirmed: positive stored amounts, no totals row.** A plain sum of a mixed list is meaningless; the direction is carried by the type and the In marker (see S2).
+- **Q4–Q7:** accepted as assumed, no accounting impact.
+
+**Findings**
+1. **MUST – Export carries void evidence.** A void posts contra lines on the void date, which can be in a later month than `txn_date`. Add columns **Voided on**, **Voided by**, **Void reason**, filled from the `transaction.voided` audit row (and `transaction.year_end_reopened` for a cancelled closing entry), loaded in one query for the exported ids. Empty for non-void rows. AC: E4 exported with `status=void` shows its void date, the voiding user and "duplicate".
+2. **MUST – Reversal links in both directions in the export.** Add columns **Reversal of** (ref) and **Reversed by** (ref), not only in the Status text; Status for E6 reads `Reversed by <E7 ref>`. AC: AC 30 extended — E6 row has Reversed by = E7's ref, E7 row has Reversal of = E6's ref.
+3. **MUST – Scope for list, export, creators and counts is built only from `BranchContext`** (R10), never from request params alone; `branches[]` only narrows it, and only in All mode (Super Admin, `SetBranchContext`). AC: a KDY Accountant's export with no filters, with `account_id=<GAL Bank>`, and with `created_by=<Saman>` never contains E8 or any other GAL-only row; the header reads `Branches: KDY Kandy`.
+4. **MUST – Export audit row records the resolved scope.** `params` must also hold `scope_branch_ids` (the resolved set, e.g. `[KDY]`, or every branch id in All mode) so the evidence does not depend on the reader knowing the mode. AC 33 updated accordingly.
+5. **MUST – Incoming rows are read-only everywhere.** Keep AC 2 and add: as GAL, `POST /transactions/{E6}/reverse` and a file upload on E6 return 404, and E6 shows no actions in GAL's list; the export Type for an incoming reversal reads "Reversal (in)".
+6. **SHOULD – Separate Direction column in the export** (`Out` / `In` / empty for income, expense, capital and All-mode rows where both sides are in scope) instead of only the " (in)" suffix on Type, so the file can be filtered in Excel. The screen tag "In" is fine as is.
+7. **SHOULD – Add Created at (timestamp, Asia/Colombo) to the export** beside Date, so back-dated entries are visible to an auditor.
+8. **SHOULD – Cancelled closing entries labelled distinctly:** Status `Void (year reopened)` on screen and in Excel, so they are not confused with a voided cash entry.
+9. **SHOULD – Head-office mirror lines.** A KDY → GAL transfer (and a non-main year-end close) posts BCA lines in MAIN, but under R10 MAIN's branch-mode list does not show them (MAIN is neither sender nor receiver), although `show()` lets MAIN open them. Acceptable for R1 because the list is a money-account list and MAIN sees these lines in the GL/trial balance; state this in R10 so it is a decision, not a gap.
+10. **SHOULD – All-mode multi-branch export with `branch_id = null`:** fine (Super Admin only), provided finding 4 is done so each branch's auditor can find exports of its data by searching `scope_branch_ids`.
+
+Fine as specified: amount semantics (one positive figure per transfer, reversal equal to original, closing entries excluded from amount bounds and sorted last); amount compare in cents; LIKE escaping; permissions (`transaction.view` + `report.export`; Cashier and Viewer cannot export); export cap with no audit row on refusal; no balance or ledger change (R15).
