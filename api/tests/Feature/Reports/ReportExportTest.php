@@ -303,7 +303,7 @@ class ReportExportTest extends ReportTestCase
         $ws = $this->xlsx($this->export('income-expense', $q, 'xlsx'))->getSheetByName('Income');
         $values = [];
         foreach ($ws->getRowIterator() as $row) {
-            $values[] = [$ws->getCell([1, $row->getRowIndex()])->getValue(), $ws->getCell([3, $row->getRowIndex()])->getFormattedValue()];
+            $values[] = [$ws->getCell([2, $row->getRowIndex()])->getValue(), $ws->getCell([4, $row->getRowIndex()])->getFormattedValue()];
         }
         $this->assertContains(['Total income', '0.30'], $values);
     }

@@ -10,7 +10,7 @@
             @forelse ($data[$type]['categories'] as $c)
                 <tr class="b sub"><td>{{ $c['code'] ?? '' }}</td><td>{{ $c['name'] }}@if (! $c['is_active']) (Inactive)@endif</td><td></td><td class="num">{{ $m($c['amount']) }}</td><td class="num">@if ($c['percent'] !== null){{ $c['percent'] }}@else<span class="g">—</span>@endif</td></tr>
                 @foreach ($c['subs'] as $s)
-                    <tr><td>{{ $s['code'] ?? '' }}</td><td></td><td>{{ $s['name'] }}@if (! empty($s['branch_only'])) ({{ $s['branch_only'] }} only)@endif @if (! $s['is_active']) (Inactive)@endif</td><td class="num">{{ $m($s['amount']) }}</td><td class="num">@if ($s['percent'] !== null){{ $s['percent'] }}@else<span class="g">—</span>@endif</td></tr>
+                    <tr><td>{{ $s['code'] ?? '' }}</td><td></td><td>{{ $s['name'] }}{{ empty($s['branch_only']) ? '' : " ({$s['branch_only']} only)" }}@if (! $s['is_active']) (Inactive)@endif</td><td class="num">{{ $m($s['amount']) }}</td><td class="num">@if ($s['percent'] !== null){{ $s['percent'] }}@else<span class="g">—</span>@endif</td></tr>
                 @endforeach
             @empty
                 <tr><td colspan="5">No {{ strtolower($label) }} in this period.</td></tr>

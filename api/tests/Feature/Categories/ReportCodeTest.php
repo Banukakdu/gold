@@ -28,7 +28,7 @@ class ReportCodeTest extends CategoriesTestCase
         $ws = IOFactory::createReader('Xlsx')->load($res->getFile()->getPathname())->getSheetByName('Expenses');
         $rows = [];
         foreach ($ws->getRowIterator() as $row) {
-            $rows[] = [$ws->getCell([2, $row->getRowIndex()])->getValue(), $ws->getCell([5, $row->getRowIndex()])->getValue()];
+            $rows[] = [$ws->getCell([3, $row->getRowIndex()])->getValue(), $ws->getCell([1, $row->getRowIndex()])->getValue()];
         }
         $this->assertContains(['Tuk-tuk hire (KDY only)', $kdy->ledger_code], $rows);
         $this->assertContains(['Tuk-tuk hire (GAL only)', $gal->ledger_code], $rows);
