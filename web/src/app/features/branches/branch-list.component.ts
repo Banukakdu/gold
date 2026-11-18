@@ -38,7 +38,7 @@ interface Branch { id: number; code: string; name: string; address?: string; pho
       <label>Address <input name="address" [(ngModel)]="m.address" /></label>
       <label>Phone <input name="phone" [(ngModel)]="m.phone" /></label>
       @if (error()) { <div class="alert wide">{{ error() }}</div> }
-      <div class="wide actions"><button type="submit">Create branch</button></div>
+      <div class="wide actions"><button type="submit" [disabled]="busy()">Create branch</button></div>
       <p class="muted wide">A Cash account is created automatically. Use “Fund a branch” to give it an opening balance.</p>
     </form>
   `,
@@ -48,15 +48,19 @@ export class BranchListComponent implements OnInit {
   private auth = inject(AuthService);
   branches = signal<Branch[]>([]);
   error = signal('');
+  /** QA Q1 sweep: a double click must not create the record twice. */
+  busy = signal(false);
   ok = signal('');
   m: any = { code: '', name: '', address: '', phone: '' };
 
   ngOnInit() { this.http.get<Branch[]>('/api/v1/branches').subscribe(b => this.branches.set(b)); }
 
   add() {
+    if (this.busy()) return;
+    this.busy.set(true);
     this.http.post('/api/v1/branches', { ...this.m, code: this.m['code'].toUpperCase() }).subscribe({
-      next: () => { this.m = { code: '', name: '', address: '', phone: '' }; this.error.set(''); this.ngOnInit(); this.auth.loadMe(); },
-      error: e => this.error.set(errorText(e)),
+      next: () => { this.busy.set(false); this.m = { code: '', name: '', address: '', phone: '' }; this.error.set(''); this.ngOnInit(); this.auth.loadMe(); },
+      error: e => { this.busy.set(false); this.error.set(errorText(e)); },
     });
   }
 

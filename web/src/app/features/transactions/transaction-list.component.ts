@@ -60,10 +60,10 @@ import { LockBannerComponent } from '../period-locks/lock-banner.component';
               <td style="white-space:nowrap">{{ t.attachments_count || '' }}@if (t.attachments_removed_count) { <span class="muted"> ({{ t.attachments_removed_count }} removed)</span> }</td>
               <td>
                 @if (t.status === 'posted' && (t.type === 'income' || t.type === 'expense') && auth.can(t.type + '.void')) {
-                  <button class="link" (click)="void(t)">Void</button>
+                  <button class="link" [disabled]="busy()" (click)="void(t)">Void</button>
                 }
                 @if (t.status === 'posted' && canReverse(t.type)) {
-                  <button class="link" (click)="reverse(t)">Reverse</button>
+                  <button class="link" [disabled]="busy()" (click)="reverse(t)">Reverse</button>
                 }
               </td>
             </tr>
@@ -85,6 +85,8 @@ export class TransactionListComponent implements OnInit {
   private http = inject(HttpClient);
   page = signal<Page<Transaction> | null>(null);
   msg = signal('');
+  /** QA Q1: one void / reverse at a time; a second click cannot post a second request. */
+  busy = signal(false);
   creators = signal<{ id: number; name: string; tag: string | null }[]>([]);
   f = { from: '', to: '', type: '', created_by: '', files: '', q: '', category_id: '', category_only: '' };
   branches: string[] = [];
@@ -135,17 +137,23 @@ export class TransactionListComponent implements OnInit {
   }
 
   void(t: Transaction) {
+    if (this.busy()) return;
     // Controls review finding 10: void is for entries recorded in error only.
     const reason = prompt(`Void ${t.ref_no}?\n\nUse Void only for an entry recorded in error. For a real refund or return, record a new entry on the day it happens.\n\nReason (required):`);
-    if (!reason) return;
+    if (!reason || this.busy()) return;
+    this.busy.set(true);
     this.http.post(`/api/v1/transactions/${t.id}/void`, { reason }).subscribe({
-      next: () => this.load(this.page()?.current_page ?? 1), error: e => this.msg.set(errorText(e)) });
+      next: () => { this.busy.set(false); this.load(this.page()?.current_page ?? 1); },
+      error: e => { this.busy.set(false); this.msg.set(errorText(e)); } });
   }
 
   reverse(t: Transaction) {
+    if (this.busy()) return;
     const reason = prompt(`Reverse ${t.ref_no}? Enter a reason:`);
-    if (!reason) return;
+    if (!reason || this.busy()) return;
+    this.busy.set(true);
     this.http.post(`/api/v1/transactions/${t.id}/reverse`, { reason }).subscribe({
-      next: () => this.load(this.page()?.current_page ?? 1), error: e => this.msg.set(errorText(e)) });
+      next: () => { this.busy.set(false); this.load(this.page()?.current_page ?? 1); },
+      error: e => { this.busy.set(false); this.msg.set(errorText(e)); } });
   }
 }

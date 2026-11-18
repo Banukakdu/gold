@@ -55,6 +55,7 @@ export class TransferFormComponent implements OnInit {
   }
 
   save() {
+    if (this.busy()) return; // double-submit guard (QA Q1): a second click can fire before the button disables
     this.busy.set(true);
     this.error.set('');
     this.http.post<{ ref_no: string }>('/api/v1/transfers', this.m).subscribe({

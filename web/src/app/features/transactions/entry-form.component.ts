@@ -129,7 +129,7 @@ export class EntryFormComponent implements OnInit {
   }
 
   save() {
-    if (this.fileError()) return;
+    if (this.fileError() || this.busy()) return; // double-submit guard (QA Q1): a second click can fire before the button disables
     this.busy.set(true);
     this.error.set('');
     this.result.set(null);

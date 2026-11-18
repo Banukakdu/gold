@@ -28,6 +28,8 @@ interface Detail {
 
 interface UploadLine { name: string; pct: number; error?: string }
 
+const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
+
 /**
  * AG-062 S2: minimal read-only entry detail (route /transactions/:id) that hosts the attachments of income and
  * expense entries. Downloads go through HttpClient (bearer token + X-Branch-Id), never a plain link.
@@ -205,7 +207,7 @@ export class TransactionDetailComponent implements OnInit {
     const files = Array.from(input.files ?? []);
     input.value = '';
     const l = this.list();
-    if (!files.length || !l) return;
+    if (!files.length || !l || this.busy()) return;
     this.attMsg.set('');
     this.uploadErrors.set([]);
     const problem = selectionProblem(files, l.active_count);
@@ -232,22 +234,24 @@ export class TransactionDetailComponent implements OnInit {
   }
 
   async download(a: AttachmentRow) {
-    const url = await this.blobUrl(a);
-    if (!url) return;
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = a.original_name;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    const file = await this.fetchFile(a);
+    if (file) this.saveAs(file);
   }
 
-  /** Opens the file in a new tab (the phone's viewer); the tab is opened first so pop-up blockers allow it. */
+  /**
+   * Opens the file in a new tab (the phone's viewer). The tab is opened first so pop-up blockers allow it, and it
+   * gets no opener. A PDF on a browser without a PDF viewer is downloaded under its own name instead (QA Q3).
+   */
   async open(a: AttachmentRow) {
-    const win = window.open('', '_blank');
-    const url = await this.blobUrl(a);
-    if (!url) { win?.close(); return; }
+    const viewable = a.mime !== 'application/pdf' || navigator.pdfViewerEnabled !== false;
+    const win = viewable ? window.open('', '_blank') : null;
+    if (win) win.opener = null;
+    const file = await this.fetchFile(a);
+    if (!file) { win?.close(); return; }
+    if (!viewable) { this.saveAs(file); return; }
+    const url = URL.createObjectURL(file);
     if (win) win.location.href = url;
-    else { const link = document.createElement('a'); link.href = url; link.target = '_blank'; link.rel = 'noopener'; link.click(); }
+    else { const link = document.createElement('a'); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.click(); }
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
 
@@ -258,6 +262,7 @@ export class TransactionDetailComponent implements OnInit {
   }
 
   confirmRemove(a: AttachmentRow) {
+    if (this.busy()) return; // double-click guard (QA Q1)
     this.busy.set(true);
     this.removeMsg.set('');
     this.http.post<AttachmentRow>(`/api/v1/transactions/${this.id}/attachments/${a.id}/remove`, { reason: this.reason.trim() }).subscribe({
@@ -266,18 +271,33 @@ export class TransactionDetailComponent implements OnInit {
     });
   }
 
-  private async blobUrl(a: AttachmentRow): Promise<string | null> {
+  /**
+   * The download as a File named like the attachment. Its type is re-set from the stored mime, and only JPEG, PNG
+   * and PDF are ever given to the browser as viewable types (reviewer N2).
+   */
+  private async fetchFile(a: AttachmentRow): Promise<File | null> {
+    if (this.busy()) return null;
     this.attMsg.set('');
     this.busy.set(true);
     try {
       const blob = await firstValueFrom(this.http.get(`/api/v1/transactions/${this.id}/attachments/${a.id}/download`, { responseType: 'blob' }));
-      return URL.createObjectURL(blob);
+      const type = VIEWABLE.includes(a.mime) ? a.mime : 'application/octet-stream';
+      return new File([blob], a.original_name, { type });
     } catch (e) {
       this.attMsg.set(await blobErrorText(e));
       return null;
     } finally {
       this.busy.set(false);
     }
+  }
+
+  private saveAs(file: File) {
+    const url = URL.createObjectURL(file);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = file.name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   private patch(i: number, p: Partial<UploadLine>) {

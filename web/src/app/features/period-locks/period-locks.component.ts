@@ -171,6 +171,7 @@ export class PeriodLocksComponent implements OnInit {
   }
 
   async lock(p: string, branch: number | null) {
+    if (this.busy()) return; // double-submit guard (QA Q1): a second click can fire before the button disables
     this.msg.set('');
     this.ok.set('');
     const scope = branch === null ? 'all branches' : this.scopeName(branch);
@@ -199,7 +200,7 @@ export class PeriodLocksComponent implements OnInit {
       text += `\n\n${joined} ${from === p ? 'this month' : 'in these months'} - review the audit log first`
         + (files ? ' (Audit log > Attachments, Self only).' : '.');
     }
-    if (!confirm(text)) return;
+    if (!confirm(text) || this.busy()) return;
     this.busy.set(true);
     this.http.post('/api/v1/period-locks', { period: p, branch_id: branch }).subscribe({
       next: () => { this.busy.set(false); this.ok.set(`${label(p)} locked for ${scope}.`); this.load(); },
@@ -215,6 +216,7 @@ export class PeriodLocksComponent implements OnInit {
   }
 
   unlock(l: Lock) {
+    if (this.busy()) return; // double-submit guard (QA Q1): a second click can fire before the button disables
     this.busy.set(true);
     this.http.post(`/api/v1/period-locks/${l.id}/unlock`, { reason: this.reason.trim() }).subscribe({
       next: (r: any) => { this.busy.set(false); this.unlocking.set(null); this.ok.set(`${label(l.period)} unlocked for ${this.scopeName(l.branch_id)}. ${r?.message ?? ''}`); this.load(); },

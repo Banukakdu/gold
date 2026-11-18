@@ -42,7 +42,7 @@ import { errorText } from '../../core/api.interceptor';
           <label>Account no. <input name="account_no" [(ngModel)]="m.account_no" /></label>
         }
         @if (error()) { <div class="alert wide">{{ error() }}</div> }
-        <div class="wide actions"><button type="submit">Add account</button></div>
+        <div class="wide actions"><button type="submit" [disabled]="busy()">Add account</button></div>
       </form>
     }
   `,
@@ -53,14 +53,18 @@ export class AccountListComponent implements OnInit {
   accounts = signal<Account[]>([]);
   total = computed(() => this.accounts().reduce((s, a) => s + Number(a.current_balance), 0));
   error = signal('');
+  /** QA Q1 sweep: a double click must not create the record twice. */
+  busy = signal(false);
   m: any = { name: '', type: 'cash', bank_name: '', account_no: '' };
 
   ngOnInit() { this.http.get<Account[]>('/api/v1/accounts').subscribe(a => this.accounts.set(a)); }
 
   add() {
+    if (this.busy()) return;
+    this.busy.set(true);
     this.http.post('/api/v1/accounts', this.m).subscribe({
-      next: () => { this.m = { name: '', type: 'cash', bank_name: '', account_no: '' }; this.error.set(''); this.ngOnInit(); },
-      error: e => this.error.set(errorText(e)),
+      next: () => { this.busy.set(false); this.m = { name: '', type: 'cash', bank_name: '', account_no: '' }; this.error.set(''); this.ngOnInit(); },
+      error: e => { this.busy.set(false); this.error.set(errorText(e)); },
     });
   }
 }
