@@ -26,6 +26,12 @@ return new class extends Migration
             $table->foreignId('contra_of_id')->nullable()->after('transaction_id')->unique()->constrained('ledger_entries')->restrictOnDelete();
         });
 
+        // MySQL uses the (branch_id, period) unique as the branch_id foreign key's index,
+        // so give the FK its own index before dropping the unique (error 1553 otherwise).
+        Schema::table('period_locks', function (Blueprint $table) {
+            $table->index('branch_id');
+        });
+
         Schema::table('period_locks', function (Blueprint $table) {
             $table->dropUnique(['branch_id', 'period']);
             $table->timestamp('unlocked_at')->nullable();
@@ -93,6 +99,10 @@ return new class extends Migration
             $table->dropForeign(['unlocked_by']);
             $table->dropColumn(['unlocked_at', 'unlocked_by', 'unlock_reason']);
             $table->unique(['branch_id', 'period']);
+        });
+
+        Schema::table('period_locks', function (Blueprint $table) {
+            $table->dropIndex(['branch_id']);
         });
 
         Schema::table('ledger_entries', function (Blueprint $table) {
