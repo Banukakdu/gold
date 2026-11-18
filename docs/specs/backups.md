@@ -475,3 +475,59 @@ Reviewed against `controls.md` (immutable ledger and audit, period locks), `atta
 47. (F6) Given a MyISAM table in the schema (MySQL, staging), When `backup:run` runs, Then it fails at `precheck` naming the table. Given a restored attachment file with one byte changed, Then `attachments:verify` in `backup:verify` fails on a sha256 mismatch.
 48. (F7) Given a `year_end` backup succeeds, Then `verify_status` is set by the same command. `schedule:list` shows `backup:verify --oldest-offsite` monthly, and given only an off-server `yearly/` object, it restores and passes.
 49. (F8, F9) Given a `year_end` backup succeeds, Then SA and SA2 receive the snapshot email with the full SHA-256 and the debit and credit total. Given the last succeeded backup is 3 days old, When SA opens the Lock confirm or the year-end preview, Then the warning shows and Lock or Close still works.
+
+## Accountant sign-off (accountant, 2026-11-18, after QA, review and fixes)
+
+Checked `git diff 767cc29..61f2eab` against my Accounting review above. I read the code and tests and ran `php artisan test`: **510 passed (8222 assertions)**. The QA, review and fix reports were also read. The backup code never writes `ledger_entries`, `accounts` or balances, and changes no figure or report.
+
+### MUST findings
+| # | Status | Evidence |
+|---|---|---|
+| F1 Year-end snapshot, 7+ years | **DONE** (off-server part depends on condition C1) | `BackupRunner::pendingYearEnd` (R14), with the reopen re-checked after the dump (`BackupRunner.php:137-141`). Copied to `yearly/FY…/` plus `daily/` (`copyOffsite`). Local prune only with `year_end_13` once `offsite_status = copied` (`BackupPruner.php:123-124`). The app has no off-server delete (`OffsiteStore`: check, write a new key, read only). Tests: `YearEndTest::test_ac41_*` (both), `RetentionTest::test_ac42_year_end_is_kept_until_copied_off_server`. |
+| F2 control.json, books balanced | **DONE** | `ControlTotals` uses the same `LedgerChecks` as `ledger:verify`, bounded by the pre-dump max ids. The run is kept and alerts on debits ≠ credits (`BackupRunner.php:177-182, 223-228`). The restore test recomputes and compares every branch and account to the cent (`BackupVerifier.php:101-105`). Tests: `RunTest::test_ac43_*`, `RunTest::test_review_f2_unbalanced_books_keep_the_archive_and_alert`, `VerifyTest::test_ac43_changed_ledger_line_fails_at_control_naming_the_account`. |
+| F3 Off-server copies not overwritable | **DONE in code**. Bucket settings: C2 | `OffsiteStore::putNew` checks every key before writing anything ("Off-server object already exists."). Red S1 banner in production. Tests: `OffsiteTest::test_ac44_*` (both). |
+| F4 Undeclared rollback detected | **DONE** | QA B2 is fixed. The alarm now **persists**: a `continuity_failed` manifest stays raised until a `backup.restored` row written after it names a backup at or before the one measured against (`BackupRunner.php:342-350`). A rollback to the *newest* backup is caught through the `{file}.audit.json` audit-row id (`:358-368`). Continuity-failed archives are never pruned (`BackupPruner::KEEP_FAILED`). Tests: `ReviewFixesTest::test_b2_the_rollback_alarm_stays_up_until_a_restore_is_recorded` (60 later audit rows do not clear it), `ReviewFixesTest::test_b2_restoring_the_newest_backup_without_recording_it_is_detected`, `RestoreTest::test_ac45_*`, `RestoreTest::test_continuity_reads_the_off_server_manifest_when_none_is_local`. |
+| F5 Restore does not quietly undo access changes | **DONE** | `backup:restored` revokes all tokens (`Tokens::revokeAll`). It writes `backup.restored` with `backup_started_at`, operator, reason and `tokens_revoked`, emails the Super Admins with `sendNow`, and prints the re-apply warning (`BackupRestored.php:62-81`). README restore step 10. Test: `RestoreTest::test_ac46_restored_revokes_every_token_and_tells_the_super_admins`. |
+| F6 Consistent snapshot / InnoDB | **DONE** (MySQL run: C3) | The precheck fails with "Table {t} is not InnoDB." (`MySqlDumper::nonTransactionalTables`, base tables only; `BackupRunner.php:282-284`). The restored attachments are checked by sha256 (`VerifyTest::test_ac47_changed_attachment_file_fails_attachments_verify`). Tests: `RunTest::test_review_f6_non_innodb_table_fails_precheck` (scripted dumper; not yet run on real MySQL). |
+| F7 Restore tests of year-end and old archives | **DONE** | A year-end run verifies itself in the same command (`BackupRunner.php:244-248`; asserted in `test_ac41_*`). `backup:verify --oldest-offsite` runs on the first Sunday at 04:00 and restores the oldest `yearly/` (else `monthly/`) archive (`OffsiteStore::oldest`, `routes/console.php`). Tests: `VerifyTest::test_ac48_oldest_offsite_yearly_object_without_a_row`, `RunTest::test_ac33_schedule`. |
+
+### SHOULD findings
+- F8 year-end hash email: **DONE** (`YearEndSnapshotNotification`, asserted in `test_ac41_*`).
+- F9 Lock/Close warning: **DONE**. `backup_warning` is returned on `/period-locks/review` and the year-end preview, is shown in the Lock confirm and the Close dialog, and never blocks (`YearEndTest::test_ac49_*`, QA AC49). See SHOULD S3 below.
+- F10 segregation: **DONE**. The README names the operator restriction, two password holders, and business-held root credentials.
+- F11 confidentiality: **DONE**. A 0700 workspace (`test_m2_workspace_is_private`), restore into `backup-temp/restore`, the 7z prompt only, and `#[\SensitiveParameter]` (`test_the_archive_password_is_never_stored_or_printed`).
+- F12 re-entered entries: **DONE** (README restore step 11).
+- F13 wording: **DONE** ("First of month" in S1 and the summary).
+
+### No path to delete or alter backups or the ledger
+- The API is a GET for Super Admins only, with no write routes (QA AC40: POST, PUT and DELETE give 405).
+- Backup rows: the model refuses delete and a BEFORE DELETE trigger refuses too (`RetentionTest::test_ac23_rows_cannot_be_deleted`). Updates happen only from the artisan commands.
+- Local deletes are limited to the pruner and LocalStore's own failed `.part` files (`RetentionTest::test_ac19_*`, made stricter). Off-server deletes do not exist.
+- No backup code touches `LedgerService`, `ledger_entries` or `current_balance`.
+
+### Audit trail
+Complete:
+- Every outcome is audited: `backup.created`, `failed`, `offsite_failed`, `control_failed`, `continuity_failed`, `year_end`, `pruned` (also `rule = failed_run`), `verified`, `verify_failed` and `restored` (with recreated and missing rows).
+- The "Backups" group and "System" as the user are on the audit screen (QA B1 fixed).
+- Alerts still go out when the database is down, through `BACKUP_ALERT_EMAILS` (`ReviewFixesTest::test_m1_*`).
+
+### Verdict: **APPROVED WITH CONDITIONS (SIGNED OFF subject to C1-C3)**
+
+**Conditions:**
+- **C1, before the pull request is merged:** add `league/flysystem-aws-s3-v3` (^3.0) to `api/composer.json` and commit the updated `composer.lock` (this needs the user's approval). Then drop the README's "Until it is in `composer.json`…" sentence. The reasons:
+  - Without it, no off-server copy can run. F1 (year-end snapshot off-server for 8 years), F3 and F7 (`--oldest-offsite`) then cannot be met from the repository.
+  - A `composer require` done by hand on the server is removed by the next deploy's `composer install`.
+  - This is a merge condition, not a go-live one, because main should never hold a build that cannot meet its own MUSTs.
+- **C2, go-live:** on the production bucket, `php artisan backup:offsite-check` must show:
+  - versioning Enabled;
+  - object lock Enabled in compliance mode covering `yearly/`;
+  - lifecycle 31 / 366 / 2,922 days;
+  - a key with Put, Get and List only.
+  
+  Then `backup:run` must give `offsite_status = copied` and `backup:verify --latest` must exit 0. Also set `BACKUP_ALERT_EMAILS`, and lodge the archive password with two holders. Record all of this in the release notes.
+- **C3, go-live (MySQL staging, not covered by CI):** AC 15 and AC 47 (MyISAM precheck) on real MySQL, plus one full README restore drill, including the control.json comparison at step 8.
+
+**SHOULD (follow-up items, not blocking):**
+- S1. `backup:offsite-check` only *warns* when object lock is off (`BackupOffsiteCheck.php`, object-lock block). F3 makes object lock required for `yearly/`. When `ObjectLockEnabled !== 'Enabled'`, or the setting cannot be read, it should use `$this->error(...)` and set `$ok = false`, so the command exits 1.
+- S2. README restore step 8 compares the full restored trial balance with `control.json`. But `control.json` covers only ledger lines with `id <= control.json max_ids.ledger_entries` (R13a). A posting made in the seconds between reading the ids and the dump start would show as a false difference. Step 8 should say to compare with that bound, or to rely on `backup:verify {file}`, which applies the bound.
+- S3. `BackupStatus::warning()` (R15) should also warn at Lock/Close in two cases. The first is when the latest backup has `failed_stage = 'continuity'`: "The database was rolled back without a recorded restore." The second is when the latest succeeded backup has `failed_stage = 'control'`: "The last backup found debits different from credits." Today these surface only after 26 h, through the age rule.
