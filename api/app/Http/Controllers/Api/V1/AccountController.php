@@ -10,6 +10,7 @@ use App\Models\Transaction;
 use App\Support\BranchContext;
 use App\Support\Money;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class AccountController extends Controller
 {
@@ -43,8 +44,13 @@ class AccountController extends Controller
             'is_main_account' => 'boolean',
         ]);
         $data['branch_id'] ??= $ctx->branchId;
-        $acc = Account::create($data);
-        AuditLog::record('account.created', $acc, null, $data);
+        // One DB transaction: the 11xxx code is assigned under a lock on the branch row (review R3).
+        $acc = DB::transaction(function () use ($data) {
+            $acc = Account::create($data);
+            AuditLog::record('account.created', $acc, null, $data);
+
+            return $acc;
+        });
 
         return response()->json($acc, 201);
     }

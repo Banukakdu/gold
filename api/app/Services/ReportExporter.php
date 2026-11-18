@@ -331,11 +331,11 @@ class ReportExporter
             ]];
         }
 
-        return array_map(function ($sec) use ($row, $groups) {
+        return array_map(function ($sec) use ($row) {
             $rows = [];
             foreach ($sec['rows'] as $r) {
                 $a = $r['account'];
-                $rows[] = $row([$a['code'], $a['name'].($a['status'] === 'active' ? '' : ' ('.ucfirst($a['status']).')'), $groups[$a['group']],
+                $rows[] = $row([$a['code'], $a['name'].($a['status'] === 'active' ? '' : ' ('.ucfirst($a['status']).')'), ucfirst($a['class']),
                     $r['opening_dr'], $r['opening_cr'], $r['period_dr'], $r['period_cr'], $r['closing_dr'], $r['closing_cr']]);
             }
             $t = $sec['totals'];

@@ -44,7 +44,8 @@ class BranchController extends Controller
             Account::create(['branch_id' => $branch->id, 'name' => 'Cash', 'type' => 'cash']);
             AuditLog::record('branch.created', $branch, null, $data, $branch->id);
 
-            return response()->json($branch->load('accounts'), 201);
+            // N7: the new branch's cash, bank and wallet accounts, not its whole chart.
+            return response()->json($branch->load(['accounts' => fn ($q) => $q->money()]), 201);
         });
     }
 

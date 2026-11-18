@@ -14,7 +14,7 @@
         @php($last = null)
         @foreach ($data['rows'] as $r)
             @if ($r['group'] !== $last)
-                <tr class="sub b"><td colspan="{{ count($data['branches']) + 4 }}">{{ $groups[$r['group']] }}</td></tr>
+                <tr class="sub b keep"><td colspan="{{ count($data['branches']) + 4 }}">{{ $groups[$r['group']] }}</td></tr>
                 @php($last = $r['group'])
             @endif
             <tr><td>{{ $t($r['label']) }}</td>
@@ -36,10 +36,15 @@
             <thead><tr><th>Code</th><th>Account</th><th>Class</th><th class="num">Opening Dr</th><th class="num">Opening Cr</th>
                 <th class="num">Period debits</th><th class="num">Period credits</th><th class="num">Closing Dr</th><th class="num">Closing Cr</th></tr></thead>
             <tbody>
+            @php($last = null)
             @forelse ($sec['rows'] as $r)
+                @if ($r['account']['group'] !== $last)
+                    <tr class="sub b keep"><td colspan="9">{{ $groups[$r['account']['group']] }}</td></tr>
+                    @php($last = $r['account']['group'])
+                @endif
                 <tr><td>{{ $r['account']['code'] }}</td>
                     <td>{{ $t($r['account']['name']) }}@if ($r['account']['status'] !== 'active') ({{ ucfirst($r['account']['status']) }})@endif</td>
-                    <td>{{ $groups[$r['account']['group']] }}</td>
+                    <td>{{ ucfirst($r['account']['class']) }}</td>
                     @foreach (['opening_dr', 'opening_cr', 'period_dr', 'period_cr', 'closing_dr', 'closing_cr'] as $k)<td class="num">{{ $m($r[$k]) }}</td>@endforeach</tr>
             @empty
                 <tr><td colspan="9">No balances or movements.</td></tr>

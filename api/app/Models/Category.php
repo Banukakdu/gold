@@ -20,6 +20,9 @@ class Category extends Model
 
     protected $casts = ['is_active' => 'boolean'];
 
+    /** QA B1: the DB default, known before the first save, so new category accounts are created active. */
+    protected $attributes = ['is_active' => true];
+
     protected static function booted(): void
     {
         static::creating(function (Category $c) {

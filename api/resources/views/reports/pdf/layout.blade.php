@@ -19,7 +19,10 @@
     .b td, tr.b td { font-weight: bold; }
     .carry td { background: #f6f1e4; font-style: italic; }
     .sub td { background: #faf6ec; }
-    h2 { font-size: 11px; margin: 8px 0 4px; }
+    h2 { font-size: 11px; margin: 8px 0 4px; page-break-after: avoid; }
+    tr { page-break-inside: avoid; }
+    /* QA B3: a group heading row stays with the first row under it. */
+    tr.keep { page-break-after: avoid; }
     .note { color: #555; margin-top: 6px; }
     /* Core fonts have no em dash: draw it with DejaVu Sans (bundled with dompdf). */
     .g { font-family: 'DejaVu Sans', sans-serif; }

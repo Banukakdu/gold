@@ -629,6 +629,7 @@ class ReportService
         $ids = $p->branchIds();
         $main = Branch::where('is_main', true)->first();
         $mainIn = $main && in_array($main->id, $ids, true);
+        $codes = Branch::pluck('code', 'id'); // review N10: one query, not one per row
         $lines = [];
         foreach ($accounts as $a) {
             [$key, $label, $sort] = match (true) {
@@ -636,7 +637,7 @@ class ReportService
                 $a->type === 'owner_capital' => ['owner_capital', $a->name, [(string) $a->code]],
                 $a->type === 'category' => ["cat:{$a->code}", $a->name, [(string) $a->code]],
                 $a->type === 'head_office' => ["pair:{$a->branch_id}", ($main->code ?? 'MAIN')." ↔ {$a->branch->code}", [$a->branch->code]],
-                $a->type === 'branch_current' => ["pair:{$a->counterparty_branch_id}", "{$a->branch->code} ↔ ".(Branch::find($a->counterparty_branch_id)->code ?? ''), [Branch::find($a->counterparty_branch_id)->code ?? '']],
+                $a->type === 'branch_current' => ["pair:{$a->counterparty_branch_id}", "{$a->branch->code} ↔ ".($codes[$a->counterparty_branch_id] ?? ''), [$codes[$a->counterparty_branch_id] ?? '']],
                 default => ["acc:{$a->id}", "{$a->branch->code} · {$a->name}", [(string) $a->code]],
             };
             $n = $num($a->id);

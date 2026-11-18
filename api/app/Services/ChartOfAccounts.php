@@ -36,8 +36,21 @@ class ChartOfAccounts
 
     // ------------------------------------------------------------------ codes
 
+    /**
+     * Review R3: codes are max + 1, so two requests at once could pick the same code (duplicate key, HTTP 500). Each
+     * assignment first locks a row FOR UPDATE inside the caller's DB transaction: the account's branch for money codes,
+     * the Main branch (one chart-wide lock) for category codes and system accounts. The second request waits and then
+     * reads the first one's code. Callers run in a DB transaction (controllers, migration, LedgerService).
+     */
+    private function lockRow(?int $branchId = null): void
+    {
+        $q = DB::table('branches')->lockForUpdate();
+        $branchId === null ? $q->where('is_main', true)->value('id') : $q->where('id', $branchId)->value('id');
+    }
+
     public function nextMoneyCode(int $branchId): string
     {
+        $this->lockRow($branchId);
         $max = DB::table('accounts')->where('branch_id', $branchId)->whereBetween('code', ['11001', '11999'])->max('code');
         $next = $max ? (int) $max + 1 : 11001;
         if ($next > 11999) {
@@ -55,6 +68,7 @@ class ChartOfAccounts
     /** 4PP00 / 5PP00 for a parent, 4PPSS / 5PPSS for a sub-category, in creation order (R1). */
     public function nextCategoryCode(Category $c): string
     {
+        $this->lockRow();
         $digit = $c->type === 'income' ? '4' : '5';
         if (! $c->parent_id) {
             $max = Category::whereNull('parent_id')->where('type', $c->type)->whereNotNull('ledger_code')->max('ledger_code');
@@ -246,6 +260,12 @@ class ChartOfAccounts
     private function ensure(array $keys, array $attrs): Account
     {
         $acc = Account::withoutGlobalScopes()->where($keys)->first();
+        if ($acc) {
+            return $acc;
+        }
+        // Missing: take the chart lock and look again, so two requests never both create it (review R3).
+        $this->lockRow();
+        $acc = Account::withoutGlobalScopes()->where($keys)->lockForUpdate()->first();
         if ($acc) {
             return $acc;
         }
