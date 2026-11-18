@@ -58,7 +58,12 @@ tr.sub td { background: #f6f1e4; font-weight: 600; }
 .pager { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; }
 .login { min-height: 100vh; display: grid; place-items: center; padding: 16px;
   .card { width: 100%; max-width: 360px; display: flex; flex-direction: column; gap: 12px; }
-  label { display: flex; flex-direction: column; gap: 4px; } }
+  label { display: flex; flex-direction: column; gap: 4px; }
+  /* Password reset spec 4.4: full-width primary button, 40px tap targets, long emails wrap inside the card. */
+  button { width: 100%; min-height: 40px; }
+  a.tap { display: flex; align-items: center; min-height: 40px; align-self: flex-start; }
+  .wrap { overflow-wrap: anywhere; }
+  .field-error { margin: -8px 0 0; } }
 @media (max-width: 760px) {
   .shell { flex-direction: column; } .side { width: 100%; nav { flex-direction: row; flex-wrap: wrap; margin-top: 10px; } }
   .content { padding: 16px; }
