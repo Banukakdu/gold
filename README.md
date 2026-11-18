@@ -165,9 +165,14 @@ every device and emails them "Your password was changed".
    writes an `auth.password_reset` audit row (`via: console`) and emails the user (and the Super Admins when the user
    is a Super Admin or branch administrator). It is the way to recover a Super Admin while the switch is off, and the
    way the seeded Super Admin replaces `ADMIN_PASSWORD`.
-5. Changing a user's email (Users screen) emails the **old** address and cancels any pending link for it.
-6. Login lockout: 5 failed attempts from one IP within 15 minutes lock that email on that IP for 15 minutes from the
-   5th failure. Lockouts, logouts and every reset step are in the audit log (group "Logins", Super Admin only).
+5. **Referrer-Policy.** Serve the web app with `Referrer-Policy: no-referrer`, so a reset or invitation link in the
+   address bar is never sent to another site (nginx: `add_header Referrer-Policy "no-referrer" always;`, Apache:
+   `Header always set Referrer-Policy "no-referrer"`). `index.html` carries the same policy as a meta tag.
+6. Changing a user's email (Users screen) emails the **old** address and cancels any pending link for it.
+7. Login lockout: 5 failed attempts from one IP within 15 minutes lock that email on that IP for 15 minutes from the
+   5th failure. Attempts are counted before the password is checked, so parallel guesses cannot get past the limit.
+   Sign-in, reset and set-password match the email exactly as stored (lower-case); an accented variant such as
+   `ú@x.com`, which MySQL's collation would treat as `u@x.com`, is handled as an unknown email. Lockouts, logouts and every reset step are in the audit log (group "Logins", Super Admin only).
 
 ## How it works
 

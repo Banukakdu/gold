@@ -196,11 +196,11 @@ All three are public routes outside the shell, using the existing `.login` > `.c
 - **R2 No user enumeration.**
   - N1 returns the same status, body and headers for an unknown, inactive, invited, throttled-by-broker or active email.
   - All user-dependent work runs in the queued job, so response time does not depend on the account.
-  - N2 returns the same 422 `token` message for every failure reason.
+  - N2 returns the same 422 `token` message for every failure reason, and N2 and N5 run exactly one bcrypt check on every path (the row's hash, or a shared dummy hash when there is no user, no live row or a refused user), so timing does not tell the reasons apart either (fix round R1).
   - The UI confirmation never says whether the account exists.
 - **R3 Expiry and single use.**
   - A token is valid for 60 minutes from creation (`auth.passwords.users.expire = 60`).
-  - A successful reset deletes it.
+  - A successful reset deletes it. The row is read `FOR UPDATE` and only the request whose delete removes it may continue, so two parallel submits use it once (fix round Q1). A database error is reported without the SQL bindings, which may hold the new hash.
   - A new request (or a new invitation) replaces the row, so older links stop working.
   - A wrong password policy or a confirmation mismatch does **not** use up the token.
 - **R4 Throttling.**
@@ -211,7 +211,8 @@ All three are public routes outside the shell, using the existing `.login` > `.c
   - N2:
     - per IP, 10 per minute (as for set-password);
     - per email, 10 per 15 minutes.
-  - When throttled the response is 429 `{ message: "Too many requests. Try again in N minutes." }`. N is rounded up, minimum 1.
+  - When throttled the response is 429 `{ message: "Too many requests. Try again in N minutes." }`. N is rounded up, minimum 1 ("1 minute").
+  - Emails are matched exactly as stored (lower-case, byte for byte) after the database lookup (`User::findByEmail`). An accent variant that MySQL's collation would match (`ú@x.com` for `u@x.com`) is an unknown email on login, N1, N2, N5 and N6, so the per-email limits keyed on the typed text cannot be bypassed (fix round R3).
   - The per-email limit applies equally to unknown emails, so a 429 says nothing about whether an account exists.
 - **R5 Inactive users.**
   - N1 sends no email (R2).
@@ -275,7 +276,8 @@ All three are public routes outside the shell, using the existing `.login` > `.c
 | Logout revokes the token | `currentAccessToken()->delete()` | Meets (G4: not audited) |
 
 - **G1 (in scope)** The decay starts at the **first** failure, so the 5th failure at minute 14 locks for only about 1 minute.
-  - Fix: on the 5th failure in the window, set a separate lock key `login-lock:{email}|{ip}` for 15 minutes from that moment. While it exists, return 429.
+  - Fix: on the 5th failure in the window, set a separate lock key `login-lock:{email}|{ip}` for 15 minutes from that moment (`Cache::add`, so one request starts it). While it exists, return 429.
+  - Attempts are counted before the password check; an attempt over the limit is refused without a check (fix round R2). The keys carry a per-email generation that the console command bumps to clear every IP (R4).
   - A successful reset clears both keys for the request IP.
 - **G2 (Q3, decided)** The key includes the IP, so an attacker who changes IP is never locked out.
   - A per-email-only lock would let anyone lock out any named user (a denial of service), for example a cashier at the till.
