@@ -19,7 +19,12 @@ class CurrencyTest extends AccountingTestCase
         Storage::fake('branding');
         $this->assertFalse(LedgerEntry::exists());
         $this->asAdmin()->getJson('/api/v1/settings')->assertOk()->assertJsonPath('currency_locked', false);
-        foreach (['usd', 'US', 'XYZ'] as $bad) {
+        // QA Q6 (product owner): only 2-decimal currencies are offered and accepted.
+        $codes = $this->asAdmin()->getJson('/api/v1/settings')->json('currencies');
+        $this->assertSame('LKR', $codes[0]);
+        $this->assertSame([], array_intersect(['JPY', 'KRW', 'VND', 'CLP', 'KWD', 'BHD', 'OMR', 'JOD', 'TND', 'IQD', 'LYD'], $codes));
+        $this->assertContains('USD', $codes);
+        foreach (['usd', 'US', 'XYZ', 'JPY', 'KWD', 'BHD'] as $bad) {
             $this->asAdmin()->putJson('/api/v1/settings', ['currency_code' => $bad])->assertStatus(422);
         }
         $this->asAdmin()->putJson('/api/v1/settings', ['currency_code' => 'USD'])->assertOk()->assertJsonPath('currency_code', 'USD');

@@ -35,10 +35,21 @@ class YearEndNotification extends Notification implements ShouldQueue
     {
         $mail = (new MailMessage)
             ->subject("{$this->year} was {$this->event}")
-            ->line("{$this->actor} {$this->event} {$this->year} at {$this->at} (Asia/Colombo).")
+            ->line(self::plain($this->actor)." {$this->event} {$this->year} at {$this->at} (Asia/Colombo).")
             ->line("Total result: {$this->totalResult}");
 
-        return $this->reason !== null ? $mail->line("Reason: {$this->reason}") : $mail;
+        return $this->reason !== null ? $mail->line('Reason: '.self::plain($this->reason)) : $mail;
+    }
+
+    /**
+     * Review N5: the mail lines are rendered as Markdown. User text (a name, the reopen reason) is shown as typed:
+     * every Markdown punctuation character is backslash-escaped, and line breaks become spaces.
+     */
+    public static function plain(string $text): string
+    {
+        $text = preg_replace('/\s+/u', ' ', $text) ?? '';
+
+        return preg_replace('/([\\`*_{}\[\]()<>#+\-.!|~])/', '\\\\$1', $text) ?? '';
     }
 
     public function toArray(object $notifiable): array

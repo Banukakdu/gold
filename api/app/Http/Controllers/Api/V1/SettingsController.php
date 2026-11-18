@@ -92,12 +92,15 @@ class SettingsController extends Controller
             'currency_code' => ['sometimes', 'required', 'string', Rule::in(Currencies::CODES)],
             'date_format' => ['sometimes', 'required', Rule::in(array_keys(Settings::DATE_FORMATS))],
             'fiscal_year_start_month' => 'sometimes|required|integer|between:1,12',
-            'currency_decimals' => 'sometimes',
+            // Review N3: an array or text is a 422, never a string cast of an array.
+            'currency_decimals' => 'sometimes|required|integer',
         ], [
+            'currency_decimals.required' => self::DECIMALS,
+            'currency_decimals.integer' => self::DECIMALS,
             'currency_code.in' => 'Choose a currency code from the list (3 capital letters, ISO 4217).',
             'date_format.in' => 'Choose one of the date formats offered.',
         ])->validate();
-        if (array_key_exists('currency_decimals', $d) && (string) $d['currency_decimals'] !== (string) Currencies::DECIMALS) {
+        if (array_key_exists('currency_decimals', $d) && (int) $d['currency_decimals'] !== Currencies::DECIMALS) {
             throw ValidationException::withMessages(['currency_decimals' => self::DECIMALS]);
         }
         unset($d['currency_decimals']);
@@ -109,6 +112,9 @@ class SettingsController extends Controller
         }
 
         DB::transaction(function () use ($d) {
+            // Review N4: the rows FOR UPDATE before the old values are read, so two saves cannot both audit the same
+            // old value. Ordered by key, one lock order.
+            Setting::whereIn('key', array_values(self::EDITABLE))->orderBy('key')->lockForUpdate()->get();
             $current = $this->current();
             $changed = array_filter($d, fn ($v, $k) => (string) $v !== (string) $current[$k], ARRAY_FILTER_USE_BOTH);
             if (! $changed) {
