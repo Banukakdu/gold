@@ -31,7 +31,11 @@ class UserController extends Controller
 
         $q = User::query()->orderBy('name')
             ->when($branchId, fn ($q) => $q->whereHas('branches', fn ($b) => $b->where('branches.id', $branchId)))
-            ->when($f['q'] ?? null, fn ($q, $v) => $q->where(fn ($w) => $w->where('name', 'like', "%$v%")->orWhere('email', 'like', '%'.mb_strtolower($v).'%')))
+            ->when($f['q'] ?? null, function ($q, $v) {
+                // Escape LIKE wildcards; '!' works as escape character on MySQL and SQLite.
+                $like = '%'.str_replace(['!', '%', '_'], ['!!', '!%', '!_'], $v).'%';
+                $q->where(fn ($w) => $w->whereRaw("name like ? escape '!'", [$like])->orWhereRaw("email like ? escape '!'", [mb_strtolower($like)]));
+            })
             ->when($f['status'] ?? null, fn ($q, $v) => $q->where('status', $v));
 
         $page = $q->paginate(50);
@@ -48,7 +52,9 @@ class UserController extends Controller
         $this->assertVisible($me, $user, $branchId);
         $memberships = Memberships::forUsers([$user->id], $me->is_super_admin ? null : $branchId);
 
-        return $this->present($user, $memberships->get($user->id, collect()), $branchId);
+        // Spec 4.3: the UI disables profile editing up front, with the reason (B5 / B6 / B2).
+        return $this->present($user, $memberships->get($user->id, collect()), $branchId)
+            + ['profile_locked_reason' => $this->profileLockReason($me, $user)];
     }
 
     /** Create a user in the active branch with a role and send the invitation (AG-020 / AG-021, E2). */
@@ -93,8 +99,9 @@ class UserController extends Controller
             return $user;
         });
         if ($invite) {
-            $this->sendInvitation($user);
+            // Audit first: a mail failure must never lose the record (mail is queued and failures are reported).
             AuditLog::record('user.invited', $user, null, ['user_id' => $user->id, 'email' => $user->email, 'branch_id' => $branchId] + $role->snapshot(), $branchId);
+            $this->sendInvitation($user);
         }
         AccessAlerts::notify('user.created', $branchId, "{$user->name} <{$user->email}>", null, $role->snapshot());
 
@@ -115,13 +122,13 @@ class UserController extends Controller
         }
         $role = $this->assignableRole($request, $request->validate(['role_id' => 'required|integer'])['role_id'], $branchId);
         $this->assertTargetNotAbove($me, $user, $branchId);
-        $oldRole = $user->roleInBranch($branchId);
-        BranchAdmins::assertNotLast($branchId, [$user->id], Role::grantsAdmin($role->permissionKeys()) ? [$user->id] : []);
-
-        $old = $oldRole?->snapshot();
+        $old = $user->roleInBranch($branchId)?->snapshot();
         $new = $role->snapshot();
         DB::transaction(function () use ($user, $branchId, $role, $old, $new) {
-            $user->branches()->syncWithoutDetaching([$branchId]);
+            BranchAdmins::assertNotLast($branchId, [$user->id], Role::grantsAdmin($new['permissions']) ? [$user->id] : []);
+            if (! $user->isMemberOf($branchId)) {
+                $user->branches()->attach($branchId, ['is_default' => ! $user->branches()->wherePivot('is_default', true)->exists()]);
+            }
             setPermissionsTeamId($branchId);
             $user->unsetRelation('roles');
             $user->syncRoles([$role]);
@@ -142,11 +149,15 @@ class UserController extends Controller
         $this->assertSuperAdminTarget($me, $user);
         abort_unless($user->isMemberOf($branchId), 404, 'User not found.');
         $this->assertTargetNotAbove($me, $user, $branchId);
-        BranchAdmins::assertNotLast($branchId, [$user->id]);
 
         $role = $user->roleInBranch($branchId);
         DB::transaction(function () use ($user, $branchId, $role) {
+            BranchAdmins::assertNotLast($branchId, [$user->id]);
             $user->branches()->detach($branchId);
+            // Keep a default branch: promote another membership when the default one was removed.
+            if (! $user->branches()->wherePivot('is_default', true)->exists() && ($next = $user->branches()->orderBy('branches.id')->first())) {
+                $user->branches()->updateExistingPivot($next->id, ['is_default' => true]);
+            }
             foreach (['model_has_roles', 'model_has_permissions'] as $table) {
                 DB::table($table)->where('model_type', User::class)->where('model_id', $user->id)->where('branch_id', $branchId)->delete();
             }
@@ -164,6 +175,7 @@ class UserController extends Controller
         $branchId = app(BranchContext::class)->branchId;
         $this->assertSuperAdminTarget($me, $user);
         $this->assertVisible($me, $user, $branchId);
+        $this->assertManagesEverywhere($me, $user);
         if ($user->last_login_at !== null) {
             throw ValidationException::withMessages(['user' => 'This user has already logged in; they can use their password.']);
         }
@@ -195,24 +207,19 @@ class UserController extends Controller
                 throw ValidationException::withMessages(['email' => 'This email already has an account.']);
             }
         }
-        if (! $me->is_super_admin) {
-            foreach ($user->branches()->pluck('branches.id') as $b) {
-                $ok = $me->isMemberOf((int) $b) && in_array('user.edit', $me->permissionKeysIn((int) $b), true);
-                abort_unless($ok, 403, 'This user also works in other branches; ask a Super Admin.');
-            }
-        }
+        $this->assertManagesEverywhere($me, $user);
         $deactivating = ($data['status'] ?? $user->status) === 'inactive' && $user->status === 'active';
         if (isset($data['status']) && $data['status'] !== $user->status) {
             $this->assertNotSelf($me, $user);
         }
-        if ($deactivating) {
-            foreach (BranchAdmins::branchesOf($user) as $b) {
-                BranchAdmins::assertNotLast($b, [$user->id]);
-            }
-        }
 
         $old = $user->only(array_keys($data));
         DB::transaction(function () use ($user, $data, $deactivating, $old, $branchId) {
+            if ($deactivating) {
+                foreach (BranchAdmins::branchesOf($user) as $b) {
+                    BranchAdmins::assertNotLast($b, [$user->id]);
+                }
+            }
             $user->update($data);
             if ($deactivating) {
                 $user->tokens()->delete(); // AG-024: immediate lock-out
@@ -233,9 +240,47 @@ class UserController extends Controller
         return $row;
     }
 
+    /** Queued after commit; a mail failure is reported, never turned into a failed request. */
     private function sendInvitation(User $user): void
     {
-        $user->notify(new InvitationNotification(Password::broker()->createToken($user)));
+        try {
+            $user->notify(new InvitationNotification(Password::broker()->createToken($user)));
+        } catch (\Throwable $e) {
+            report($e);
+        }
+    }
+
+    /**
+     * B5 + B2 for global changes (profile, status, invitation): a non-Super Admin must hold user.edit in
+     * every branch of the target, and the target must not hold permissions the actor lacks in any of them.
+     */
+    private function assertManagesEverywhere(User $me, User $user): void
+    {
+        if ($reason = $this->profileLockReason($me, $user)) {
+            abort(403, $reason);
+        }
+    }
+
+    private function profileLockReason(User $me, User $user): ?string
+    {
+        if ($me->is_super_admin) {
+            return null;
+        }
+        if ($user->is_super_admin) {
+            return 'Only a Super Admin can change a Super Admin.';
+        }
+        foreach ($user->branches()->pluck('branches.id') as $b) {
+            $mine = $me->isMemberOf((int) $b) ? $me->permissionKeysIn((int) $b) : [];
+            if (! in_array('user.edit', $mine, true)) {
+                return 'This user also works in other branches; ask a Super Admin.';
+            }
+            $theirs = $user->roleInBranch((int) $b)?->permissionKeys() ?? [];
+            if (array_diff($theirs, $mine)) {
+                return 'You cannot change a user with more permissions than you.';
+            }
+        }
+
+        return null;
     }
 
     /** B1: non-Super Admins only reach members of the active branch. */

@@ -38,7 +38,11 @@ class PermissionSeeder extends Seeder
     public function run(): void
     {
         app(PermissionRegistrar::class)->forgetCachedPermissions();
+        $added = [];
         foreach (self::PERMISSIONS as $p) {
+            if (! Permission::where('name', $p)->where('guard_name', 'web')->exists()) {
+                $added[] = $p;
+            }
             Permission::findOrCreate($p, 'web');
         }
         setPermissionsTeamId(null);
@@ -47,6 +51,9 @@ class PermissionSeeder extends Seeder
             // Finding 7: only a new template gets the default permissions; re-seeding never resets Super Admin edits.
             if ($role->wasRecentlyCreated) {
                 $role->syncPermissions($perms === '*' ? self::PERMISSIONS : $perms);
+            } elseif ($perms === '*' && $added) {
+                // "All keys" templates receive keys that are new to the catalogue; removed keys are not re-added.
+                $role->givePermissionTo($added);
             }
         }
     }

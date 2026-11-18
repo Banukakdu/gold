@@ -86,13 +86,12 @@ class RoleController extends Controller
         $old = $this->state($role);
         $newPerms = array_key_exists('permissions', $data) ? array_values(array_unique($data['permissions'])) : $old['permissions'];
         $newStatus = $data['status'] ?? $role->status;
-        // B7: the role stops making its holders branch administrators.
-        if (! $role->isTemplate() && Role::grantsAdmin($old['permissions'], $old['status']) && ! Role::grantsAdmin($newPerms, $newStatus)) {
-            BranchAdmins::assertNotLast($role->branch_id, $role->activeHolderIds());
-        }
-
         $statusChanged = $newStatus !== $role->status;
-        DB::transaction(function () use ($role, $data, $old, $statusChanged, $branchId) {
+        DB::transaction(function () use ($role, $data, $old, $statusChanged, $branchId, $newPerms, $newStatus) {
+            // B7: the role stops making its holders branch administrators (checked under lock).
+            if (! $role->isTemplate() && Role::grantsAdmin($old['permissions'], $old['status']) && ! Role::grantsAdmin($newPerms, $newStatus)) {
+                BranchAdmins::assertNotLast($role->branch_id, $role->activeHolderIds());
+            }
             $holders = $role->activeHolderIds();
             $role->update(array_intersect_key($data, array_flip(['name', 'status'])));
             if (array_key_exists('permissions', $data)) {

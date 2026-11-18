@@ -21,6 +21,11 @@ class AccessAlerts
             return;
         }
         $branch = $branchId ? (Branch::find($branchId)?->code ?? (string) $branchId) : 'templates';
-        Notification::send($admins, new AccessChangedNotification($event, "{$actor->name} <{$actor->email}>", $branch, $target, $old, $new));
+        try {
+            // Queued after commit; the audit row is already written, so a mail failure is only reported.
+            Notification::send($admins, new AccessChangedNotification($event, "{$actor->name} <{$actor->email}>", $branch, $target, $old, $new));
+        } catch (\Throwable $e) {
+            report($e);
+        }
     }
 }

@@ -3,15 +3,19 @@
 namespace App\Notifications;
 
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
 /** AG-020: invitation link to set a password (password broker token, 60 minutes). */
-class InvitationNotification extends Notification
+class InvitationNotification extends Notification implements ShouldQueue
 {
     use Queueable;
 
-    public function __construct(public string $token) {}
+    public function __construct(public string $token)
+    {
+        $this->afterCommit();
+    }
 
     public function via(object $notifiable): array
     {

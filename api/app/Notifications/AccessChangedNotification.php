@@ -3,11 +3,12 @@
 namespace App\Notifications;
 
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
 /** Accounting review finding 9 / AC 48: tell Super Admins when a non-Super Admin changes access. */
-class AccessChangedNotification extends Notification
+class AccessChangedNotification extends Notification implements ShouldQueue
 {
     use Queueable;
 
@@ -18,7 +19,9 @@ class AccessChangedNotification extends Notification
         public string $target,
         public ?array $old,
         public ?array $new,
-    ) {}
+    ) {
+        $this->afterCommit();
+    }
 
     public function via(object $notifiable): array
     {

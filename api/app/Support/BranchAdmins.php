@@ -24,12 +24,15 @@ class BranchAdmins
             ->groupBy('rp.role_id')->havingRaw('count(distinct p.name) = ?', [count(Role::ADMIN_KEYS)])
             ->pluck('rp.role_id');
 
+        // Lock the counted assignments (and joined users) so two concurrent changes cannot both pass.
+        // Callers run this inside their DB transaction; SQLite ignores the lock.
+
         return DB::table('model_has_roles as mr')
             ->join('users', 'users.id', '=', 'mr.model_id')
             ->join('branch_user as bu', fn ($j) => $j->on('bu.user_id', '=', 'users.id')->on('bu.branch_id', '=', 'mr.branch_id'))
             ->where('mr.model_type', User::class)->where('mr.branch_id', $branchId)->whereIn('mr.role_id', $adminRoleIds)
             ->where('users.status', 'active')->where('users.is_super_admin', false)
-            ->distinct()->pluck('users.id')->map(fn ($id) => (int) $id)->all();
+            ->lockForUpdate()->pluck('users.id')->unique()->values()->map(fn ($id) => (int) $id)->all();
     }
 
     /** Branch ids where the user is currently a branch administrator. */
@@ -41,7 +44,7 @@ class BranchAdmins
 
     /**
      * Reject a change that would leave the branch with zero administrators.
-     * Does not block when the branch already had none.
+     * Does not block when the branch already had none. Call inside the transaction that makes the change.
      */
     public static function assertNotLast(int $branchId, array $losing, array $gaining = []): void
     {
