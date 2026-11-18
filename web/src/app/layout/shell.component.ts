@@ -24,6 +24,7 @@ import { SettingsService } from '../core/settings.service';
           @if (auth.isSuperAdmin()) { <a routerLink="/allocations/new" routerLinkActive="on">Fund a branch</a> }
           @if (auth.can('account.view')) { <a routerLink="/accounts" routerLinkActive="on">Accounts</a> }
           @if (auth.can('account.view')) { <a routerLink="/chart-of-accounts" routerLinkActive="on" class="subnav">Chart of accounts</a> }
+          @if (auth.can('category.manage')) { <a routerLink="/categories" routerLinkActive="on" class="subnav">Categories</a> }
           @if (auth.can('report.view')) { <a routerLink="/reports" routerLinkActive="on">Reports</a> }
           @if (auth.can('audit.view')) { <a routerLink="/audit-log" routerLinkActive="on">Audit log</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/period-locks" routerLinkActive="on">Period locks</a> }
@@ -78,6 +79,9 @@ export class ShellComponent implements OnInit {
       this.router.navigateByUrl('/transactions');
     } else if (this.router.url.startsWith('/audit-log') && !this.auth.can('audit.view')) {
       // audit.view is per branch: leave if the new branch does not grant it.
+      this.router.navigateByUrl('/dashboard');
+    } else if (this.router.url.startsWith('/categories') && !this.auth.can('category.manage')) {
+      // category.manage is per branch: leave if the new branch does not grant it.
       this.router.navigateByUrl('/dashboard');
     } else if (this.router.url.startsWith('/reports') && !this.auth.can('report.view')) {
       // Reports are per branch permission (report.view); leave if the new branch does not grant it.

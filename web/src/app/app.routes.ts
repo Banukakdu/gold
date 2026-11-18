@@ -29,6 +29,9 @@ export const routes: Routes = [
         loadComponent: () => import('./features/accounts/statement.component').then(m => m.StatementComponent) },
       { path: 'chart-of-accounts', canActivate: [permissionGuard('account.view')],
         loadComponent: () => import('./features/chart/chart-of-accounts.component').then(m => m.ChartOfAccountsComponent) },
+      // Categories spec S1 (AG-070/071/072)
+      { path: 'categories', canActivate: [permissionGuard('category.manage')],
+        loadComponent: () => import('./features/categories/categories.component').then(m => m.CategoriesComponent) },
       { path: 'reports', canActivate: [permissionGuard('report.view')],
         loadComponent: () => import('./features/reports/reports-hub.component').then(m => m.ReportsHubComponent) },
       { path: 'reports/income-expense', canActivate: [permissionGuard('report.view')],

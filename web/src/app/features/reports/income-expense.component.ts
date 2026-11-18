@@ -9,7 +9,7 @@ import {
   readQuery, reportError, writeQuery,
 } from './report-common';
 
-interface Line { id: number | null; name: string; is_active: boolean; amount: string; percent: string | null }
+interface Line { id: number | null; name: string; is_active: boolean; amount: string; percent: string | null; code?: string | null; branch_only?: string | null }
 interface Cat extends Line { subs: Line[] }
 interface Section { total: string; categories: Cat[] }
 interface IncomeExpense extends ReportMeta { income: Section | null; expense: Section | null; net: string | null }
@@ -46,11 +46,14 @@ interface IncomeExpense extends ReportMeta { income: Section | null; expense: Se
               <thead><tr><th>Category</th><th>Sub-category</th><th class="num">Amount</th><th class="num">% of type total</th></tr></thead>
               <tbody>
                 @for (c of s.data.categories; track c.id) {
-                  <tr class="sub"><td>{{ c.name }} @if (!c.is_active) { <span class="tag" data-s="inactive">Inactive</span> }</td><td></td>
+                  <tr class="sub"><td><span class="mono muted">{{ c.code }}</span> {{ c.name }} @if (!c.is_active) { <span class="tag" data-s="inactive">Inactive</span> }</td><td></td>
                     <td class="num">{{ c.amount | money }}</td><td class="num">{{ c.percent ?? '—' }}</td></tr>
                   @for (sub of c.subs; track sub.id) {
                     <tr><td></td>
-                      <td>{{ sub.name }} @if (!sub.is_active) { <span class="tag" data-s="inactive">Inactive</span> }</td>
+                      <!-- Categories review finding 8: the code, and "<code> only" for a branch-only sub. -->
+                      <td><span class="mono muted">{{ sub.code }}</span> {{ sub.name }}
+                        @if (sub.branch_only) { <span class="tag">{{ sub.branch_only }} only</span> }
+                        @if (!sub.is_active) { <span class="tag" data-s="inactive">Inactive</span> }</td>
                       <td class="num"><a [routerLink]="['/transactions']" [queryParams]="drill(s.key, c, sub)">{{ sub.amount | money }}</a></td>
                       <td class="num">{{ sub.percent ?? '—' }}</td></tr>
                   }
