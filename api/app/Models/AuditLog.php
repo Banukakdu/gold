@@ -31,7 +31,12 @@ class AuditLog extends Model
         return $this->belongsTo(Branch::class);
     }
 
-    public static function record(string $event, ?Model $model = null, ?array $old = null, ?array $new = null, ?int $branchId = null): self
+    /**
+     * $ip / $userAgent override the current request's: a queued job runs in the worker, so it passes the requester's
+     * values captured in the request (password reset spec R12, accounting review finding 3).
+     */
+    public static function record(string $event, ?Model $model = null, ?array $old = null, ?array $new = null, ?int $branchId = null,
+        ?string $ip = null, ?string $userAgent = null): self
     {
         $req = request();
 
@@ -43,8 +48,8 @@ class AuditLog extends Model
             'auditable_id' => $model?->getKey(),
             'old_values' => $old,
             'new_values' => $new,
-            'ip' => $req?->ip(),
-            'user_agent' => substr((string) $req?->userAgent(), 0, 255),
+            'ip' => $ip ?? $req?->ip(),
+            'user_agent' => substr((string) ($userAgent ?? $req?->userAgent()), 0, 255),
         ]);
     }
 }

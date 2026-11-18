@@ -21,6 +21,9 @@ use Illuminate\Support\Facades\Route;
 Route::prefix('v1')->group(function () {
     Route::post('auth/login', [AuthController::class, 'login']);
     Route::post('auth/set-password', [AuthController::class, 'setPassword'])->middleware('throttle:10,1');
+    // AG-002 password reset (docs/specs/password-reset.md N1, N2), public, rate limited per IP and per email (R4).
+    Route::post('auth/forgot-password', [AuthController::class, 'forgotPassword'])->middleware('throttle:password-forgot');
+    Route::post('auth/reset-password', [AuthController::class, 'resetPassword'])->middleware('throttle:password-reset');
 
     Route::middleware('auth:sanctum')->group(function () {
         Route::post('auth/logout', [AuthController::class, 'logout']);

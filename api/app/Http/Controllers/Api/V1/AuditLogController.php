@@ -41,6 +41,9 @@ class AuditLogController extends Controller
 
     public const MASK = '••••';
 
+    /** Keys that match the mask pattern but hold no secret (password reset spec R12: a flag and a count). */
+    public const NOT_SECRET = ['first_password', 'tokens_revoked'];
+
     /** Event groups of the filter: [prefixes, exact events]. */
     public const GROUPS = [
         'transactions' => [['transaction.'], []],
@@ -51,7 +54,7 @@ class AuditLogController extends Controller
         'branches' => [['branch.'], []],
         'periods' => [['period.'], []],
         'reports' => [[], ['report.exported', 'audit.exported']],
-        'logins' => [[], ['auth.login']],
+        'logins' => [['auth.'], []],
         'attachments' => [['attachment.'], []],
         // AG-092 R12
         'settings' => [['settings.'], []],
@@ -75,6 +78,11 @@ class AuditLogController extends Controller
         'report.exported' => 'Report exported',
         'audit.exported' => 'Audit log exported',
         'auth.login' => 'Login',
+        'auth.logout' => 'Logout',
+        'auth.locked_out' => 'Login locked',
+        'auth.password_reset_requested' => 'Password reset requested',
+        'auth.password_reset_refused' => 'Password reset refused',
+        'auth.password_reset' => 'Password reset',
         'ledger.legacy_voids_identified' => 'Legacy voids identified',
         'attachment.added' => 'Attachment added',
         'attachment.removed' => 'Attachment removed',
@@ -361,7 +369,8 @@ class AuditLogController extends Controller
             return $values;
         }
         foreach ($values as $k => $v) {
-            $values[$k] = is_string($k) && preg_match('/password|token|secret/i', $k) ? self::MASK : self::mask($v);
+            $secret = is_string($k) && ! in_array($k, self::NOT_SECRET, true) && preg_match('/password|token|secret/i', $k);
+            $values[$k] = $secret ? self::MASK : self::mask($v);
         }
 
         return $values;

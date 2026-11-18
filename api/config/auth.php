@@ -92,6 +92,12 @@ return [
     |
     */
 
+    /*
+    | Password reset spec R11 / accounting review finding 1: a Super Admin may reset their password by email only when
+    | this is on. Off by default until AG-005 2FA ships; recovery is `php artisan auth:reset-password {email}`.
+    */
+    'super_admin_email_reset' => (bool) env('AUTH_SUPER_ADMIN_EMAIL_RESET', false),
+
     'passwords' => [
         'users' => [
             'provider' => 'users',
