@@ -36,6 +36,20 @@ class Category extends Model
         });
     }
 
+    /**
+     * Categories spec R6: a sub-category is effectively inactive when it or its parent is inactive. Only for choosing a
+     * category for new money and for account status; void, reverse, the reclassify source and the year-end close
+     * never check it (accounting review finding 4).
+     */
+    public function isEffectivelyActive(): bool
+    {
+        if (! $this->is_active) {
+            return false;
+        }
+
+        return $this->parent_id === null || (bool) Category::whereKey($this->parent_id)->value('is_active');
+    }
+
     public function parent(): BelongsTo
     {
         return $this->belongsTo(Category::class, 'parent_id');

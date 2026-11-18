@@ -51,8 +51,9 @@ class ChartOfAccounts
      * one's code. No foreign key references that table, so postings (which take shared locks on `branches`, `accounts`
      * and `categories` through their foreign keys) never wait on it and it cannot close a deadlock cycle with them.
      * Callers run in a DB transaction (controllers, migration, LedgerService) and retry on a concurrency error.
+     * Category name checks (create, rename, promote) take the same lock (categories spec R3, accounting review finding 6).
      */
-    private function lockChart(): void
+    public function lockChart(): void
     {
         if (DB::table(self::LOCK_TABLE)->where('id', 1)->lockForUpdate()->value('id') === null) {
             // The migration inserts the row; recreate it if it was removed, then lock it.
@@ -149,16 +150,19 @@ class ChartOfAccounts
         return $c->branch_id ? [(int) $c->branch_id] : Branch::orderBy('id')->pluck('id')->all();
     }
 
-    /** Rename / (de)activate (R1): the accounts follow the category; a renamed parent renames its subs' accounts too. */
+    /**
+     * Rename / (de)activate (R1): the accounts follow the category. A renamed parent renames its subs' accounts too, and
+     * a parent's status change re-syncs its subs' accounts (categories spec R6: effective status).
+     */
     public function syncCategoryAccounts(Category $c): void
     {
         $ids = [$c->id];
-        if ($c->wasChanged('name') && ! $c->parent_id) {
+        if ($c->wasChanged(['name', 'is_active']) && ! $c->parent_id) {
             $ids = array_merge($ids, Category::where('parent_id', $c->id)->pluck('id')->all());
         }
         foreach (Category::whereIn('id', $ids)->get() as $cat) {
             $name = self::categoryAccountName($cat);
-            $status = $cat->is_active ? 'active' : 'inactive';
+            $status = self::categoryAccountStatus($cat);
             foreach (Account::withoutGlobalScopes()->where('category_id', $cat->id)->orderBy('id')->get() as $acc) {
                 $old = $acc->only(['name', 'status']);
                 $acc->fill(['name' => $name, 'status' => $acc->status === 'closed' ? 'closed' : $status]);
@@ -211,6 +215,15 @@ class ChartOfAccounts
             ['code' => self::interbranchCode($branch->id), 'name' => "Branch current account – {$branch->code}", 'type' => 'branch_current', 'class' => 'asset']);
     }
 
+    /**
+     * Categories spec R6 / accounting review finding 2: a category account is active only when the node and its parent
+     * are active (its "effective" status). Used wherever a category account's status is set.
+     */
+    public static function categoryAccountStatus(Category $c): string
+    {
+        return $c->isEffectivelyActive() ? 'active' : 'inactive';
+    }
+
     public function categoryAccount(Category $c, int $branchId): Account
     {
         if ($c->ledger_code === null) {
@@ -220,7 +233,7 @@ class ChartOfAccounts
 
         return $this->ensure(['branch_id' => $branchId, 'category_id' => $c->id], [
             'code' => $c->ledger_code, 'name' => self::categoryAccountName($c), 'type' => 'category',
-            'class' => $c->type, 'status' => $c->is_active ? 'active' : 'inactive',
+            'class' => $c->type, 'status' => self::categoryAccountStatus($c),
         ]);
     }
 

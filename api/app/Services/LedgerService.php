@@ -145,7 +145,8 @@ class LedgerService
         return DB::transaction(function () use ($type, $data) {
             $acc = $this->moneyAccount((int) $data['account_id']);
             $cat = Category::findOrFail($data['category_id']);
-            if ($cat->type !== $type || ! $cat->is_active) {
+            // Categories spec R6: the category and its parent must be active (new money only, finding 4).
+            if ($cat->type !== $type || ! $cat->isEffectivelyActive()) {
                 throw new LedgerException("Category must be an active {$type} category.");
             }
             if ($cat->branch_id && $cat->branch_id !== $acc->branch_id) {
@@ -200,7 +201,8 @@ class LedgerService
                 throw new LedgerException('This entry has no category to move from.');
             }
             $new = Category::find($categoryId);
-            if (! $new || $new->type !== $txn->type || ! $new->is_active || ($new->branch_id && $new->branch_id !== $txn->branch_id)) {
+            // Categories spec R6: the TARGET must be effectively active; the source may be inactive (finding 4).
+            if (! $new || $new->type !== $txn->type || ! $new->isEffectivelyActive() || ($new->branch_id && $new->branch_id !== $txn->branch_id)) {
                 throw new LedgerException("Choose an active {$txn->type} category of this branch.");
             }
             $date = $txn->txn_date->format('Y-m-d');

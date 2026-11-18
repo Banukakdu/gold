@@ -174,10 +174,12 @@ class TransactionController extends Controller
         $data = $request->validate([
             'payee_payer' => 'nullable|string|max:255', 'payment_method' => 'nullable|string|max:30',
             'reference' => 'nullable|string|max:255', 'description' => 'nullable|string|max:2000',
-            // Controls R5: an active category of the same type, global or of the entry's branch.
+            // Controls R5: an active category of the same type, global or of the entry's branch; categories spec R6: its
+            // parent must be active too.
             'category_id' => ['sometimes', 'integer', Rule::exists('categories', 'id')
                 ->where('type', $transaction->type)->where('is_active', true)
-                ->where(fn ($q) => $q->whereNull('branch_id')->orWhere('branch_id', $transaction->branch_id))],
+                ->where(fn ($q) => $q->whereNull('branch_id')->orWhere('branch_id', $transaction->branch_id))
+                ->where(fn ($q) => $q->whereNull('parent_id')->orWhereIn('parent_id', fn ($s) => $s->select('id')->from('categories')->where('is_active', true)))],
         ], ['category_id.exists' => "Choose an active {$transaction->type} category of this branch."]);
         DB::transaction(function () use ($transaction, $data, $date) {
             // Retried on a deadlock (review R3b): each attempt starts from the stored row.
