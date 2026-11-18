@@ -90,7 +90,11 @@ class ReportExporter
     /** Safety margin for dompdf at the PDF cap (about 1,000 lines). Never lowers a higher limit. */
     public static function raisePdfLimits(): void
     {
-        @set_time_limit(120);
+        // CLI and workers default to 0 (no limit); set_time_limit(120) would impose one on the whole process.
+        $limit = (int) ini_get('max_execution_time');
+        if ($limit > 0 && $limit < 120) {
+            @set_time_limit(120);
+        }
         $current = ini_get('memory_limit');
         if ($current !== '-1' && self::bytes((string) $current) < 512 * 1024 * 1024) {
             @ini_set('memory_limit', '512M');
