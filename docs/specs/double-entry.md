@@ -683,7 +683,7 @@ Each entry is still all-or-nothing: it is a savepoint, and L1 re-reads the whole
 | 2 Owner's capital only in MAIN | DONE | `PostingRules.php:42-54`; `ChartOfAccounts::ownerCapital`; PostingTest ac4/ac5; BackfillTest ac32 |
 | 3 Void / reverse fixes | DONE | `LedgerService.php:211`, `:256`, `:528`; ReclassifyTest ac14; probe |
 | 4 Reclassify rules | DONE | `LedgerService.php:169-203`; `TransactionController::update`; ReclassifyTest ac13–15 |
-| 5 Back-fill idempotency and scope | PARTLY | Skip, stop-on-unbalanced, inactive accounts and preflight are done (ac34–37). A stopped run writes **no** audit row (see MUST A). |
+| 5 Back-fill idempotency and scope | DONE (round 2) | Skip, stop-on-unbalanced, inactive accounts and preflight (ac34–37). A stopped run now writes `ledger.double_entry_backfill_stopped` (A, fixed in 97cd1ae). |
 | 6 Lock exemption confined | DONE | `LedgerService.php:307-364`; BackfillTest ac33, ac40 |
 | 7 Void exclusion reconciles | DONE | `DoubleEntryPreflight::lineOffenders` D4 (V2); TrialBalanceTest ac44 |
 | 8 Ledger ↔ Transfers report | DONE | BackfillTest ac29 (KDY +70,000.00, GAL +10,000.00, MAIN −80,000.00) |
@@ -704,5 +704,37 @@ Each entry is still all-or-nothing: it is a savepoint, and L1 re-reads the whole
   - "Fix the reported entry" gives no method. Say: do not edit data by hand; restore the backup, or escalate to the developer and the accountant.
   - After `ledger:backfill-double-entry` completes, run `php artisan migrate --force` again. Otherwise `2026_11_22_000001` stays pending and runs again at the next deploy. The re-run is harmless (0 lines and its own audit row), but it is unexpected.
 
-### Verdict: **NOT SIGNED OFF**
-The posting rules, chart, per-branch balance, eliminations, trial balance identity, void, reverse, reclass, lock exemption and V1–V6 are correct. The batching deviation is accepted. Sign-off needs MUST A. I will sign once A is fixed and its test is updated; B and C are recommended in the same pass.
+### Round 1 verdict (superseded): NOT SIGNED OFF, pending MUST A.
+
+### Round 2 re-check (accountant, 2026-11-18; commits 986f4fe, 97cd1ae)
+`php artisan test`: 253 passed (SQLite, run here).
+- **A: DONE.** `DoubleEntryBackfill::run` now has a catch block. On a write run that throws, it writes `ledger.double_entry_backfill_stopped` (user and branch null) with the error and the counts from the last **committed** batch (`$committed`, taken after each commit), then re-throws. BackfillTest ac34 asserts the rows: stopped (`partial`), completing run (`33 − partial`) and re-run (0). Together they sum to 33, so the audit rows now reconcile with the `origin = backfill` lines. ac35 asserts a stopped row for the unbalanced entry. On SQLite, the migration runs inside one transaction, so the lines and the row roll back together, which is consistent.
+- **B: DONE.** `ReportService::consolidatedTrialBalance` now compares the group first, then the keys element by element. The new test `test_consolidated_rows_are_in_group_order` checks that the rows start with Assets, MAIN comes first, each group appears once and in order, and income and expense rows follow their codes. The PDF headings follow the row order, so they are correct too.
+- **C: DONE.** README.md, "If the back-fill step fails":
+  - keep the app down, and do not edit rows by hand;
+  - for an outside cause (connection, lock timeout, disk), re-run `migrate --force`;
+  - for an error that names an entry, restore the backup or escalate;
+  - after the supervised command, run `migrate --force` so that `2026_11_22_000001` is recorded.
+
+  ac34 asserts that this last `migrate` records the migration and adds nothing.
+- **Deadlock fix and posting retry (review R3b): ACCEPTED.**
+  - Every posting method (`capital`, `transfer`, `incomeOrExpense`, `reclassify`, `reverse`, `void`) runs in `DB::transaction(..., ATTEMPTS = 3)`, as do the account, branch, category and transaction-update controllers.
+  - Laravel retries only on a concurrency error (deadlock or lock wait), and only at the top level. A failed attempt is rolled back as a whole, and the audit rows (same connection), lines, `transactions` row and cached balances all go with it. Each attempt re-reads its state under lock: the transaction row is reloaded FOR UPDATE, the accounts are re-locked, the period lock and funds are checked again, and `TransactionController::update` and `CategoryController::update` call `refresh()` first. A retry therefore re-validates and cannot double-post.
+  - No queued job or notification is sent from inside a posting. `AccessAlerts` is used only for user and role changes.
+  - The back-fill is not retried per entry (`backfill()` has no attempts), and a stopped batch is now audited (A).
+- **Retry probe.** A throwaway test, with the test-wrapper transaction committed so that LedgerService is at the top level, injected one deadlock late in each of four attempts:
+  - branch transfer: after its final audit insert;
+  - reclass with a payee edit: after its ledger line insert;
+  - void: after the status update;
+  - reversal of the branch transfer: after its audit insert.
+
+  Each request succeeded on retry with exactly one set of lines (6 / 2 / 4 contras / 6), one `transactions` row, and one of each audit row (`transaction.branch_transfer`, `transaction.reclassified`, `transaction.updated` with old payee "A", `transaction.voided`, `transaction.reversed`, `transaction.reversal`). `ledger:verify` passed.
+- **Chart code lock.** `chart_code_locks` is a single row that no foreign key references. It is created by the schema migration and recreated if it is missing. Codes are still max + 1 under that lock, so they stay unique and are never reused, and the chart is unchanged.
+- **Note (no action).** On MySQL, a retried or rolled-back posting uses up an AUTO_INCREMENT id, and `ref_no` contains the id. A retry can therefore leave a gap in the reference sequence. This already happens for any posting that fails after its insert. It is not a control weakness, because no posted entry is missing (V1/V6 and the audit log prove completeness), but auditors should be told that reference gaps are expected.
+
+### Verdict: **SIGNED OFF** (round 2, 2026-11-18)
+Findings 1–11 and 13 are DONE; finding 12 is a follow-up outside this release. Round-1 items A, B and C are fixed and tested. The batching deviation and the deadlock retry are accepted. The build is cleared for the pull request.
+
+Two conditions apply to the deploy, not to the code:
+- the dry-run output (F9 step 2) is signed by the accountant before `migrate`;
+- AG-092 (year-end close) ships before 31 March 2027.
