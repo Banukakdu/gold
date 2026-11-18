@@ -20,12 +20,12 @@ class YearEndSnapshotNotification extends Notification
 
     public function toMail(object $notifiable): MailMessage
     {
-        return (new MailMessage)
-            ->subject("Account-gold year-end snapshot {$this->label} taken")
-            ->line("Year-end snapshot {$this->label} taken: {$this->filename}")
-            ->line("SHA-256 {$this->sha256}")
-            ->line("Debits = credits = {$this->total}")
-            ->line('File this email with the year-end pack. An archive that no longer matches this hash has been changed.');
+        return BackupAlertNotification::mail("Account-gold year-end snapshot {$this->label} taken", [
+            "Year-end snapshot {$this->label} taken: {$this->filename}",
+            "SHA-256 {$this->sha256}",
+            "Debits = credits = {$this->total}",
+            'File this email with the year-end pack. An archive that no longer matches this hash has been changed.',
+        ]);
     }
 
     public function toArray(object $notifiable): array

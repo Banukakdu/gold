@@ -19,6 +19,14 @@ return [
     'old_passwords' => array_values(array_filter(array_map('trim', explode(',', (string) env('BACKUP_ARCHIVE_OLD_PASSWORDS', ''))))),
     'min_password_length' => 20,
 
+    // Review M1: where alerts go when the Super Admins cannot be read (database down). Comma-separated emails.
+    'alert_emails' => array_values(array_filter(array_map('trim', explode(',', (string) env('BACKUP_ALERT_EMAILS', ''))))),
+    // Review M1: the run and verify locks (and the backup schedule's mutexes) use this cache store, so a database
+    // outage does not stop the run before it can alert. `file` needs no database.
+    'lock_store' => env('BACKUP_LOCK_STORE', 'file'),
+    // Review M5: how long backup:verify waits for another restore test to finish before giving up.
+    'verify_wait_seconds' => 7200,
+
     'keep_daily' => 30,
     'keep_monthly' => 12,
     'min_keep' => 7,

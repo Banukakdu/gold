@@ -37,12 +37,16 @@ class RetentionTest extends BackupsTestCase
         foreach (File::allFiles(app_path()) as $f) {
             $src = $f->getContents();
             $mentionsBackupDisk = preg_match("/backup\\.local_disk|backup\\.offsite_disk|'backups(_offsite)?'|OffsiteStore|->disk\\(\\)/", $src);
-            $deletesOnDisk = preg_match('/(Storage::disk\([^)]*\)|\$\w*disk\w*|->disk\(\))\s*->\s*(delete|deleteDirectory)\s*\(/i', $src);
+            // Review minor: ANY delete call in a file that touches a backup disk counts, however the disk is reached.
+            $deletesOnDisk = preg_match('/->\s*(delete|deleteDirectory)\s*\(/i', $src);
             if ($mentionsBackupDisk && $deletesOnDisk) {
                 $offenders[] = $f->getFilename();
             }
         }
-        $this->assertSame(['BackupPruner.php'], $offenders);
+        sort($offenders);
+        $this->assertSame(['BackupPruner.php', 'LocalStore.php'], $offenders);
+        $store = file_get_contents(app_path('Services/Backups/LocalStore.php'));
+        $this->assertSame(1, preg_match_all('/->\s*delete\s*\(/', $store), 'LocalStore only removes the files of its own failed write');
         $pruner = file_get_contents(app_path('Services/Backups/BackupPruner.php'));
         $this->assertDoesNotMatchRegularExpression('/offsite_disk|OffsiteStore|backups_offsite/', $pruner);
         $this->assertDoesNotMatchRegularExpression('/->\s*delete|deleteDirectory/i', file_get_contents(app_path('Services/Backups/OffsiteStore.php')));

@@ -3,13 +3,19 @@
 namespace App\Console\Commands;
 
 use App\Models\Backup;
+use App\Services\Backups\BackupAlerts;
 use App\Services\Backups\BackupVerifier;
 use App\Services\Backups\OffsiteStore;
+use App\Services\Backups\Workspace;
 use Illuminate\Console\Command;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 
 /** AG-093 F3 / F3a / R11: restore a backup into the scratch database and check it. Exit 0 on pass, 1 on fail. */
 class BackupVerify extends Command
 {
+    /** Review M5: one verify at a time, so two runs never share the scratch database. */
+    public const LOCK = 'backup:verify';
+
     protected $signature = 'backup:verify
         {filename? : The archive, e.g. ag-backup-20261118-013000.zip}
         {--latest : The newest succeeded backup}
@@ -18,6 +24,27 @@ class BackupVerify extends Command
     protected $description = 'Restore a backup into the verify database and run the control, ledger:verify and attachments:verify checks';
 
     public function handle(BackupVerifier $verifier, OffsiteStore $offsite): int
+    {
+        $lock = BackupAlerts::locks()->lock(self::LOCK, (int) config('backup.stale_hours', 6) * 3600);
+        try {
+            $lock->block(max(0, (int) config('backup.verify_wait_seconds', 7200)));
+        } catch (LockTimeoutException) {
+            $this->error('Another backup:verify is still running; this one was not started.');
+
+            return self::FAILURE;
+        }
+        try {
+            foreach (Workspace::sweep() as $old) {
+                $this->warn("Removed a stale temp folder left by an interrupted run ({$old}).");
+            }
+
+            return $this->locked($verifier, $offsite);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    private function locked(BackupVerifier $verifier, OffsiteStore $offsite): int
     {
         $key = null;
         if ($this->option('oldest-offsite')) {

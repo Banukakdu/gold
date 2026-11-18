@@ -13,7 +13,6 @@ use App\Support\Settings;
 use Carbon\CarbonImmutable;
 use Closure;
 use Illuminate\Database\UniqueConstraintViolationException;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Symfony\Component\Process\Process;
@@ -33,7 +32,7 @@ class BackupRunner
     private Closure $say;
 
     public function __construct(private BackupArchive $archive, private OffsiteStore $offsite, private BackupPruner $pruner,
-        private BackupVerifier $verifier) {}
+        private BackupVerifier $verifier, private LocalStore $store) {}
 
     /**
      * @param  int|true|null  $yearEnd  --year-end: true = the last ended fiscal year, an int = that start year
@@ -43,42 +42,65 @@ class BackupRunner
     public function run(string $triggeredBy, int|true|null $yearEnd, Closure $say): int
     {
         $this->say = $say;
-        $lock = Cache::lock(self::LOCK, (int) config('backup.stale_hours', 6) * 3600);
-        if (! $lock->get()) {
-            $say('error', 'A backup is already running.');
-
-            return 1;
-        }
+        $lock = null;
         try {
-            $exit = $this->failStale();
-            $forced = null;
-            if ($yearEnd !== null) {
-                $settings = app(Settings::class);
-                $fy = $yearEnd === true ? $settings->currentFiscalYear()->previous() : $settings->fiscalYearStarting($yearEnd);
-                $forced = YearEndClose::active()->where('fiscal_year', $fy->startYear)->first();
-                if (! $forced) {
-                    $say('error', "{$fy->label()} is not closed.");
-
-                    return 1;
-                }
-            }
-            $now = BusinessDate::now();
-            try {
-                $backup = Backup::create(['filename' => 'ag-backup-'.$now->format('Ymd-His').'.zip', 'status' => Backup::RUNNING,
-                    'triggered_by' => $triggeredBy, 'started_at' => $now->utc(), 'db_driver' => DB::connection()->getDriverName(), 'encrypted' => false]);
-            } catch (UniqueConstraintViolationException) {
+            $lock = BackupAlerts::locks()->lock(self::LOCK, (int) config('backup.stale_hours', 6) * 3600);
+            if (! $lock->get()) {
+                $lock = null;
                 $say('error', 'A backup is already running.');
 
                 return 1;
             }
 
-            $exit = max($exit, $this->execute($backup, $forced));
-            $say('info', 'Pruning local backups.');
+            return $this->locked($triggeredBy, $yearEnd);
+        } catch (Throwable $e) {
+            // Review M1: anything not handled below (the database is down, the lock store fails) still alerts, through
+            // BACKUP_ALERT_EMAILS when the Super Admins cannot be read.
+            report($e);
+            $msg = mb_substr($e->getMessage(), 0, 1000) ?: $e::class;
+            $say('error', "Backup FAILED: {$msg}");
+            if (! BackupAlerts::send(new BackupAlertNotification('backup', 'run', null, BusinessDate::now()->format('Y-m-d H:i'), $msg))) {
+                $say('error', 'The alert email could not be sent; see the log.');
+            }
 
-            return max($exit, $this->pruner->prune($say));
+            return 1;
         } finally {
-            $lock->release();
+            $lock?->release();
         }
+    }
+
+    private function locked(string $triggeredBy, int|true|null $yearEnd): int
+    {
+        $say = $this->say;
+        foreach (Workspace::sweep() as $old) {
+            $say('warn', "Removed a stale temp folder left by an interrupted run ({$old}).");
+        }
+        $exit = $this->failStale();
+        $forced = null;
+        if ($yearEnd !== null) {
+            $settings = app(Settings::class);
+            $fy = $yearEnd === true ? $settings->currentFiscalYear()->previous() : $settings->fiscalYearStarting($yearEnd);
+            $forced = YearEndClose::active()->where('fiscal_year', $fy->startYear)->first();
+            if (! $forced) {
+                $say('error', "{$fy->label()} is not closed.");
+
+                return 1;
+            }
+        }
+        $now = BusinessDate::now();
+        try {
+            $backup = Backup::create(['filename' => 'ag-backup-'.$now->format('Ymd-His').'.zip', 'status' => Backup::RUNNING,
+                'triggered_by' => $triggeredBy, 'started_at' => $now->utc(), 'db_driver' => DB::connection()->getDriverName(), 'encrypted' => false]);
+        } catch (UniqueConstraintViolationException) {
+            $say('error', 'A backup is already running.');
+
+            return 1;
+        }
+
+        $exit = max($exit, $this->execute($backup, $forced));
+        $say('info', 'Pruning local backups.');
+
+        return max($exit, $this->pruner->prune($say));
     }
 
     /** R1 step 2: `running` rows older than the lock are failed. Returns 1 when any was found. */
@@ -140,13 +162,9 @@ class BackupRunner
             $sha = hash_file('sha256', $zipPath);
             $size = filesize($zipPath);
             file_put_contents($tmp.'/sha', "{$sha}  {$backup->filename}\n");
-            $local = Storage::disk((string) config('backup.local_disk'));
-            foreach ([[$zipPath, $backup->filename], [$tmp.'/sha', $backup->filename.'.sha256'], [$tmp.'/manifest.json', $backup->filename.'.manifest.json']] as [$from, $to]) {
-                $in = fopen($from, 'rb');
-                $local->writeStream($to, $in);
-                is_resource($in) && fclose($in);
-            }
-            $firstOfMonth = $this->firstOfMonth($backup);
+            $this->store->put([[$zipPath, $backup->filename], [$tmp.'/sha', $backup->filename.'.sha256'], [$tmp.'/manifest.json', $backup->filename.'.manifest.json']]);
+            // Review m4: a run that failed the continuity check is evidence, not the month's first backup.
+            $firstOfMonth = $continuity === null && $this->firstOfMonth($backup);
             $backup->fill([
                 'size_bytes' => $size, 'sha256' => $sha, 'encrypted' => $password !== null, 'files_count' => $manifest['files_count'],
                 'kept_as' => $close ? Backup::YEAR_END : ($firstOfMonth ? Backup::MONTHLY : Backup::DAILY),
@@ -186,11 +204,14 @@ class BackupRunner
     {
         $say = $this->say;
         $exit = 0;
-        AuditLog::record('backup.created', $backup, null, [
+        $created = AuditLog::record('backup.created', $backup, null, [
             'filename' => $backup->filename, 'size_bytes' => $backup->size_bytes, 'sha256' => $backup->sha256, 'db_driver' => $backup->db_driver,
             'encrypted' => $backup->encrypted, 'files_count' => $backup->files_count, 'kept_as' => $backup->kept_as,
             'offsite_status' => $backup->offsite_status, 'duration_seconds' => $backup->durationSeconds(), 'triggered_by' => $backup->triggered_by,
         ], null, self::CLIENT);
+        // R13 / review B2: the id of this audit row, kept outside the database. A restore to this backup's own dump (or
+        // any earlier one) loses the row, which the next run notices even after the ids have moved on.
+        $this->store->disk()->put($backup->filename.'.audit.json', json_encode(['backup' => $backup->filename, 'audit_id' => $created->id]));
         $say('info', "Backup {$backup->filename} written (".number_format((int) $backup->size_bytes).' bytes, sha256 '.$backup->sha256.').');
 
         if ($offsiteError !== null) {
@@ -257,17 +278,7 @@ class BackupRunner
         if (DB::connection()->getDriverName() === 'sqlite' && in_array(DB::connection()->getConfig('database'), [':memory:', ''], true)) {
             throw new BackupException('The database is in memory (:memory:); there is nothing to back up.', 'precheck');
         }
-        $local = Storage::disk((string) config('backup.local_disk'));
-        $root = $local->path('');
-        if (! is_dir($root)) {
-            mkdir($root, 0700, true);
-        }
-        $last = (int) Backup::succeeded()->orderByDesc('started_at')->value('size_bytes');
-        $need = $last > 0 ? 2 * $last : (int) config('backup.first_run_free_bytes');
-        $free = (int) @disk_free_space($root);
-        if ($free < $need) {
-            throw new BackupException('Not enough free disk space: '.self::bytes($free).' free, '.self::bytes($need).' needed.', 'precheck');
-        }
+        $this->checkSpace();
         foreach ($dumper->nonTransactionalTables() as $t) {
             throw new BackupException("Table {$t} is not InnoDB.", 'precheck');
         }
@@ -276,17 +287,51 @@ class BackupRunner
     }
 
     /**
-     * R13 / review F4. The newest manifest (local, else off-server) that is not itself a continuity failure. Raised when
-     * the live max id of audit_logs or ledger_entries is lower than that manifest's, unless a `backup.restored` row
-     * written after that backup names a backup at or before it.
+     * R1 step 4 / review M3. Peak use: the temp folder holds the dump and the zip (about dump + archive), the backups
+     * folder the new archive (2 x the last one, as a margin). When both are on one filesystem the needs add up.
+     */
+    private function checkSpace(): void
+    {
+        $root = $this->store->disk()->path('');
+        if (! is_dir($root)) {
+            mkdir($root, 0700, true);
+        }
+        $temp = Workspace::root();
+        $last = Backup::succeeded()->orderByDesc('started_at')->first();
+        if ($last && $last->size_bytes) {
+            $dump = (int) ($last->manifest['db_bytes'] ?? $last->size_bytes);
+            $needTemp = 2 * $dump + (int) $last->size_bytes;
+            $needLocal = 2 * (int) $last->size_bytes;
+        } else {
+            $needTemp = $needLocal = (int) config('backup.first_run_free_bytes');
+        }
+        $checks = @stat($temp)['dev'] === @stat($root)['dev']
+            ? [['the temp and backup folders', $temp, $needTemp + $needLocal]]
+            : [['the temp folder', $temp, $needTemp], ['the backup folder', $root, $needLocal]];
+        foreach ($checks as [$where, $path, $need]) {
+            $need = is_int($need) ? $need : PHP_INT_MAX;
+            $free = (int) @disk_free_space($path);
+            if ($free < $need) {
+                throw new BackupException('Not enough free disk space: '.self::bytes($free).' free, '.self::bytes($need)." needed on {$where}.", 'precheck');
+            }
+        }
+    }
+
+    /**
+     * R13 / review F4 and B2. Raised when:
+     *  1. an earlier run failed the check and no `backup:restored` has acknowledged it since (the alarm stays up);
+     *  2. the `backup.created` audit row of the newest good backup (its id is in `{file}.audit.json`) is gone, which
+     *     catches a restore to that backup's own dump;
+     *  3. the live max id of audit_logs or ledger_entries is lower than that backup's manifest.
+     * The manifests and sidecars live on the backups disk (else off-server), so they survive a database restore.
      *
      * @return array{message: string, values: array}|null
      */
     private function continuity(): ?array
     {
-        $local = Storage::disk((string) config('backup.local_disk'));
+        $local = $this->store->disk();
         $manifests = collect($local->files())->filter(fn ($f) => str_ends_with($f, '.manifest.json'))->sortDesc()
-            ->map(fn ($f) => json_decode((string) $local->get($f), true))->filter(fn ($m) => is_array($m))->values()->all();
+            ->map(fn ($f) => json_decode((string) $local->get($f), true))->filter(fn ($m) => is_array($m) && ! empty($m['backup']))->values()->all();
         if ($manifests === [] && $this->offsite->configured()) {
             try {
                 $manifests = $this->offsite->manifests();
@@ -294,30 +339,55 @@ class BackupRunner
                 report($e);
             }
         }
+        foreach ($manifests as $m) {
+            $raised = $m['continuity_failed'] ?? null;
+            if (is_array($raised) && ! $this->acknowledged((string) ($raised['newer_backup'] ?? $m['backup']), (string) $m['created_at'])) {
+                return [
+                    'message' => "Database rolled back without a recorded restore (first raised by {$m['backup']}; not yet acknowledged with backup:restored).",
+                    'values' => $raised,
+                ];
+            }
+        }
         $m = collect($manifests)->first(fn ($m) => empty($m['continuity_failed']));
-        if (! $m || empty($m['backup']) || empty($m['max_ids'])) {
+        if (! $m || empty($m['max_ids'])) {
             return null;
+        }
+        if ($this->acknowledged((string) $m['backup'], (string) $m['created_at'])) {
+            return null;
+        }
+        $sidecar = $m['backup'].'.audit.json';
+        $mark = $local->exists($sidecar) ? json_decode((string) $local->get($sidecar), true) : null;
+        if (is_array($mark) && isset($mark['audit_id'])) {
+            $row = AuditLog::find((int) $mark['audit_id']);
+            if (! $row || $row->event !== 'backup.created' || ($row->new_values['filename'] ?? null) !== $m['backup']) {
+                return [
+                    'message' => "Database rolled back without a recorded restore: the audit row of backup {$m['backup']} (id {$mark['audit_id']}) is missing.",
+                    'values' => ['newer_backup' => $m['backup'], 'table' => 'audit_logs', 'live_max_id' => (int) DB::table('audit_logs')->max('id'),
+                        'backup_max_id' => (int) $mark['audit_id']],
+                ];
+            }
         }
         foreach (['audit_logs', 'ledger_entries'] as $table) {
             $live = (int) DB::table($table)->max('id');
             $was = (int) ($m['max_ids'][$table] ?? 0);
-            if ($live >= $was) {
-                continue;
+            if ($live < $was) {
+                return [
+                    'message' => "Database rolled back without a recorded restore: {$table} max id is {$live}, backup {$m['backup']} had {$was}.",
+                    'values' => ['newer_backup' => $m['backup'], 'table' => $table, 'live_max_id' => $live, 'backup_max_id' => $was],
+                ];
             }
-            $since = CarbonImmutable::parse((string) $m['created_at'])->utc();
-            $declared = AuditLog::where('event', 'backup.restored')->where('created_at', '>=', $since->format('Y-m-d H:i:s'))->get(['new_values'])
-                ->contains(fn (AuditLog $a) => strcmp((string) ($a->new_values['filename'] ?? "\u{FFFF}"), (string) $m['backup']) <= 0);
-            if ($declared) {
-                return null;
-            }
-
-            return [
-                'message' => "Database rolled back without a recorded restore: {$table} max id is {$live}, backup {$m['backup']} had {$was}.",
-                'values' => ['newer_backup' => $m['backup'], 'table' => $table, 'live_max_id' => $live, 'backup_max_id' => $was],
-            ];
         }
 
         return null;
+    }
+
+    /** A `backup:restored` row written at or after $since that names a backup at or before $newer. */
+    private function acknowledged(string $newer, string $since): bool
+    {
+        $at = CarbonImmutable::parse($since)->utc()->format('Y-m-d H:i:s');
+
+        return AuditLog::where('event', 'backup.restored')->where('created_at', '>=', $at)->get(['new_values'])
+            ->contains(fn (AuditLog $a) => strcmp((string) ($a->new_values['filename'] ?? "\u{FFFF}"), $newer) <= 0);
     }
 
     /** R14: the oldest close in force before the run start that has no succeeded year-end snapshot yet. */
@@ -374,6 +444,7 @@ class BackupRunner
             'db_entry' => $dumper->entryName(),
             'last_migration' => DB::table('migrations')->orderByDesc('id')->value('migration'),
             'db_sha256' => hash_file('sha256', $dbPath),
+            'db_bytes' => (int) filesize($dbPath),
             'control_sha256' => hash_file('sha256', $controlPath),
             'counts' => ControlTotals::counts($maxIds),
             'max_ids' => $maxIds,
@@ -428,12 +499,18 @@ class BackupRunner
         }
     }
 
+    /** Review M1: the alert goes out first, so a database that is failing cannot stop it. */
     private function fail(Backup $backup, string $stage, string $error): void
     {
-        $backup->update(['status' => Backup::FAILED, 'failed_stage' => $stage, 'error' => $error, 'finished_at' => now()]);
-        AuditLog::record('backup.failed', $backup, null, ['filename' => $backup->filename, 'stage' => $stage, 'error' => $error], null, self::CLIENT);
         ($this->say)('error', "Backup {$backup->filename} FAILED at {$stage}: {$error}");
         $this->alert('backup', $stage, $backup, $error);
+        try {
+            $backup->update(['status' => Backup::FAILED, 'failed_stage' => $stage, 'error' => $error, 'finished_at' => now()]);
+            AuditLog::record('backup.failed', $backup, null, ['filename' => $backup->filename, 'stage' => $stage, 'error' => $error], null, self::CLIENT);
+        } catch (Throwable $e) {
+            report($e);
+            ($this->say)('error', 'The failure could not be recorded in the database: '.mb_substr($e->getMessage(), 0, 300));
+        }
     }
 
     private function alert(string $kind, string $stage, Backup $backup, string $error): void

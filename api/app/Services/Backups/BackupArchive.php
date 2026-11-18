@@ -12,7 +12,7 @@ use ZipArchive;
 class BackupArchive
 {
     /** @param  array<int, array{0: string, 1: string, 2: bool}>  $entries  [name in zip, source file, deflate?] */
-    public function build(string $zipPath, array $entries, ?string $password): void
+    public function build(string $zipPath, array $entries, #[\SensitiveParameter] ?string $password): void
     {
         $zip = new ZipArchive;
         if ($zip->open($zipPath, ZipArchive::CREATE | ZipArchive::EXCL) !== true) {
@@ -39,7 +39,7 @@ class BackupArchive
      * @param  array<string, string>  $hashes  entry name => expected sha256
      * @return string|null the problem, or null when the archive is good
      */
-    public function selfCheck(string $zipPath, ?string $password, int $expectedEntries, array $hashes): ?string
+    public function selfCheck(string $zipPath, #[\SensitiveParameter] ?string $password, int $expectedEntries, array $hashes): ?string
     {
         $zip = new ZipArchive;
         $open = $zip->open($zipPath, ZipArchive::CHECKCONS);
@@ -71,7 +71,7 @@ class BackupArchive
      *
      * @param  string[]  $passwords
      */
-    public function extract(string $zipPath, string $dir, array $passwords): bool
+    public function extract(string $zipPath, string $dir, #[\SensitiveParameter] array $passwords): bool
     {
         $zip = new ZipArchive;
         if ($zip->open($zipPath, ZipArchive::CHECKCONS) !== true) {

@@ -112,7 +112,9 @@ class DownloadTest extends AttachmentsTestCase
         $deletes = collect(File::allFiles(app_path()))->filter(fn ($f) => preg_match('/\$disk->delete\(|Storage::disk\([^)]*\)->delete\(/', $f->getContents()))
             ->map(fn ($f) => $f->getRelativePathname())->values()->all();
         // AG-092 R3: the logo store rolls back a logo file whose upload failed, the same exception as attachments.
-        // AG-093 R7: local backup retention deletes archives on the `backups` disk only (backups AC 19).
-        $this->assertSame(['Http/Controllers/Api/V1/AttachmentController.php', 'Services/Backups/BackupPruner.php', 'Support/LogoStore.php'], $deletes);
+        // AG-093 R7: local backup retention deletes archives on the `backups` disk only (backups AC 19); R5: the backup
+        // store removes its own failed write there.
+        $this->assertSame(['Http/Controllers/Api/V1/AttachmentController.php', 'Services/Backups/BackupPruner.php',
+            'Services/Backups/LocalStore.php', 'Support/LogoStore.php'], $deletes);
     }
 }

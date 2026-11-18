@@ -65,6 +65,9 @@ abstract class BackupsTestCase extends TestCase
             'backup.password' => self::PASSWORD,
             'backup.offsite_disk' => '',
             'backup.first_run_free_bytes' => 1024 * 1024,
+            'backup.lock_store' => 'array',
+            'backup.alert_emails' => [],
+            'backup.verify_wait_seconds' => 0,
             'filesystems.disks.attachments.root' => "{$this->work}/attachments",
             'filesystems.disks.branding.root' => "{$this->work}/branding",
         ]);

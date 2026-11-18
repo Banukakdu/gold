@@ -62,7 +62,11 @@ class BackupVerifier
             if (! is_array($manifest) || ! is_array($control)) {
                 throw new BackupException('The archive has no readable manifest.json or control.json.', 'extract');
             }
-            $dbFile = $dir.'/'.($manifest['db_entry'] ?? ($manifest['db_driver'] === 'mysql' ? 'db.sql' : 'db.sqlite'));
+            $entry = (string) ($manifest['db_entry'] ?? (($manifest['db_driver'] ?? '') === 'mysql' ? 'db.sql' : 'db.sqlite'));
+            if (! in_array($entry, ['db.sql', 'db.sqlite'], true)) {
+                throw new BackupException('The manifest names an unexpected database entry.', 'extract');
+            }
+            $dbFile = $dir.'/'.$entry;
             if (! is_file($dbFile) || ! hash_equals((string) ($manifest['db_sha256'] ?? ''), hash_file('sha256', $dbFile))
                 || ! hash_equals((string) ($manifest['control_sha256'] ?? ''), hash('sha256', $controlRaw))) {
                 throw new BackupException('The database dump or control.json does not match the manifest.', 'extract');
@@ -127,11 +131,17 @@ class BackupVerifier
             }
             $stage = $e instanceof BackupException ? $e->stage : $stage;
             $msg = mb_substr(trim(strtok($e->getMessage(), "\n") ?: $e::class), 0, 1000);
-            $backup?->update(['verify_status' => 'failed', 'verified_at' => now(), 'verify_error' => $msg]);
-            AuditLog::record('backup.verify_failed', $backup, null, ['filename' => $filename, 'stage' => $stage, 'error' => $msg], null, $client);
             $say('error', "Restore test of {$filename} FAILED at {$stage}: {$msg}");
+            // Review M1: alert first; the database writes below may fail too.
             if (! BackupAlerts::send(new BackupAlertNotification('verify', $stage, $filename, BusinessDate::now()->format('Y-m-d H:i'), $msg))) {
                 $say('error', 'The alert email could not be sent; see the log.');
+            }
+            try {
+                $backup?->update(['verify_status' => 'failed', 'verified_at' => now(), 'verify_error' => $msg]);
+                AuditLog::record('backup.verify_failed', $backup, null, ['filename' => $filename, 'stage' => $stage, 'error' => $msg], null, $client);
+            } catch (Throwable $w) {
+                report($w);
+                $say('error', 'The failure could not be recorded in the database: '.mb_substr($w->getMessage(), 0, 300));
             }
 
             return false;
@@ -173,27 +183,54 @@ class BackupVerifier
         return [$to, $backup?->sha256 ?? $this->offsite->sidecarSha($key)];
     }
 
-    /** R11 step 3: same host + port + database (MySQL), or the same file (SQLite). */
+    /**
+     * R11 step 3 / review M4: true when both connections reach the same database, or when that cannot be told.
+     * MySQL compares `@@server_uuid` + `DATABASE()` as the servers report them (host names and ports can alias);
+     * SQLite compares the real paths of the files.
+     */
     public function sameDatabase(string $a, string $b): bool
     {
         if ($a === $b) {
             return true;
         }
-        $ca = (array) config("database.connections.{$a}");
-        $cb = (array) config("database.connections.{$b}");
-        if (($ca['driver'] ?? '') !== ($cb['driver'] ?? '')) {
-            return false;
-        }
-        if (($ca['driver'] ?? '') === 'sqlite') {
-            $fa = (string) ($ca['database'] ?? '');
-            $fb = (string) ($cb['database'] ?? '');
+        try {
+            $ia = $this->identity($a);
+            $ib = $this->identity($b);
+        } catch (Throwable $e) {
+            report($e);
 
-            return (realpath($fa) ?: $fa) === (realpath($fb) ?: $fb);
+            return true;
         }
-        $host = fn (array $c) => in_array($h = strtolower((string) ($c['host'] ?? '')), ['localhost', '::1'], true) ? '127.0.0.1' : $h;
 
-        return $host($ca) === $host($cb) && (int) ($ca['port'] ?? 3306) === (int) ($cb['port'] ?? 3306)
-            && strtolower((string) ($ca['database'] ?? '')) === strtolower((string) ($cb['database'] ?? ''));
+        return $ia === null || $ib === null || $ia === $ib;
+    }
+
+    /** A string naming the physical database behind a connection, or null when it cannot be told. */
+    protected function identity(string $connection): ?string
+    {
+        $c = (array) config("database.connections.{$connection}");
+        $driver = (string) ($c['driver'] ?? '');
+        if ($driver === 'sqlite') {
+            $file = (string) ($c['database'] ?? '');
+            if ($file === '' || $file === ':memory:') {
+                return null;
+            }
+            if (($real = realpath($file)) !== false) {
+                return 'sqlite:'.$real;
+            }
+            $dir = realpath(dirname($file));
+
+            return $dir === false ? null : 'sqlite:'.$dir.DIRECTORY_SEPARATOR.basename($file);
+        }
+        if (in_array($driver, ['mysql', 'mariadb'], true)) {
+            $row = DB::connection($connection)->selectOne('SELECT @@server_uuid AS server_uuid, DATABASE() AS db');
+            $uuid = (string) ($row->server_uuid ?? '');
+            $db = (string) ($row->db ?? '');
+
+            return $uuid === '' || $db === '' ? null : "mysql:{$uuid}/".strtolower($db);
+        }
+
+        return null;
     }
 
     /** R11 step 5: the rest of this process reads the restored copy. Returns what restore() needs. */

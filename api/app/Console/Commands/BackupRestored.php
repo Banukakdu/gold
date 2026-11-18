@@ -8,6 +8,7 @@ use App\Notifications\BackupRestoredNotification;
 use App\Services\Backups\BackupAlerts;
 use App\Services\Backups\OffsiteStore;
 use App\Support\BusinessDate;
+use App\Support\Tokens;
 use Carbon\CarbonImmutable;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
@@ -35,7 +36,7 @@ class BackupRestored extends Command
         }
         $local = Storage::disk((string) config('backup.local_disk'));
         $row = Backup::where('filename', $filename)->first();
-        $manifest = $this->manifest($local, $filename) ?? $row?->manifest;
+        $manifest = $this->manifest($local, $filename) ?? $row?->manifest ?? $this->offsiteManifest($offsite, $filename);
         if (! $row && ! $manifest) {
             $this->error("Unknown backup {$filename}: no row and no manifest on this server.");
 
@@ -58,8 +59,8 @@ class BackupRestored extends Command
         }
         $row ??= Backup::where('filename', $filename)->first();
 
-        $tokens = DB::table('personal_access_tokens')->count();
-        DB::table('personal_access_tokens')->delete();
+        $tokens = Tokens::revokeAll();
+        $missing = $this->reconcileMissing($local);
 
         $startedAt = $row?->started_at?->toIso8601String() ?? (string) ($manifest['created_at'] ?? '');
         $operator = (string) (function_exists('posix_getpwuid') && function_exists('posix_geteuid') ? (posix_getpwuid(posix_geteuid())['name'] ?? '') : '')
@@ -67,7 +68,7 @@ class BackupRestored extends Command
         AuditLog::record('backup.restored', $row, null, [
             'filename' => $filename, 'sha256' => $row?->sha256 ?? $this->sidecarSha($local, $filename), 'reason' => $reason,
             'restored_at' => now()->toIso8601String(), 'operator' => $operator, 'backup_started_at' => $startedAt,
-            'tokens_revoked' => $tokens, 'rows_recreated' => $recreated,
+            'tokens_revoked' => $tokens, 'rows_recreated' => $recreated, 'rows_marked_missing' => $missing,
         ], null, ['ip' => null, 'user_agent' => 'artisan backup:restored']);
 
         $local_time = $startedAt !== '' ? CarbonImmutable::parse($startedAt)->setTimezone(BusinessDate::timezone())->format('Y-m-d H:i') : '?';
@@ -85,6 +86,40 @@ class BackupRestored extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    /** Review m6: when the local copies are gone (a new server), the off-server manifest names the backup. */
+    private function offsiteManifest(OffsiteStore $offsite, string $filename): ?array
+    {
+        if (! $offsite->configured()) {
+            return null;
+        }
+        try {
+            return collect($offsite->manifests())->first(fn ($m) => ($m['backup'] ?? null) === $filename);
+        } catch (\Throwable $e) {
+            report($e);
+
+            return null;
+        }
+    }
+
+    /**
+     * QA note: the restored database lists local archives that prune removed after the dump was taken. Mark those
+     * rows as pruned (the files are gone) so the screen does not offer them.
+     *
+     * @return string[]
+     */
+    private function reconcileMissing($local): array
+    {
+        $names = [];
+        foreach (Backup::succeeded()->whereNull('local_pruned_at')->get() as $b) {
+            if (! $local->exists($b->filename)) {
+                $b->update(['local_pruned_at' => now()]);
+                $names[] = $b->filename;
+            }
+        }
+
+        return $names;
     }
 
     private function manifest($disk, string $zip): ?array

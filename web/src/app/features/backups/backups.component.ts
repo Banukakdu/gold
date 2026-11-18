@@ -17,7 +17,7 @@ interface Backup {
 interface Summary {
   last_success_at: string | null;
   last_success: { started_at: string; size_bytes: number | null; offsite_status: string | null } | null;
-  latest: { filename: string; status: string; failed_stage: string | null; error: string | null; offsite_status: string | null; offsite_error: string | null } | null;
+  latest: { filename: string; status: string; failed_stage: string | null; error: string | null; offsite_status: string | null; offsite_error: string | null; continuity_backup: string | null } | null;
   offsite_configured: boolean; offsite_required: boolean; encrypted_configured: boolean;
   schedule: { backup: string; verify: string; verify_oldest: string; timezone: string };
   retention: { daily: number; monthly: number; min_keep: number; year_end_years: number };
@@ -56,13 +56,13 @@ function age(ms: number): string {
 export function banner(s: Summary, now = Date.now()): { style: Style; text: string } {
   const latest = s.latest;
   if (latest?.failed_stage === 'continuity') {
-    return { style: 'red', text: `The database has fewer ledger or audit rows than an earlier backup, and no restore was recorded. Investigate before anything else. (${latest.error ?? ''})` };
+    return { style: 'red', text: `The database has fewer ledger or audit rows than backup ${latest.continuity_backup ?? 'an earlier backup'}, and no restore was recorded. Investigate before anything else.` };
   }
   if (latest?.failed_stage === 'control') {
     return { style: 'red', text: `The books did not balance in last night's backup: ${latest.error ?? ''} Run php artisan ledger:verify.` };
   }
   if (!s.last_success_at) {
-    return { style: 'red', text: 'No backup has completed yet. Check that cron runs `php artisan schedule:run` every minute.' };
+    return { style: 'red', text: 'No backup has completed yet. Check that cron runs php artisan schedule:run every minute.' };
   }
   const lastMs = new Date(s.last_success_at).getTime();
   if (now - lastMs > 26 * HOUR) {
@@ -72,7 +72,7 @@ export function banner(s: Summary, now = Date.now()): { style: Style; text: stri
     return { style: s.offsite_required ? 'red' : 'amber', text: 'Backups are kept only on this server. Configure off-server storage (BACKUP_OFFSITE_DISK) before go-live.' };
   }
   if (latest?.offsite_status === 'failed') {
-    return { style: 'amber', text: `Last night's backup was not copied off-server: ${latest.offsite_error ?? ''}` };
+    return { style: 'amber', text: `Last night's backup was not copied off-server: ${(latest.offsite_error ?? '').replace(/\.$/, '')}.` };
   }
   if (!s.encrypted_configured) {
     return { style: 'amber', text: 'Backups are not encrypted (BACKUP_ARCHIVE_PASSWORD is empty). Production refuses to run without it.' };

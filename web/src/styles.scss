@@ -213,6 +213,9 @@ button.att-danger { color: var(--neg); border-color: var(--neg); }
 .bk-table td { white-space: nowrap; }
 .bk-table tr.bk-failed td { border-bottom: 0; }
 .bk-table tr.bk-error td { white-space: normal; padding-top: 0; }
+/* QA B3: the error row spans the wide table; keep its text inside the visible card (cqw = the card's width). */
+.bk-card { container-type: inline-size; }
+.bk-table .bk-err { display: block; max-width: calc(100cqw - 24px); position: sticky; left: 8px; }
 .tag[data-s='bk-succeeded'] { background: #dff1e6; color: var(--pos); }
 .tag[data-s='bk-failed'] { background: #f4e1df; color: var(--neg); }
 .tag[data-s='bk-running'] { background: #e1ebf7; color: #2a5d9f; }

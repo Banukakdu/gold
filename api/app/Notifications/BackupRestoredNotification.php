@@ -17,14 +17,14 @@ class BackupRestoredNotification extends Notification
 
     public function toMail(object $notifiable): MailMessage
     {
-        return (new MailMessage)
-            ->subject('Account-gold database restored from a backup')
-            ->line('Restored from: '.YearEndNotification::plain($this->filename))
-            ->line("Backup time: {$this->backupTime} (Asia/Colombo). Entries and changes made after this time are not in the system.")
-            ->line('Reason: '.YearEndNotification::plain($this->reason))
-            ->line('Operator: '.YearEndNotification::plain($this->operator))
-            ->line('Everyone has been signed out. Re-apply every user deactivation, role change, period lock and year-end close made '
-                .'after the backup time, using the access-alert and year-end emails received since then, and record them in the restore note.');
+        return BackupAlertNotification::mail('Account-gold database restored from a backup', [
+            "Restored from: {$this->filename}",
+            "Backup time: {$this->backupTime} (Asia/Colombo). Entries and changes made after this time are not in the system.",
+            "Reason: {$this->reason}",
+            "Operator: {$this->operator}",
+            'Everyone has been signed out. Re-apply every user deactivation, role change, period lock and year-end close made '
+                .'after the backup time, using the access-alert and year-end emails received since then, and record them in the restore note.',
+        ]);
     }
 
     public function toArray(object $notifiable): array

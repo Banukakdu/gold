@@ -6,7 +6,7 @@ Backlog acceptance: nightly mysqldump (or spatie/laravel-backup) to off-server s
 
 Built on `feature/transaction-search`. Fixed decisions:
 - **One backup = one encrypted archive** that holds the database dump **and** the private files (`attachments` and `branding` disks), written in the same run. The attachments and settings specs already require this ("backed up together, so a restore never pairs rows with older files").
-- **Built in the app, no new composer package.** A `backup:run` command uses `mysqldump` (MySQL) or `VACUUM INTO` (SQLite dev) and PHP `ZipArchive` (AES-256). We need our own `backups` table, audit rows, alerts and restore test, so spatie/laravel-backup would add a package and still need most of this code (Q1).
+- **Built in the app; one composer package (review M6).** The only package added is `league/flysystem-aws-s3-v3` (^3.0), the Flysystem adapter Laravel's `s3` disk needs for the off-server copy that accountant F1 requires. A `backup:run` command uses `mysqldump` (MySQL) or `VACUUM INTO` (SQLite dev) and PHP `ZipArchive` (AES-256). We need our own `backups` table, audit rows, alerts and restore test, so spatie/laravel-backup would add a package and still need most of this code (Q1).
 - **Off-server copy** to an S3-compatible disk when one is configured. **The app never deletes or overwrites off-server copies** (it checks that a key is free before every write, review F3). Off-server retention is a bucket lifecycle rule, so the app's key needs no delete right. The bucket must have **versioning** on, and **object lock (compliance mode)** at least for `yearly/` (review F3), so neither a compromised server nor an overwrite can remove the off-server backups.
 - **Retention (review Q5, F1):** 30 daily and 12 first-of-month backups on this server and off-server, plus a **year-end snapshot of every closed fiscal year kept off-server for 8 years** (`yearly/`). The year-end snapshot is the statutory copy of the closed books; the live database remains the book of account.
 - **Every archive carries proof that the books balanced** (`control.json`, review F2), and every run checks that the database was not rolled back without a recorded restore (review F4).
@@ -116,20 +116,22 @@ Failures alert the Super Admins.
 - `mysqldump_path` (`BACKUP_MYSQLDUMP`, `mysqldump`) and `mysql_path` (`BACKUP_MYSQL`, `mysql`).
 
 **Schedule** (`routes/console.php`, which today has only `inspire`):
+- `Schedule::useCache(config('backup.lock_store'))` (review M1/M5): the schedule mutexes use the backup lock store (`BACKUP_LOCK_STORE`, default `file`, never `database`), so a database outage cannot stop the run that reports it. With more than one app server it must be a shared store (redis).
 - `Schedule::command('backup:run --scheduled')->dailyAt(time)->timezone(tz)->withoutOverlapping(360)->onOneServer()`. `--scheduled` only sets `triggered_by = scheduler`; a run by hand is `console`.
-- `Schedule::command('backup:verify --latest')->weeklyOn(0, '03:00')->timezone(tz)->withoutOverlapping(360)`.
-- `Schedule::command('backup:verify --oldest-offsite')->weeklyOn(0, '04:00')->when(day of month <= 7)->timezone(tz)->withoutOverlapping(360)`, described as "monthly, first Sunday 04:00" (review F7). Cron cannot express "first Sunday" (day-of-month and day-of-week are OR-ed), hence the filter.
+- `Schedule::command('backup:verify --latest')->weeklyOn(0, '03:00')->timezone(tz)->withoutOverlapping(360)->onOneServer()`.
+- `Schedule::command('backup:verify --oldest-offsite')->weeklyOn(0, '04:00')->when(day of month <= 7)->timezone(tz)->withoutOverlapping(360)->onOneServer()`, described as "monthly, first Sunday 04:00" (review F7). Cron cannot express "first Sunday" (day-of-month and day-of-week are OR-ed), hence the filter.
 - README: the cron line `* * * * * cd /path/api && php artisan schedule:run >> /dev/null 2>&1`.
 
 ## 6. Business rules and edge cases
 **R1 Run order and consistency** (`backup:run`):
-1. Take a cache lock `backup:run` (6 h). If it is held -> "A backup is already running." exit 1, with no row and no alert.
+1. Take a cache lock `backup:run` (6 h) in the backup lock store (`BACKUP_LOCK_STORE`, not the database). If it is held -> "A backup is already running." exit 1, with no row and no alert. Everything after this step runs inside a catch-all (review M1): any error, including a database that cannot be reached, sends the alert (R8) before any database write is tried, and exits 1.
+   - Then remove temp folders under `storage/app/backup-temp` older than 6 h (review M2): a killed run leaves its folder (plain dump, credentials file) behind. `backup:prune` and `backup:verify` do the same.
 2. Mark stale runs as failed: rows that are `running` with `started_at` more than 6 h ago -> `failed`, error "Interrupted: the run did not finish." Each gets an audit row and an alert.
 3. Insert the row (`running`, filename `ag-backup-YYYYMMDD-HHMMSS.zip`, in the business timezone).
 4. Precheck:
    - Password set (production: required, else fail "BACKUP_ARCHIVE_PASSWORD is not set.").
    - The DB is not `:memory:`.
-   - Free space on the local disk is at least 2 × the last succeeded size (first run: 1 GB). Otherwise fail with "Not enough free disk space: {free} free, {need} needed."
+   - Free space (review M3), from the last succeeded backup: the temp folder needs 2 × its dump size (`manifest.db_bytes`) + its archive size; the backups folder needs 2 × its archive size; when both are on one filesystem the two are added. First run: 1 GB each. Otherwise fail with "Not enough free disk space: {free} free, {need} needed on {where}."
    - **InnoDB only (review F6).** `--single-transaction` gives one point in time only for InnoDB tables. On MySQL, fail with "Table {t} is not InnoDB." if any base table in the app schema uses another engine.
    - **Continuity (R13, review F4).** Recorded here, acted on at the end of the run.
 5. **Dump the DB first, then copy files.** This order is consistent because attachment and logo files are written before their rows and are never deleted (removed or replaced files stay on disk). Every row in the snapshot therefore has its file. A file uploaded during the run may be in the archive without a row, which is harmless.
@@ -137,10 +139,10 @@ Failures alert the Super Admins.
 7. The live max ids of `ledger_entries`, `transactions` and `audit_logs` are read **before** the dump. `control.json` and the manifest row counts are computed over rows with `id <=` those ids, so they describe exactly the rows the dump is sure to hold, even while users keep posting (these tables are append-only). `backup:verify` applies the same bounds to the restored DB.
 
 **R2 Database dump.**
-- **MySQL:** run `mysqldump --single-transaction --quick --routines --triggers --events --hex-blob --no-tablespaces --set-gtid-purged=OFF --default-character-set=utf8mb4 {db}` through Symfony `Process` (no shell), with stdout to `db.sql`.
+- **MySQL:** run `mysqldump --single-transaction --quick --routines --triggers --events --hex-blob --no-tablespaces --set-gtid-purged=OFF --default-character-set=utf8mb4 {db}` with `proc_open` and an argument array (no shell). Its stdout is a pipe read line by line; each line has its DEFINER stripped on the way to `db.sql`, so only one copy of the dump is ever on disk (review M3). stderr goes to a file in the 0700 workspace (deleted after), so it cannot block the pipe.
   - Credentials go in a temp `--defaults-extra-file` (mode 0600, deleted after). They are never put on the command line, where `ps` would show them.
-  - Strip `DEFINER=` clauses from the output, so that triggers restore under any user.
-  - Non-zero exit or empty output -> fail with stage `dump` and the first 500 chars of stderr.
+  - Strip `DEFINER=` clauses from the output (while streaming, see above), so that triggers restore under any user.
+  - Non-zero exit or empty output -> fail with stage `dump` and the first 500 chars of stderr. A failed write (disk full) fails stage `dump` too.
   - The DB user needs SELECT, SHOW VIEW, TRIGGER, LOCK TABLES, EVENT (README).
 - **SQLite (dev):** `VACUUM INTO '{temp}/db.sqlite'` (a consistent copy) instead of copying the file.
 - **Other drivers:** fail "Backups support mysql and sqlite only."
@@ -163,7 +165,9 @@ Failures alert the Super Admins.
   - `files_count` and `files_bytes` per disk.
 - `control.json` (R3a).
 - Not included: the `local` and `public` disks, `.env`, logs, cache, sessions and code. The README says to keep `.env` (APP_KEY, the archive password) in the password manager.
+- The manifest also holds `db_bytes` (size of the dump, used by the R1 free-space check) and `continuity_failed` (the R13 values when the run raised the condition, else null). It names its dump in `db_entry`, which must be `db.sql` or `db.sqlite`; `backup:verify` refuses any other name.
 - Next to the archive (locally and off-server) are two sidecars: `{filename}.sha256` (R5) and `{filename}.manifest.json`, a plain copy of the manifest. The manifest sidecar survives a DB restore; R13 and `backup:restored` read it. It holds counts and ids only, no amounts.
+- A third, local-only sidecar `{filename}.audit.json` holds `{backup, audit_id}`: the id of that backup's `backup.created` audit row (R13, QA B2). It is written after the row.
 
 **R3a `control.json` (review F2).** Proof that the snapshot's books balanced, computed with the same `LedgerChecks` code as `ledger:verify` (one definition of "balanced"), in integer cents:
 - `branches`: per branch code, sum of debits and sum of credits of `ledger_entries`; `total`: the same over all branches;
@@ -181,6 +185,7 @@ If debits ≠ credits in any branch, the run records stage `control` on the row 
 **R5 Checksums and self-check.**
 - `sha256` of the whole archive is stored on the row and in a sidecar `{filename}.sha256` (`sha256sum` format) next to it, both locally and off-server.
 - After writing, reopen the archive with `ZipArchive::CHECKCONS` and the password. Check that the entry count = 3 + files_count, that `db.*` hashes to `manifest.db_sha256` and `control.json` to `manifest.control_sha256`. Any mismatch fails the run with stage `verify_archive`. The self-check runs on the temp copy before the archive is moved to the `backups` disk, so a failed archive never reaches it.
+- **Storing (review M3).** The archive and its sidecars are written to the `backups` disk as `{name}.part` and renamed only when all of them are written. If any write or rename fails (disk full), the `.part` and final files of this run are removed and the run fails with stage `store`. A file without `.part` is therefore always complete.
 
 **R6 Off-server copy.**
 - If `offsite_disk` is set, the archive goes to `daily/{filename}` with `writeStream`, followed by the sidecars.
@@ -198,8 +203,9 @@ If debits ≠ credits in any branch, the run records stage `control` on the row 
   - (b) it is not among the newest 7 succeeded backups (`min_keep`), so a stopped scheduler never prunes the last good copies;
   - (c) it has not already been pruned.
 - Pruning deletes the archive and its sidecars from the `backups` disk and sets `local_pruned_at`. The row is kept. Each pruned file writes `backup.pruned` (`rule` = `daily_30`, `monthly_12` or `year_end_13`).
-- Failed runs keep no archive (R5), so nothing is pruned for them. The exception is a run failed at stage `continuity` (R13): its archive is kept on purpose as evidence and is never pruned by the app.
-- `backup:prune` is the only code that calls `delete` on the `backups` disk. A test greps `app/` for this (AC 19).
+- Pruning also deletes the `{filename}.audit.json` sidecar.
+- **Leftovers (review M2/M3).** Each prune also: removes temp folders older than 6 h; removes `*.part` files on the `backups` disk older than 6 h (a killed run); removes the archive and sidecars of a `failed` run that still has them (it failed after storing), sets `local_pruned_at` and writes `backup.pruned` with `rule = failed_run`. Kept: runs failed at stage `continuity` (R13, evidence, never pruned by the app) and `interrupted` (the restored backup's own row looks like this until `backup:restored` completes it). An archive with no row is kept and named in the output ("… has no backup row; it is kept. Check it by hand."): after a restore those are the newer archives `backup:restored` re-lists.
+- `backup:prune` is the only code that calls `delete` on the `backups` disk, apart from the storing step removing its own failed write (R5). A test greps `app/` for any `->delete(` in a file that touches a backup disk and allows only `BackupPruner` and `LocalStore` (AC 19).
 
 **R8 Failure alerts.**
 - New `BackupAlertNotification` (mail) is sent to every active Super Admin (`is_super_admin`, `status = active`), as in `AccessAlerts::notify`.
@@ -214,6 +220,8 @@ If debits ≠ credits in any branch, the run records stage `control` on the row 
   - **Backup restored (review F5):** subject "Account-gold database restored from a backup", body with the filename, the backup time (start of the lost window), the reason, the operator and the R10 re-apply instruction.
 - Subject "Account-gold backup FAILED: {stage}" or "Account-gold restore test FAILED". The body has the filename, time, stage, error (first 500 chars), and "See Backups in Account-gold or the server log."
 - **Sent with `sendNow`, not queued.** The queue is the database, and a backup failure is often a database or disk problem, so a queued mail might never leave. If sending throws, `report($e)` is called, and the command still exits 1, so cron output and the log show it. Success sends no email.
+- **Fallback addresses (review M1).** `BACKUP_ALERT_EMAILS` (comma-separated) receives the alert when the Super Admins cannot be read (the database is down), when sending to them throws, or when none is active. It needs no database. On a failure the alert is sent first and the database writes (row, audit) are tried after it, so a failing database cannot swallow the alert. The README cron line appends to `storage/logs/schedule.log`, not `/dev/null`.
+- **Mail format (QA B5).** The emails use an HTML view and a plain-text view (`resources/views/mail/backup*.blade.php`), not Markdown, so the text part has no escape characters.
 
 **R9 Audit rows** (`AuditLog::record`, `user_id` null (shown as "System") for scheduler runs; `branch_id` null; auditable = the `Backup`; `client = ['ip' => null, 'user_agent' => 'artisan backup:run']`):
 | Event | Label | new_values |
@@ -224,17 +232,17 @@ If debits ≠ credits in any branch, the run records stage `control` on the row 
 | `backup.continuity_failed` | Database rolled back without a recorded restore | `filename, newer_backup, table, live_max_id, backup_max_id` |
 | `backup.year_end` | Year-end snapshot taken | `filename, fiscal_year, label, close_id, sha256, total_debit, total_credit` |
 | `backup.offsite_failed` | Backup not copied off-server | `filename, error` |
-| `backup.pruned` | Backup pruned | `filename, started_at, kept_as, rule` (`daily_30` / `monthly_12`) |
+| `backup.pruned` | Backup pruned | `filename, started_at, kept_as, rule` (`daily_30` / `monthly_12` / `year_end_13` / `failed_run`) |
 | `backup.verified` | Restore test passed | `filename, duration_seconds, counts` |
 | `backup.verify_failed` | Restore test failed | `filename, stage, error` |
-| `backup.restored` | Backup restored | `filename, sha256, reason, restored_at, operator` (OS user), `backup_started_at` (start of the lost window, review F5), `tokens_revoked`, `rows_recreated` |
+| `backup.restored` | Backup restored | `filename, sha256, reason, restored_at, operator` (OS user), `backup_started_at` (start of the lost window, review F5), `tokens_revoked`, `rows_recreated`, `rows_marked_missing` (rows whose local archive is gone, now marked pruned) |
 - Add the group `backups => [['backup.'], []]` to `AuditLogController::GROUPS`, and the labels above to `LABELS`.
 - The `backup.created` row is written after the dump, so it appears in the next night's backup and not in its own.
 
 **R10 Restore procedure** (README section "Restoring a backup"; the developer writes it, and the accountant checks it at sign-off):
 1. `php artisan down`. Stop the queue worker and remove the cron line.
 2. Pick the backup (S1 or `ls storage/app/backups`, or the bucket). Check `sha256sum -c {file}.sha256`.
-3. Make a fresh folder `storage/app/backup-temp/restore` with mode 0700 (not `/tmp`, review F11), then `7z x -p{password} {file} -o{that folder}`.
+3. Make a fresh folder `storage/app/backup-temp/restore` with mode 0700 (not `/tmp`, review F11), then `7z x {file} -o{that folder}` and type the password at 7z's prompt. It is never put on the command line, where `ps` and the shell history would show it.
 4. Create an empty database. Load it with `mysql {db} < db.sql`, as a user with TRIGGER rights.
 5. Replace `storage/app/attachments` and `storage/app/branding` with `files/attachments` and `files/branding`. Keep the old folders aside until step 9 passes.
 6. If the code is newer than `manifest.last_migration`, run `php artisan migrate --force`.
@@ -247,16 +255,17 @@ If debits ≠ credits in any branch, the run records stage `control` on the row 
 - **Segregation (review F10):** the operator must not be a user who records or voids entries (Cashier or Accountant). The archive password is held by two people (the operator, and the owner or a director in the business password manager). The off-server account's root credentials are held by the business, not the IT vendor alone.
 
 **R11 Restore test** (`backup:verify {filename?} {--latest}`):
+- **One at a time (review M5).** First take the cache lock `backup:verify` (lock store as R1), waiting for it up to 2 h (`verify_wait_seconds`). If it is still held: "Another backup:verify is still running; this one was not started." exit 1, recording nothing. Then remove stale temp folders (R1).
 1. Pick the backup: `{filename}`, `--latest` (newest succeeded) or `--oldest-offsite` (the oldest `yearly/` object off-server, else the oldest `monthly/`). Its local archive is used if present; if it has been pruned locally, read `daily/`, `monthly/` or `yearly/` from the off-server disk. Check the sha256 against the row (or the off-server sidecar when the live DB has no row).
 2. Extract it to a temp folder (0700), trying the current password and then each of `old_passwords`.
-3. **Safety:** refuse with "The verify database must not be the live database." when the `backup_verify` connection points at the same host + database as the default connection (or the same SQLite file).
+3. **Safety (review M4):** refuse with "The verify database must not be the live database." when the two connections reach the same database, **or when that cannot be told**. MySQL: compare `SELECT @@server_uuid, DATABASE()` as reported by each server (host names and ports can alias one server). SQLite: compare the real paths of the files (for a file that does not exist yet, the real path of its folder plus its name).
 4. Drop all tables in the verify DB, then load `db.sql` with the `mysql` client, or copy `db.sqlite`.
 5. Switch `database.default` to `backup_verify`, and point the `attachments` and `branding` disks at the extracted `files/` folders, for the rest of the process only.
 6. In this order, each failure naming its stage: compare the row counts with the manifest (`counts`); recompute `control.json` from the restored DB with the manifest's `max_ids` and compare it with the archive's, failing on **any** difference and naming the account or branch (`control`, review F2); run `ledger:verify` (`ledger`) and `attachments:verify` (`attachments`), which compares each restored file's sha256 with `attachments.sha256` (review F6).
 7. Switch back, and record `verify_status`, `verified_at` and `verify_error` on the backup row in the **live** DB. Write the audit row and alert on failure.
 8. Drop the verify tables and delete the temp folder in `finally`.
 - Exit 0 on pass, 1 on fail.
-- It never writes to the live database except the backup row and the audit row.
+- It never writes to the live database except the backup row and the audit row. On failure the alert is sent before those writes (R8).
 
 **R12 Edge cases.**
 - Mail not configured: alerts go to the log mailer, and the command still exits 1 on failure (README go-live checklist: real mailer).
@@ -267,10 +276,16 @@ If debits ≠ credits in any branch, the run records stage `control` on the row 
 - A branch user calling `GET /v1/backups` with any `X-Branch-Id` -> 403.
 
 **R13 Continuity check: an undeclared restore or rollback (review F4).** Anyone with shell access could load an older backup to erase entries together with their audit rows.
-- At precheck, `backup:run` reads the newest manifest sidecar on the `backups` disk; if there is none, the newest one off-server (`daily/`). These files survive a DB restore.
-- If the live max id of `audit_logs` or `ledger_entries` is **lower** than that manifest's `max_ids`, and no `backup.restored` audit row written after that backup names a backup at or before it, the condition is raised.
-- The backup itself is still taken (the archive is kept and copied off-server, so the state is preserved). At the end the row is `failed` with stage `continuity`, `backup.continuity_failed` is written, every active Super Admin is alerted with `sendNow`, the command exits 1, and S1 goes red.
-- `backup:restored` with a matching filename clears the condition.
+- At precheck, `backup:run` reads the manifest sidecars on the `backups` disk; if there are none, the ones off-server (`daily/`). These files survive a DB restore. "Acknowledged" below means: a `backup.restored` audit row written at or after the manifest's `created_at` that names a backup at or before the given one.
+- The condition is raised, checked in this order:
+  1. **The alarm stays up (QA B2).** Any manifest that recorded `continuity_failed` and is not acknowledged (against its `newer_backup`) raises it again: "Database rolled back without a recorded restore (first raised by {file}; not yet acknowledged with backup:restored)." Ids that have since grown past the old backup's do not clear it.
+  2. **Rollback to the newest backup itself.** For the newest manifest that did not record `continuity_failed`, unless acknowledged: its `{file}.audit.json` names the id of its `backup.created` audit row; if that row is gone, or is no longer that backup's `backup.created` row, the condition is raised. This catches a rollback to that backup's own dump, whose max ids equal the manifest's.
+  3. The live max id of `audit_logs` or `ledger_entries` is **lower** than that manifest's `max_ids`, unless acknowledged.
+- The backup itself is still taken (the archive is kept and copied off-server, so the state is preserved). At the end the row is `failed` with stage `continuity`, its manifest records `continuity_failed` (with `newer_backup`, the backup the rollback was measured against), `backup.continuity_failed` is written, every active Super Admin is alerted with `sendNow`, the command exits 1, and S1 goes red naming `newer_backup` (`summary.latest.continuity_backup`).
+- Only `backup:restored` naming a backup at or before `newer_backup` clears the condition.
+- A continuity-failed run is never `kept_as = monthly` (it is evidence, not the month's first backup).
+
+**R13a Known limit of the id bounds (review minor).** `control.json` and the counts cover rows with `id <=` the max ids read before the dump (R1 step 7). MySQL hands out auto-increment ids at insert time, but rows become visible at commit. A transaction that took a lower id and commits after the max ids are read is either in the dump but outside the bounds, or in neither. The restore test applies the same bounds to the restored copy, so its comparison stays exact; but `control.json` can leave out a posting that was in flight at 01:30. Postings are short transactions and the window is milliseconds, so this is documented, not fixed.
 
 **R14 Year-end snapshot (review F1).**
 - The first `backup:run` that **starts after** a `year.closed` (a `year_end_closes` row with `status = closed` and `closed_at` before the run start, and no succeeded `year_end` backup for that close id) is a year-end snapshot: `kept_as = year_end`, `fiscal_year` and `year_end_close_id` set, manifest `year_end` filled.
@@ -352,6 +367,15 @@ Setup: users SA (Super Admin), SA2 (Super Admin, active), SA3 (Super Admin, deac
 47. (F6) Given a MyISAM table in the schema (MySQL, staging), When `backup:run` runs, Then it fails at `precheck` naming the table. Given a restored attachment file with one byte changed, Then `attachments:verify` in `backup:verify` fails on a sha256 mismatch.
 48. (F7) Given a `year_end` backup succeeds, Then `verify_status` is set by the same command. `schedule:list` shows `backup:verify --oldest-offsite` monthly, and given only an off-server `yearly/` object, it restores and passes.
 49. (F8, F9) Given a `year_end` backup succeeds, Then SA and SA2 receive the snapshot email with the full SHA-256 and the debit and credit total. Given the last succeeded backup is 3 days old, When SA opens the Lock confirm or the year-end preview, Then the warning shows and Lock or Close still works.
+**After QA and code review (tests in `tests/Feature/Backups/ReviewFixesTest.php`)**
+50. (M1) Given the database cannot be reached and `BACKUP_ALERT_EMAILS` is set, When `backup:run` runs, Then it exits 1 and the alert goes to those addresses.
+51. (M2) Given a temp folder older than 6 h and a recent one, When `backup:run`, `backup:prune` or `backup:verify` runs, Then the old one is removed and the recent one kept.
+52. (M3) Given renaming on the `backups` disk fails, Then the run fails at `store` and no file is left on the disk. Given an old `.part`, a run failed at `offsite` with files, a `continuity` and an `interrupted` failed run with files, and an archive with no row, When `backup:prune` runs, Then only the old `.part` and the `offsite` run's files go (`rule = failed_run`).
+53. (M4) Given both connections report the same `@@server_uuid` and `DATABASE()`, or either cannot be told, Then `backup:verify` refuses with "The verify database must not be the live database." and the live data is unchanged.
+54. (M5) Given another `backup:verify` holds the lock, Then a second one exits 1 with "Another backup:verify is still running" and records nothing.
+55. (B2) Given a rollback raised `continuity`, When later runs happen after the ids have grown past the old backup's, Then each still fails at `continuity` until `backup:restored` names a backup at or before it. Given the newest backup's own dump is loaded without `backup:restored`, Then the next run fails at `continuity` (its audit row is missing).
+56. (B1, B5) The audit-log screen has the "Backups" group and shows "System" for backup rows without a user. The plain-text part of the backup emails has no backslashes.
+57. The archive password appears in no row, audit row, sidecar, manifest or command output.
 
 ## 8. Open questions (assumption made so work is not blocked; the accountant's decisions are in "Accounting review" below and are folded into the sections above)
 - **Q1 spatie/laravel-backup instead of our own command?** Assumed no: we need our own row, audit, alerts, prune rules and restore test, and the dump flags are a few lines. Revisit if the code grows past about 400 lines.

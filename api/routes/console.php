@@ -11,10 +11,13 @@ Artisan::command('inspire', function () {
 
 // AG-093 backups (docs/specs/backups.md section 5 "Schedule"). Cron must run `php artisan schedule:run` every minute.
 $tz = BusinessDate::timezone();
+// Review M1/M5: the schedule mutexes use the backup lock store (default `file`), not the database cache, so a database
+// outage cannot stop the run that would report it. With more than one app server use a shared store (redis).
+Schedule::useCache((string) config('backup.lock_store') ?: null);
 Schedule::command('backup:run --scheduled')->description('Daily backup')
     ->dailyAt((string) config('backup.time', '01:30'))->timezone($tz)->withoutOverlapping(360)->onOneServer();
 Schedule::command('backup:verify --latest')->description('Weekly restore test')
-    ->weeklyOn(0, '03:00')->timezone($tz)->withoutOverlapping(360);
+    ->weeklyOn(0, '03:00')->timezone($tz)->withoutOverlapping(360)->onOneServer();
 // Review F7: monthly, first Sunday 04:00. Cron cannot say "first Sunday" (day-of-month and day-of-week are OR-ed).
 Schedule::command('backup:verify --oldest-offsite')->description('Monthly restore test of the oldest off-server archive (first Sunday)')
-    ->weeklyOn(0, '04:00')->timezone($tz)->when(fn () => BusinessDate::now()->day <= 7)->withoutOverlapping(360);
+    ->weeklyOn(0, '04:00')->timezone($tz)->when(fn () => BusinessDate::now()->day <= 7)->withoutOverlapping(360)->onOneServer();

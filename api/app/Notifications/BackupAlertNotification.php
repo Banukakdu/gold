@@ -31,13 +31,26 @@ class BackupAlertNotification extends Notification
 
     public function toMail(object $notifiable): MailMessage
     {
-        return (new MailMessage)
-            ->subject($this->subject())
-            ->line('Backup: '.YearEndNotification::plain($this->filename ?? '-'))
-            ->line("Time: {$this->at} (Asia/Colombo)")
-            ->line('Stage: '.YearEndNotification::plain($this->stage))
-            ->line('Error: '.YearEndNotification::plain(mb_substr($this->error, 0, 500)))
-            ->line('See Backups in Account-gold or the server log.');
+        return self::mail($this->subject(), [
+            'Backup: '.($this->filename ?? '-'),
+            "Time: {$this->at} (Asia/Colombo)",
+            "Stage: {$this->stage}",
+            'Error: '.mb_substr($this->error, 0, 500),
+            'See Backups in Account-gold or the server log.',
+        ]);
+    }
+
+    /**
+     * QA B5: an HTML and a plain-text view (resources/views/mail/backup*.blade.php), not Markdown, so the text part
+     * carries no escape backslashes. Shared by the backup emails.
+     *
+     * @param  string[]  $lines
+     */
+    public static function mail(string $subject, array $lines): MailMessage
+    {
+        $lines = array_map(fn ($l) => trim(preg_replace('/[\r\n]+/u', ' ', (string) $l) ?? ''), $lines);
+
+        return (new MailMessage)->subject($subject)->view(['mail.backup', 'mail.backup-text'], ['subject' => $subject, 'lines' => $lines]);
     }
 
     public function toArray(object $notifiable): array

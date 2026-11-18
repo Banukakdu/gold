@@ -191,8 +191,9 @@ the status under **Backups** (read-only: there is no download, delete or "run" b
 | `php artisan backup:offsite-check` | Go-live check of the bucket's versioning and object lock. |
 
 **Setting it up (go-live checklist).**
-1. **Cron:** `* * * * * cd /path/api && php artisan schedule:run >> /dev/null 2>&1`. Without it nothing runs; S1 turns red
-   after 26 h.
+1. **Cron:** `* * * * * cd /path/api && php artisan schedule:run >> storage/logs/schedule.log 2>&1` (rotate it with
+   logrotate). Without it nothing runs; S1 turns red after 26 h. The log is where a run that could not reach the database
+   or the mailer leaves its message.
 2. **Tools on the server:** `mysqldump` and `mysql` (MySQL 8 client; paths in `BACKUP_MYSQLDUMP` / `BACKUP_MYSQL`), PHP
    `zip` built with libzip AES support, and `7z` (p7zip) for restores. Plain `unzip` cannot read AES zips.
 3. **Archive password:** `BACKUP_ARCHIVE_PASSWORD`, at least 20 characters, different from `APP_KEY`. Production refuses
@@ -209,8 +210,9 @@ the status under **Backups** (read-only: there is no download, delete or "run" b
    the live database, and drops its tables when it finishes.
 6. **Off-server storage** (`BACKUP_OFFSITE_DISK=backups_offsite`, with `BACKUP_S3_KEY`, `_SECRET`, `_REGION`,
    `_BUCKET`, `_ENDPOINT`, `_PATH_STYLE`; a key of its own, not the `AWS_*` one). Laravel's `s3` driver needs the
-   Flysystem S3 adapter (`composer require league/flysystem-aws-s3-v3 "^3.0"`), which is not installed by default; any
-   other Laravel disk that holds files off this server can be named instead. The bucket is set up by ops, not by the app:
+   Flysystem S3 adapter `league/flysystem-aws-s3-v3` (^3.0). Decision (review M6): it is a project dependency. Until it
+   is in `composer.json`/`composer.lock`, add it with `composer require league/flysystem-aws-s3-v3 "^3.0"` and commit
+   both files. Any other Laravel disk that holds files off this server can be named instead. The bucket is set up by ops, not by the app:
    - give the key **Put, Get and List only** (no delete). The app never deletes off-server and never writes to a key
      that exists ("Off-server object already exists.");
    - **versioning on** (required);
@@ -222,18 +224,26 @@ the status under **Backups** (read-only: there is no download, delete or "run" b
    Then run `php artisan backup:offsite-check`: it reads the versioning, object-lock and lifecycle settings where the S3
    API allows it and exits 1 when versioning is off.
 7. **Mail:** a real mailer. Failure alerts, the year-end snapshot hash and the restore notice are sent at once
-   (`sendNow`), not through the queue.
-8. **Disk space:** each run needs 2 × the last archive free (1 GB on the first run) on `storage/app`.
-9. Run `php artisan backup:run`, then `php artisan backup:verify --latest`; both must exit 0. Open Backups in the app:
-   the banner must be green.
+   (`sendNow`), not through the queue. Set `BACKUP_ALERT_EMAILS` (comma-separated, e.g. the operator and the owner): alerts
+   go there when the Super Admins cannot be read because the database is down, or when no Super Admin is active.
+8. **Locks:** `BACKUP_LOCK_STORE` (default `file`) holds the backup and restore-test locks and the schedule mutexes. Never
+   `database`. With more than one app server use a shared store such as `redis`.
+9. **Disk space:** the run checks before it starts. The temp folder (`storage/app/backup-temp`) needs about 2 × the last
+   dump + the last archive, and the backups folder 2 × the last archive (added together when both are on one disk);
+   1 GB each on the first run. The dump is streamed (DEFINERs stripped on the way), so only one copy is written.
+   A killed run leaves a temp folder or a `.part` file; the next run, prune or restore test removes them after 6 hours.
+10. Run `php artisan backup:run`, then `php artisan backup:verify --latest`; both must exit 0. Open Backups in the app:
+    the banner must be green.
 
 **Year-end snapshot.** The first backup after a fiscal year is closed is kept as that year's snapshot (`yearly/FY2026-27/`
 off-server, 8 years). It is restore-tested at once, and every Super Admin gets an email with its SHA-256 and the debit and
 credit total: the accountant files it with the year-end pack.
 
-**Continuity check.** Each run compares the live ledger and audit-log ids with the newest backup's manifest. If the database
-went back in time without `backup:restored`, the run is marked failed (`continuity`), the archive is kept, and the Super
-Admins are alerted.
+**Continuity check.** Each run compares the live ledger and audit-log ids with the newest backup's manifest, and checks that
+the `backup.created` audit row of that backup (its id is kept beside the archive in `{file}.audit.json`) still exists. If the
+database went back in time without `backup:restored`, the run is marked failed (`continuity`), the archive is kept, and the
+Super Admins are alerted. The alarm stays up on every later run, and on the Backups screen, until `backup:restored` names
+a backup at or before the one the rollback was measured against.
 
 **Segregation.** Whoever has shell access can change the books outside the app; the continuity check and the audit trail
 detect it. The operator must not be a user who records or voids entries (Cashier or Accountant).
@@ -244,7 +254,8 @@ detect it. The operator must not be a user who records or voids entries (Cashier
 2. Pick the backup (Backups screen, `ls storage/app/backups`, or the bucket: `daily/`, `monthly/`, `yearly/`). Check it:
    `sha256sum -c {file}.sha256`.
 3. Extract into a fresh private folder, not `/tmp`:
-   `install -d -m 700 storage/app/backup-temp/restore && 7z x -p'{password}' {file} -ostorage/app/backup-temp/restore`.
+   `install -d -m 700 storage/app/backup-temp/restore && 7z x {file} -ostorage/app/backup-temp/restore`. 7z asks for the
+   password; type it at the prompt. Never put it on the command line (`-p...`), where `ps` and the shell history show it.
 4. Create an empty database and load it as a user with TRIGGER rights: `mysql {db} < storage/app/backup-temp/restore/db.sql`.
 5. Move `storage/app/attachments` and `storage/app/branding` aside (keep them until step 9 passes) and copy in
    `restore/files/attachments` and `restore/files/branding`.

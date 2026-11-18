@@ -6,12 +6,12 @@ use App\Models\Account;
 use App\Models\AuditLog;
 use App\Models\Backup;
 use App\Notifications\BackupAlertNotification;
+use App\Services\Backups\BackupAlerts;
 use App\Services\Backups\BackupArchive;
 use App\Services\Backups\BackupRunner;
 use App\Services\Backups\MySqlDumper;
 use App\Support\LedgerChecks;
 use Illuminate\Console\Scheduling\Schedule;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Storage;
@@ -120,7 +120,7 @@ class RunTest extends BackupsTestCase
 
     public function test_ac7_second_run_while_locked(): void
     {
-        $lock = Cache::lock(BackupRunner::LOCK, 60);
+        $lock = BackupAlerts::locks()->lock(BackupRunner::LOCK, 60);
         $this->assertTrue($lock->get());
         [$code, $out] = $this->backupRun();
         $lock->release();
@@ -219,15 +219,14 @@ class RunTest extends BackupsTestCase
     {
         $record = "{$this->work}/args.txt";
         $script = "{$this->work}/mysqldump";
-        // Records its arguments and the defaults file (mode + content), then writes a dump with DEFINER clauses.
+        // Records its arguments and the defaults file (mode + content), then prints a dump with DEFINER clauses to stdout.
         file_put_contents($script, <<<SH
             #!/bin/sh
             for a in "\$@"; do echo "\$a" >> {$record}; done
             for a in "\$@"; do case "\$a" in
               --defaults-extra-file=*) f="\${a#--defaults-extra-file=}"; stat -c '%a' "\$f" > {$record}.mode; cat "\$f" > {$record}.cnf;;
-              --result-file=*) out="\${a#--result-file=}";;
             esac; done
-            printf '%s\\n' 'CREATE TABLE t (id int);' '/*!50003 CREATE*/ /*!50017 DEFINER=`u`@`%`*/ /*!50003 TRIGGER t_no_delete BEFORE DELETE ON t FOR EACH ROW SET @x = 1 */;;' 'CREATE DEFINER=`root`@`localhost` PROCEDURE p() BEGIN END' "INSERT INTO t VALUES ('keep DEFINER=\`a\`@\`b\` in data');" > "\$out"
+            printf '%s\\n' 'CREATE TABLE t (id int);' '/*!50003 CREATE*/ /*!50017 DEFINER=`u`@`%`*/ /*!50003 TRIGGER t_no_delete BEFORE DELETE ON t FOR EACH ROW SET @x = 1 */;;' 'CREATE DEFINER=`root`@`localhost` PROCEDURE p() BEGIN END' "INSERT INTO t VALUES ('keep DEFINER=\`a\`@\`b\` in data');"
             SH);
         chmod($script, 0700);
         config(['backup.mysqldump_path' => $script]);

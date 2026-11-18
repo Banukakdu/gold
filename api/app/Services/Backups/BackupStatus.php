@@ -19,7 +19,9 @@ final class BackupStatus
             'last_success' => $last ? ['started_at' => $last->started_at->toIso8601String(), 'size_bytes' => $last->size_bytes,
                 'offsite_status' => $last->offsite_status] : null,
             'latest' => $latest ? ['filename' => $latest->filename, 'status' => $latest->status, 'failed_stage' => $latest->failed_stage,
-                'error' => self::clean($latest->error), 'offsite_status' => $latest->offsite_status, 'offsite_error' => self::clean($latest->offsite_error)] : null,
+                'error' => self::clean($latest->error), 'offsite_status' => $latest->offsite_status, 'offsite_error' => self::clean($latest->offsite_error),
+                // QA B4: the backup the rollback was measured against, named in the S1 banner.
+                'continuity_backup' => $latest->failed_stage === 'continuity' ? ($latest->manifest['continuity_failed']['newer_backup'] ?? null) : null] : null,
             'offsite_configured' => (string) config('backup.offsite_disk') !== '',
             'offsite_required' => app()->environment('production'),
             'encrypted_configured' => (string) config('backup.password') !== '',
