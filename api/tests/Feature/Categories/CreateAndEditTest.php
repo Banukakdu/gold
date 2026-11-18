@@ -6,6 +6,7 @@ use App\Models\Account;
 use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\Category;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 
 /** Categories spec ACs 1-17 (create, uniqueness, edit, type, move), 43 and review AC 50. */
@@ -22,7 +23,8 @@ class CreateAndEditTest extends CategoriesTestCase
         $this->assertSame(Branch::count(), Account::withoutGlobalScopes()->where('category_id', $c->id)->count());
         $log = AuditLog::where('event', 'category.created')->sole();
         $this->assertNull($log->branch_id);
-        $this->assertSame(['name' => 'Insurance', 'type' => 'expense', 'parent_id' => null, 'branch_id' => null, 'ledger_code' => $c->ledger_code], $log->new_values);
+        // MySQL JSON columns do not keep key order.
+        $this->assertSame(Arr::sortRecursive(['name' => 'Insurance', 'type' => 'expense', 'parent_id' => null, 'branch_id' => null, 'ledger_code' => $c->ledger_code]), Arr::sortRecursive($log->new_values));
     }
 
     public function test_ac2_ac4_branch_users_cannot_add_top_level_and_cashier_nothing(): void

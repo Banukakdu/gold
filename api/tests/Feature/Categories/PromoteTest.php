@@ -54,8 +54,13 @@ class PromoteTest extends CategoriesTestCase
         $log = AuditLog::where('event', 'category.promoted')->sole();
         $created = $accounts->where('id', '!=', $origin->id)->pluck('id')->values()->all();
         $this->assertSame($this->kdy->id, $log->branch_id);
-        $this->assertSame(['old_branch_id' => $this->kdy->id, 'new_branch_id' => null, 'ledger_code' => $c->ledger_code,
-            'name' => 'Tuk-tuk hire', 'created_account_ids' => $created], $log->new_values);
+        // MySQL JSON columns do not keep key order (list values keep theirs).
+        $expected = ['old_branch_id' => $this->kdy->id, 'new_branch_id' => null, 'ledger_code' => $c->ledger_code,
+            'name' => 'Tuk-tuk hire', 'created_account_ids' => $created];
+        ksort($expected);
+        $actual = $log->new_values;
+        ksort($actual);
+        $this->assertSame($expected, $actual);
         $this->assertSame(['branch_id' => $this->kdy->id], $log->old_values);
         $seen = $this->as($this->kba, $this->kdy)->getJson('/api/v1/audit-logs?from=2026-11-18&to=2026-11-18&event_group=categories')->assertOk()->json('data');
         $this->assertContains('category.promoted', array_column($seen, 'event'));
