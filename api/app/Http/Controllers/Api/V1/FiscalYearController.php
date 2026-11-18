@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Models\LedgerEntry;
 use App\Models\Transaction;
+use App\Services\Backups\BackupStatus;
 use App\Services\LedgerService;
 use App\Services\YearEnd;
 use App\Support\Money;
@@ -27,7 +28,8 @@ class FiscalYearController extends Controller
     {
         abort_unless($this->yearEnd->inList($startYear), 404, 'Unknown fiscal year.');
 
-        return $this->yearEnd->preview($this->yearEnd->year($startYear));
+        // AG-093 R15 (backups review F9): information only, it never blocks the close.
+        return $this->yearEnd->preview($this->yearEnd->year($startYear)) + ['backup_warning' => BackupStatus::warning()];
     }
 
     public function close(Request $request, int $startYear)

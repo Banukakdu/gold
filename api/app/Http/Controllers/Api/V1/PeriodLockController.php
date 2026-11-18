@@ -9,6 +9,7 @@ use App\Models\PeriodLock;
 use App\Models\Transaction;
 use App\Models\User;
 use App\Models\YearEndClose;
+use App\Services\Backups\BackupStatus;
 use App\Support\BranchContext;
 use App\Support\BusinessDate;
 use App\Support\LedgerChecks;
@@ -114,6 +115,8 @@ class PeriodLockController extends Controller
             // AG-062 finding 5: evidence removed from entries in the months being closed (information only).
             'files_removed' => $files->count(),
             'files_removed_self' => $files->filter($self)->count(),
+            // AG-093 R15 (backups review F9): information only, it never blocks the lock.
+            'backup_warning' => BackupStatus::warning(),
         ];
     }
 

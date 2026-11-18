@@ -206,3 +206,26 @@ button.att-danger { color: var(--neg); border-color: var(--neg); }
   .ts-chip button.link { min-width: 44px; min-height: 44px; }
   .ts-pager { button { min-height: 44px; flex: 1; } span { order: 3; width: 100%; text-align: center; } select { order: 4; width: 100%; } }
 }
+/* AG-093 S1 Backups (docs/specs/backups.md): read-only table, phone cards below 760px. */
+.banner.ok { background: #e8f4ec; color: var(--pos); border-color: #c4e2cf; }
+.bk-banner, .bk-err { overflow-wrap: anywhere; white-space: pre-line; }
+.bk-summary { margin: 0 0 10px; }
+.bk-table td { white-space: nowrap; }
+.bk-table tr.bk-failed td { border-bottom: 0; }
+.bk-table tr.bk-error td { white-space: normal; padding-top: 0; }
+.tag[data-s='bk-succeeded'] { background: #dff1e6; color: var(--pos); }
+.tag[data-s='bk-failed'] { background: #f4e1df; color: var(--neg); }
+.tag[data-s='bk-running'] { background: #e1ebf7; color: #2a5d9f; }
+.bk-cards { display: none; list-style: none; margin: 0; padding: 0; }
+.bk-copied { margin-top: 8px; }
+@media (max-width: 760px) {
+  .bk-card { overflow-x: visible; padding: 10px; }
+  .bk-table { display: none; }
+  .bk-cards { display: block; }
+  .bk-cards li { padding: 10px 0; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .bk-l1 { display: flex; justify-content: space-between; gap: 8px; }
+  .bk-l2, .bk-l3 { font-size: 13px; overflow-wrap: anywhere; }
+  .bk-l3 { color: var(--muted); }
+  .bk-l4 button.link { min-height: 44px; min-width: 44px; }
+  .filters select { min-height: 44px; }
+}

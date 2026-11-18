@@ -6,7 +6,7 @@ import { errorText } from '../../core/api.interceptor';
 import { SettingsService } from '../../core/settings.service';
 
 /** Lock confirm review (controls finding 7 + AG-062 finding 5): information only, never blocks. */
-interface Review { closes_from: string | null; self_voids: number; self_reversals: number; files_removed?: number; files_removed_self?: number }
+interface Review { closes_from: string | null; self_voids: number; self_reversals: number; files_removed?: number; files_removed_self?: number; backup_warning?: string | null }
 interface Person { id: number; name: string; tag: string | null }
 interface Lock {
   id: number; branch_id: number | null; period: string;
@@ -201,6 +201,8 @@ export class PeriodLocksComponent implements OnInit {
       text += `\n\n${joined} ${from === p ? 'this month' : 'in these months'} - review the audit log first`
         + (files ? ' (Audit log > Attachments, Self only).' : '.');
     }
+    // AG-093 R15 (backups review F9): information only, it never blocks the lock.
+    if (review?.backup_warning) text += `\n\n${review.backup_warning}`;
     if (!confirm(text) || this.busy()) return;
     this.busy.set(true);
     this.http.post('/api/v1/period-locks', { period: p, branch_id: branch }).subscribe({

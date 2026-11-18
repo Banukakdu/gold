@@ -38,7 +38,7 @@ Locally, reset and invitation links are written to `api/storage/logs/laravel.log
 (or see them in Mailpit on :8025 with `MAIL_MAILER=smtp`, `MAIL_PORT=1025`). Set `QUEUE_CONNECTION=sync` in `api/.env`
 if you do not run a queue worker.
 
-Tests: `cd api && php artisan test` (runs on in-memory SQLite).
+Tests: `cd api && php artisan test` (runs on in-memory SQLite; the backup tests use a SQLite file in the system temp folder).
 
 Uploading attachments locally: PHP's default `upload_max_filesize = 2M` refuses most 5 MB files. `php -d
 upload_max_filesize=6M artisan serve` does **not** work: `artisan serve` starts a child PHP process that does not
@@ -174,6 +174,99 @@ every device and emails them "Your password was changed".
    Sign-in, reset and set-password match the email exactly as stored (lower-case); an accented variant such as
    `ú@x.com`, which MySQL's collation would treat as `u@x.com`, is handled as an unknown email. Lockouts, logouts and every reset step are in the audit log (group "Logins", Super Admin only).
 
+### Backups (AG-093, docs/specs/backups.md)
+
+One backup is one AES-256 encrypted zip holding the database dump (`db.sql` from `mysqldump`, or `db.sqlite` in
+development), `control.json` (debit and credit totals per branch and the trial balance at the dump), `manifest.json`
+and every file on the `attachments` and `branding` disks. It is written to `api/storage/app/backups` with two plain
+sidecars (`{file}.sha256` and `{file}.manifest.json`, counts and ids only) and copied off-server. The Super Admin sees
+the status under **Backups** (read-only: there is no download, delete or "run" button anywhere in the app).
+
+| Command | What |
+|---|---|
+| `php artisan backup:run` | Take a backup now (also scheduled daily at 01:30 Asia/Colombo). `--year-end[=2026]` takes the year-end snapshot of a closed fiscal year at once. |
+| `php artisan backup:verify --latest` | Restore test into the scratch database (scheduled Sundays 03:00). Also `backup:verify {file}` and `--oldest-offsite` (first Sunday, 04:00). |
+| `php artisan backup:prune` | Local retention: 30 daily, 12 first-of-month, year-end 13 months once copied off-server; never the newest 7. Runs after every backup. |
+| `php artisan backup:restored {file} --reason="..."` | Record a restore (step 9 below). |
+| `php artisan backup:offsite-check` | Go-live check of the bucket's versioning and object lock. |
+
+**Setting it up (go-live checklist).**
+1. **Cron:** `* * * * * cd /path/api && php artisan schedule:run >> /dev/null 2>&1`. Without it nothing runs; S1 turns red
+   after 26 h.
+2. **Tools on the server:** `mysqldump` and `mysql` (MySQL 8 client; paths in `BACKUP_MYSQLDUMP` / `BACKUP_MYSQL`), PHP
+   `zip` built with libzip AES support, and `7z` (p7zip) for restores. Plain `unzip` cannot read AES zips.
+3. **Archive password:** `BACKUP_ARCHIVE_PASSWORD`, at least 20 characters, different from `APP_KEY`. Production refuses
+   to back up without it. Keep it, with the date it started, in the business password manager, held by **two** people
+   (the operator, and the owner or a director). When it changes, add the old one to `BACKUP_ARCHIVE_OLD_PASSWORDS`
+   (comma-separated) so restore tests of old archives still open. Keep `.env` (APP_KEY, this password) there too: it
+   is not in the backup.
+4. **Database user for the dump:** `SELECT, SHOW VIEW, TRIGGER, LOCK TABLES, EVENT` on the schema. Every table must be
+   InnoDB (the run fails at `precheck` naming any other). The DB user for a restore needs TRIGGER rights (see the
+   controls release above about `log_bin_trust_function_creators`).
+5. **Scratch database for restore tests:** create an empty `account_gold_verify` (or set `BACKUP_VERIFY_DB_DATABASE`,
+   and optionally `BACKUP_VERIFY_DB_USERNAME` / `_PASSWORD` / `_HOST` / `_PORT`). Its user needs all rights on that
+   schema only, with the same access restrictions as the live database. `backup:verify` refuses to run if it points at
+   the live database, and drops its tables when it finishes.
+6. **Off-server storage** (`BACKUP_OFFSITE_DISK=backups_offsite`, with `BACKUP_S3_KEY`, `_SECRET`, `_REGION`,
+   `_BUCKET`, `_ENDPOINT`, `_PATH_STYLE`; a key of its own, not the `AWS_*` one). Laravel's `s3` driver needs the
+   Flysystem S3 adapter (`composer require league/flysystem-aws-s3-v3 "^3.0"`), which is not installed by default; any
+   other Laravel disk that holds files off this server can be named instead. The bucket is set up by ops, not by the app:
+   - give the key **Put, Get and List only** (no delete). The app never deletes off-server and never writes to a key
+     that exists ("Off-server object already exists.");
+   - **versioning on** (required);
+   - **object lock in compliance mode** for `yearly/` (required) and recommended for the rest;
+   - lifecycle rules: `daily/` expires after 31 days, `monthly/` after 366 days, `yearly/` after 2,922 days (8 years);
+   - region and provider: a business and legal decision (data residency); records must be producible to the Inland
+     Revenue on request. The root credentials of the storage account are held by the business, not the IT vendor alone.
+
+   Then run `php artisan backup:offsite-check`: it reads the versioning, object-lock and lifecycle settings where the S3
+   API allows it and exits 1 when versioning is off.
+7. **Mail:** a real mailer. Failure alerts, the year-end snapshot hash and the restore notice are sent at once
+   (`sendNow`), not through the queue.
+8. **Disk space:** each run needs 2 × the last archive free (1 GB on the first run) on `storage/app`.
+9. Run `php artisan backup:run`, then `php artisan backup:verify --latest`; both must exit 0. Open Backups in the app:
+   the banner must be green.
+
+**Year-end snapshot.** The first backup after a fiscal year is closed is kept as that year's snapshot (`yearly/FY2026-27/`
+off-server, 8 years). It is restore-tested at once, and every Super Admin gets an email with its SHA-256 and the debit and
+credit total: the accountant files it with the year-end pack.
+
+**Continuity check.** Each run compares the live ledger and audit-log ids with the newest backup's manifest. If the database
+went back in time without `backup:restored`, the run is marked failed (`continuity`), the archive is kept, and the Super
+Admins are alerted.
+
+**Segregation.** Whoever has shell access can change the books outside the app; the continuity check and the audit trail
+detect it. The operator must not be a user who records or voids entries (Cashier or Accountant).
+
+#### Restoring a backup
+
+1. `php artisan down`. Stop the queue worker and remove the cron line.
+2. Pick the backup (Backups screen, `ls storage/app/backups`, or the bucket: `daily/`, `monthly/`, `yearly/`). Check it:
+   `sha256sum -c {file}.sha256`.
+3. Extract into a fresh private folder, not `/tmp`:
+   `install -d -m 700 storage/app/backup-temp/restore && 7z x -p'{password}' {file} -ostorage/app/backup-temp/restore`.
+4. Create an empty database and load it as a user with TRIGGER rights: `mysql {db} < storage/app/backup-temp/restore/db.sql`.
+5. Move `storage/app/attachments` and `storage/app/branding` aside (keep them until step 9 passes) and copy in
+   `restore/files/attachments` and `restore/files/branding`.
+6. If the code is newer than `manifest.json`'s `last_migration`, run `php artisan migrate --force`.
+7. `php artisan ledger:verify` and `php artisan attachments:verify`. Both must exit 0.
+8. The accountant compares the restored trial balance (Reports > Trial balance) with `restore/control.json`: every account
+   balance and the per-branch debit and credit totals must be equal to the cent.
+9. `php artisan backup:restored {file} --reason="..."`. It writes the `backup.restored` audit row, **signs everyone out**
+   (all API tokens are revoked), emails the Super Admins, and re-lists newer archives still in `storage/app/backups`.
+10. Before `up`: the Super Admin re-applies every user deactivation, role change, period lock and year-end close made after
+    the backup time, using the access-alert and year-end emails received since then, and records them in the restore note.
+11. Restore cron and the worker, `php artisan up`, and delete `storage/app/backup-temp/restore`. Tell the users: entries made
+    after the backup time are not in the system and must be entered again from the paper evidence, with "Re-entered after
+    restore of {file}; original ref {X}" in the description. The accountant reviews them against the vouchers before the
+    month is locked.
+
+Restoring never deletes anything in the backups folder.
+
+**Release restore drill (once per release).** On staging, follow the steps above end to end with the latest production
+backup, then `php artisan backup:verify {file}` (it repeats the control comparison automatically). Record the result in the
+release notes.
+
 ## How it works
 
 **Branch context.** The app sends the active branch in an `X-Branch-Id` header. Middleware checks the user belongs
@@ -214,7 +307,7 @@ All under `/api/v1`, bearer token from `POST auth/login`, plus `X-Branch-Id`. Pu
 `GET|POST transactions/{id}/attachments` · `GET transactions/{id}/attachments/{attachment}/download` ·
 `POST transactions/{id}/attachments/{attachment}/remove` ·
 `GET chart-of-accounts` · `GET reports/trial-balance` · `POST reports/trial-balance/export` ·
-`GET permissions` · `GET|POST roles` · `PUT roles/{id}` · `GET|POST users` · `PUT users/{id}` · `POST users/{id}/role`
+`GET backups` (Super Admin) · `GET permissions` · `GET|POST roles` · `PUT roles/{id}` · `GET|POST users` · `PUT users/{id}` · `POST users/{id}/role`
 
 ## Status against the backlog (docs/Account-gold_Product_Backlog.xlsx)
 
@@ -226,6 +319,8 @@ AG-060/061/063/065 income, expense, void, list and filters, AG-070/072 categorie
 AG-080/081 dashboards, AG-090 audit log (writing; viewer UI next), AG-092 settings table, AG-091 period lock (enforced; UI next).
 
 AG-062 attachments on income and expense entries (private files, soft removal, `attachments:verify`).
+
+AG-093 automated daily backups (encrypted archive of DB + files, off-server copy, retention, weekly restore test, Backups screen).
 
 Next up: users and roles screens, category editor, reports AG-082 to AG-085 with PDF/Excel export,
 audit log viewer, then the R2 approval workflow.

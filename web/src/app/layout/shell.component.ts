@@ -30,6 +30,7 @@ import { SettingsService } from '../core/settings.service';
           @if (auth.isSuperAdmin()) { <a routerLink="/period-locks" routerLinkActive="on">Period locks</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/year-end" routerLinkActive="on">Year-end</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/settings" routerLinkActive="on">Settings</a> }
+          @if (auth.isSuperAdmin()) { <a routerLink="/backups" routerLinkActive="on">Backups</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/branches" routerLinkActive="on">Branches</a> }
           @if (auth.can('user.view')) { <a routerLink="/users" routerLinkActive="on">Users</a> }
           @if (auth.can('role.view')) { <a routerLink="/roles" routerLinkActive="on">Roles</a> }

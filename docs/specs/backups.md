@@ -116,7 +116,7 @@ Failures alert the Super Admins.
 - `mysqldump_path` (`BACKUP_MYSQLDUMP`, `mysqldump`) and `mysql_path` (`BACKUP_MYSQL`, `mysql`).
 
 **Schedule** (`routes/console.php`, which today has only `inspire`):
-- `Schedule::command('backup:run')->dailyAt(time)->timezone(tz)->withoutOverlapping(360)->onOneServer()`.
+- `Schedule::command('backup:run --scheduled')->dailyAt(time)->timezone(tz)->withoutOverlapping(360)->onOneServer()`. `--scheduled` only sets `triggered_by = scheduler`; a run by hand is `console`.
 - `Schedule::command('backup:verify --latest')->weeklyOn(0, '03:00')->timezone(tz)->withoutOverlapping(360)`.
 - `Schedule::command('backup:verify --oldest-offsite')->weeklyOn(0, '04:00')->when(day of month <= 7)->timezone(tz)->withoutOverlapping(360)`, described as "monthly, first Sunday 04:00" (review F7). Cron cannot express "first Sunday" (day-of-month and day-of-week are OR-ed), hence the filter.
 - README: the cron line `* * * * * cd /path/api && php artisan schedule:run >> /dev/null 2>&1`.

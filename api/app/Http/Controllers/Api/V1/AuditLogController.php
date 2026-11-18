@@ -6,6 +6,7 @@ use App\Exports\ReportWorkbook;
 use App\Http\Controllers\Controller;
 use App\Models\Account;
 use App\Models\AuditLog;
+use App\Models\Backup;
 use App\Models\Branch;
 use App\Models\Category;
 use App\Models\PeriodLock;
@@ -64,6 +65,8 @@ class AuditLogController extends Controller
         'year_end' => [['year.'], ['transaction.year_end_close', 'transaction.year_end_reopened']],
         // Categories spec R8
         'categories' => [['category.'], []],
+        // AG-093 R9
+        'backups' => [['backup.'], []],
     ];
 
     public const LABELS = [
@@ -104,6 +107,16 @@ class AuditLogController extends Controller
         'category.created' => 'Category added',
         'category.updated' => 'Category changed',
         'category.promoted' => 'Category made global',
+        'backup.created' => 'Backup created',
+        'backup.failed' => 'Backup failed',
+        'backup.offsite_failed' => 'Backup not copied off-server',
+        'backup.pruned' => 'Backup pruned',
+        'backup.verified' => 'Restore test passed',
+        'backup.verify_failed' => 'Restore test failed',
+        'backup.restored' => 'Backup restored',
+        'backup.control_failed' => 'Backup: books not balanced',
+        'backup.continuity_failed' => 'Database rolled back without a recorded restore',
+        'backup.year_end' => 'Year-end snapshot taken',
     ];
 
     public function index(Request $request)
@@ -363,6 +376,7 @@ class AuditLogController extends Controller
             PeriodLock::class => isset($s['lock'][$id])
                 ? PeriodLock::label($s['lock'][$id]->period).' ('.($s['lock'][$id]->branch->code ?? 'all branches').')'
                 : "#{$id}",
+            Backup::class => (string) ($a->new_values['filename'] ?? "#{$id}"),
             YearEndClose::class => app(Settings::class)->fiscalYearStarting((int) ($a->new_values['fiscal_year'] ?? $a->old_values['fiscal_year'] ?? YearEndClose::find($id)?->fiscal_year ?? 0))->label(),
             default => match ($a->event) {
                 // AG-065 R14: 'transactions' is not a ReportService name (that would open reports/transactions/export).
@@ -371,6 +385,7 @@ class AuditLogController extends Controller
                 'settings.updated' => 'Settings',
                 'settings.logo_uploaded', 'settings.logo_removed' => 'Logo',
                 'ledger.legacy_voids_identified' => ($a->new_values['count'] ?? 0).' legacy voids',
+                'backup.verified', 'backup.verify_failed', 'backup.restored' => (string) ($a->new_values['filename'] ?? ''),
                 default => '',
             },
         };

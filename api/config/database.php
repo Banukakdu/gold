@@ -62,6 +62,29 @@ return [
             ]) : [],
         ],
 
+        // AG-093 R11: the scratch database `backup:verify` restores into. Never the live database (the command
+        // refuses that). MySQL: a copy of `mysql` with its own database (and optionally its own user); SQLite: a file.
+        'backup_verify' => env('DB_CONNECTION', 'sqlite') === 'mysql' ? [
+            'driver' => 'mysql',
+            'host' => env('BACKUP_VERIFY_DB_HOST', env('DB_HOST', '127.0.0.1')),
+            'port' => env('BACKUP_VERIFY_DB_PORT', env('DB_PORT', '3306')),
+            'database' => env('BACKUP_VERIFY_DB_DATABASE', 'account_gold_verify'),
+            'username' => env('BACKUP_VERIFY_DB_USERNAME', env('DB_USERNAME', 'root')),
+            'password' => env('BACKUP_VERIFY_DB_PASSWORD', env('DB_PASSWORD', '')),
+            'unix_socket' => env('DB_SOCKET', ''),
+            'charset' => env('DB_CHARSET', 'utf8mb4'),
+            'collation' => env('DB_COLLATION', 'utf8mb4_unicode_ci'),
+            'prefix' => '',
+            'prefix_indexes' => true,
+            'strict' => true,
+            'engine' => null,
+        ] : [
+            'driver' => 'sqlite',
+            'database' => env('BACKUP_VERIFY_DB_DATABASE', storage_path('app/backup-temp/verify.sqlite')),
+            'prefix' => '',
+            'foreign_key_constraints' => true,
+        ],
+
         'mariadb' => [
             'driver' => 'mariadb',
             'url' => env('DB_URL'),
