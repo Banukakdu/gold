@@ -115,9 +115,10 @@ class AccountController extends Controller
                 'type' => $e->transaction->type,
                 'status' => $e->transaction->status,
                 'contra' => $contra,
-                'description' => $contra
-                    ? trim("Void of {$e->transaction->ref_no}: ".($reasons[$e->transaction_id] ?? ''), ': ')
-                    : ($e->transaction->description ?? $e->transaction->payee_payer),
+                'description' => $contra && $e->transaction->type === Transaction::YEAR_END_CLOSE
+                    ? 'Cancelled by reopening '.substr((string) $e->transaction->description, strlen('Year-end close '))
+                    : ($contra ? trim("Void of {$e->transaction->ref_no}: ".($reasons[$e->transaction_id] ?? ''), ': ')
+                    : ($e->transaction->description ?? $e->transaction->payee_payer)),
                 'in' => $e->debit,
                 'out' => $e->credit,
                 'balance' => Money::fromCents($running),

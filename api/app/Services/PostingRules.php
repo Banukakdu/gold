@@ -10,7 +10,8 @@ use App\Models\Transaction;
  *
  * A line spec is ['ref' => account reference, 'branch_id' => int, 'debit' => int, 'credit' => int].
  * Account references: [MONEY, account_id], [CATEGORY, category_id, branch_id], [HEAD_OFFICE, branch_id] (in that
- * branch), [BRANCH_CURRENT, branch_id] (in MAIN, for that branch), [OWNER_CAPITAL] (in MAIN).
+ * branch), [BRANCH_CURRENT, branch_id] (in MAIN, for that branch), [OWNER_CAPITAL] (in MAIN), [RETAINED_EARNINGS] (in MAIN),
+ * [ACCOUNT, account_id] (an existing chart account, year-end close only).
  * The money line comes first in each branch's set.
  */
 class PostingRules
@@ -24,6 +25,10 @@ class PostingRules
     public const BRANCH_CURRENT = 'branch_current';
 
     public const OWNER_CAPITAL = 'owner_capital';
+
+    public const RETAINED_EARNINGS = 'retained_earnings';
+
+    public const ACCOUNT = 'account';
 
     /** Income: Dr money, Cr income C. Expense: Dr expense C, Cr money (both in the money account's branch). */
     public function incomeExpense(string $type, int $accountId, int $branchId, int $categoryId, int $cents): array
@@ -90,6 +95,47 @@ class PostingRules
         return $type === Transaction::EXPENSE
             ? [self::line($to, $branchId, $cents, 0), self::line($from, $branchId, 0, $cents)]
             : [self::line($from, $branchId, $cents, 0), self::line($to, $branchId, 0, $cents)];
+    }
+
+    /**
+     * Year-end close of one branch B (docs/specs/settings.md R7). $balances: [account_id => b] for B's income and expense
+     * accounts, b = debit - credit over the year, in the order the lines should appear (by code). Each b != 0 is cleared
+     * (Dr |b| when b < 0, Cr b when b > 0). The result N = sum of (credit - debit) goes:
+     *  - non-main B, N > 0: B Cr HO in B N; MAIN Dr BCA(B) N, Cr Retained earnings N;
+     *  - non-main B, N < 0: B Dr HO in B |N|; MAIN Dr Retained earnings |N|, Cr BCA(B) |N|;
+     *  - MAIN's own N > 0: Cr Retained earnings N; N < 0: Dr Retained earnings |N|; N = 0: no result line.
+     * The MAIN mirror lines sit in B's closing set (review finding 13).
+     */
+    public function close(int $branchId, int $mainId, array $balances): array
+    {
+        $lines = [];
+        $n = 0;
+        foreach ($balances as $accountId => $b) {
+            if ($b === 0) {
+                continue;
+            }
+            $lines[] = self::line([self::ACCOUNT, (int) $accountId], $branchId, $b < 0 ? -$b : 0, $b > 0 ? $b : 0);
+            $n -= $b;
+        }
+        if ($n === 0 || ! $lines) {
+            return $lines;
+        }
+        $abs = abs($n);
+        if ($branchId === $mainId) {
+            $lines[] = self::line([self::RETAINED_EARNINGS], $mainId, $n < 0 ? $abs : 0, $n > 0 ? $abs : 0);
+
+            return $lines;
+        }
+        $lines[] = self::line([self::HEAD_OFFICE, $branchId], $branchId, $n < 0 ? $abs : 0, $n > 0 ? $abs : 0);
+        if ($n > 0) {
+            $lines[] = self::line([self::BRANCH_CURRENT, $branchId], $mainId, $abs, 0);
+            $lines[] = self::line([self::RETAINED_EARNINGS], $mainId, 0, $abs);
+        } else {
+            $lines[] = self::line([self::RETAINED_EARNINGS], $mainId, $abs, 0);
+            $lines[] = self::line([self::BRANCH_CURRENT, $branchId], $mainId, 0, $abs);
+        }
+
+        return $lines;
     }
 
     /** The same lines with debit and credit swapped (reversal). */

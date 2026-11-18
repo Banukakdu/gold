@@ -9,11 +9,17 @@ use App\Models\Branch;
 use App\Models\Category;
 use App\Models\LedgerEntry;
 use App\Models\PeriodLock;
-use App\Models\Setting;
 use App\Models\Transaction;
+use App\Models\User;
+use App\Models\YearEndClose;
+use App\Notifications\YearEndNotification;
 use App\Support\BusinessDate;
+use App\Support\FiscalYear;
 use App\Support\Money;
+use App\Support\Settings;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Notification;
 
 /**
  * The only place money is posted (CLAUDE.md), full double entry (docs/specs/double-entry.md).
@@ -29,7 +35,9 @@ use Illuminate\Support\Facades\DB;
  *    every line one-sided (L2); it is written, then re-read per branch before commit;
  *  - updates the cached balances (current_balance = debit - credit, for every account class) and writes an audit row.
  *
- * The only exception is the back-fill path (R6 / finding 6): see backfill().
+ * The only exceptions are the back-fill path (R6 / finding 6, see backfill()) and the year-end close path
+ * (settings spec R8, see closeYear() / reopenYear() and postClose()). Neither takes a bypass flag from the caller,
+ * and neither writes in a closed fiscal year except the close itself.
  */
 class LedgerService
 {
@@ -45,10 +53,13 @@ class LedgerService
 
     public const WRONG_BRANCH = 'A ledger line is on an account of another branch. Nothing was posted.';
 
+    /** Settings spec API table: edit, void and reverse of a closing transaction. */
+    public const YEAR_END_LOCKED = 'Year-end closing entries change only by reopening the year.';
+
     /** Back-fill only: account id per posting-rule reference (see postBackfill). */
     private array $backfillRefs = [];
 
-    public function __construct(private PostingRules $rules, private ChartOfAccounts $chart, private BackfillPlanner $planner) {}
+    public function __construct(private PostingRules $rules, private ChartOfAccounts $chart, private BackfillPlanner $planner, private YearEnd $yearEnd) {}
 
     /**
      * Owner capital (AG-043) into a MAIN account, or into the is_main_account of a non-main branch.
@@ -147,7 +158,7 @@ class LedgerService
             }
             $this->assertOpenFor($lines);
             // R10: expense_negative_balance applies to the money account only.
-            if ($type === Transaction::EXPENSE && Setting::get('expense_negative_balance', 'block') === 'block') {
+            if ($type === Transaction::EXPENSE && app(Settings::class)->expenseNegativeBalance() === 'block') {
                 $this->assertFunds($acc, $data['amount']);
             }
 
@@ -176,6 +187,9 @@ class LedgerService
     {
         return DB::transaction(function () use ($txn, $categoryId) {
             $txn = Transaction::withoutGlobalScopes()->lockForUpdate()->findOrFail($txn->id);
+            if ($txn->type === Transaction::YEAR_END_CLOSE) {
+                throw new LedgerException(self::YEAR_END_LOCKED);
+            }
             if (! in_array($txn->type, [Transaction::INCOME, Transaction::EXPENSE], true) || $txn->status !== 'posted') {
                 throw new LedgerException('This entry cannot be edited.');
             }
@@ -220,6 +234,9 @@ class LedgerService
 
         return DB::transaction(function () use ($original, $date, $reason) {
             $original = Transaction::withoutGlobalScopes()->lockForUpdate()->findOrFail($original->id);
+            if ($original->type === Transaction::YEAR_END_CLOSE) {
+                throw new LedgerException(self::YEAR_END_LOCKED);
+            }
             if ($original->status !== 'posted' || $original->type === Transaction::REVERSAL) {
                 throw new LedgerException('Only posted transactions can be reversed.');
             }
@@ -261,6 +278,9 @@ class LedgerService
      */
     public function void(Transaction $txn, ?string $reason = null): Transaction
     {
+        if ($txn->type === Transaction::YEAR_END_CLOSE) {
+            throw new LedgerException(self::YEAR_END_LOCKED);
+        }
         if (! in_array($txn->type, [Transaction::INCOME, Transaction::EXPENSE], true)) {
             throw new LedgerException('Only income and expense entries can be voided. Use reverse for transfers.');
         }
@@ -338,6 +358,175 @@ class LedgerService
         $this->backfillRefs = [];
     }
 
+    // ---------------------------------------------------------------- year-end close (settings spec R7-R11)
+
+    /**
+     * Close fiscal year $startYear for all branches (R8): checks 1-6 under the branch row locks, one closing transaction
+     * per branch with income or expense balances (R7), the close's own global lock for month(E) (review finding 1), the
+     * `year_end_closes` row (closed_at after the lines, finding 7), audit and the Super Admin notification (finding 5).
+     *
+     * @return array{close: YearEndClose, transactions: Transaction[]}
+     */
+    public function closeYear(int $startYear, string $confirm): array
+    {
+        $fy = $this->yearEnd->year($startYear);
+
+        try {
+            $out = DB::transaction(function () use ($fy, $confirm) {
+                $this->lockBranches();
+                $plan = $this->yearEnd->plan($fy);
+                if ($checks = $this->yearEnd->checks($fy, $plan)) {
+                    throw new LedgerException($checks[0]['message']);
+                }
+                if (trim($confirm) !== $fy->shortLabel()) {
+                    throw new LedgerException("Type {$fy->shortLabel()} to confirm.");
+                }
+
+                $txns = [];
+                $byBranch = [];
+                foreach ($plan['branches'] as $p) {
+                    $b = $p['branch'];
+                    $entry = ['income' => Money::fromCents($p['income']), 'expense' => Money::fromCents($p['expense']), 'net' => Money::fromCents($p['net'])];
+                    if (! $p['spec']) {
+                        $byBranch[$b->code] = $entry + ['transaction_id' => null, 'ref_no' => null, 'lines' => 0];
+
+                        continue;
+                    }
+                    [$lines] = $this->prepare($p['spec'], $fy->end(), 'close');
+                    $debits = array_sum(array_map(fn ($l) => (int) $l['account']->branch_id === $b->id ? $l['debit'] : 0, $lines));
+                    $txn = $this->newTxn(Transaction::YEAR_END_CLOSE, $b->id, $fy->end(), Money::fromCents($debits), [
+                        'description' => "Year-end close {$fy->label()}",
+                    ]);
+                    $this->postClose($txn, $lines, $fy);
+                    $txn = $this->finish($txn);
+                    $txns[] = $txn;
+                    $byBranch[$b->code] = $entry + ['transaction_id' => $txn->id, 'ref_no' => $txn->ref_no, 'lines' => count($lines)];
+                }
+
+                // Finding 1: an active global lock for exactly month(E), kept on the close.
+                $lock = PeriodLock::active()->whereNull('branch_id')->where('period', $fy->endPeriod())->lockForUpdate()->first();
+                $created = false;
+                if (! $lock) {
+                    $lock = PeriodLock::create(['branch_id' => null, 'period' => $fy->endPeriod(), 'locked_by' => auth()->id()]);
+                    AuditLog::record('period.locked', $lock, null, ['period' => $fy->endPeriod(), 'branch_id' => null, 'source' => 'year_end_close']);
+                    $created = true;
+                }
+
+                $total = Money::fromCents($plan['total_net']);
+                // Finding 7: closed_at is taken after the closing lines are written.
+                $close = YearEndClose::create([
+                    'fiscal_year' => $fy->startYear, 'period_start' => $fy->start(), 'period_end' => $fy->end(), 'status' => YearEndClose::CLOSED,
+                    'closed_by' => auth()->id(), 'closed_at' => now(), 'period_lock_id' => $lock->id,
+                    'summary' => ['by_branch' => $byBranch, 'total_net' => $total],
+                ]);
+                AuditLog::record('year.closed', $close, null, ['fiscal_year' => $fy->startYear, 'period_start' => $fy->start(), 'period_end' => $fy->end(),
+                    'by_branch' => $byBranch, 'total_net' => $total, 'global_lock_created' => $created]);
+                $this->notifyYearEnd('closed', $fy, $total);
+
+                return ['close' => $close, 'transactions' => $txns];
+            }, self::ATTEMPTS);
+        } catch (QueryException $e) {
+            // Two simultaneous closes: the unique active_key refuses the second row (R8 check 2).
+            if ($e->getCode() === '23000' || str_contains(strtolower($e->getMessage()), 'unique')) {
+                throw new LedgerException("{$fy->label()} is already closed.");
+            }
+            throw $e;
+        }
+
+        return $out;
+    }
+
+    /**
+     * Reopen the latest closed year (R11): one contra per close line through postClose (dated E, sides swapped,
+     * contra_of_id set), the closing transactions become void, the row becomes `reopened`. No lock changes.
+     */
+    public function reopenYear(int $startYear, string $reason): YearEndClose
+    {
+        $fy = $this->yearEnd->year($startYear);
+
+        return DB::transaction(function () use ($fy, $reason) {
+            $this->lockBranches();
+            // Finding 9: read FOR UPDATE and re-check inside the transaction; the loser of two reopens gets "not closed".
+            $close = $this->yearEnd->activeClose($fy->startYear, lock: true);
+            if (! $close) {
+                throw new LedgerException("{$fy->label()} is not closed.");
+            }
+            $later = YearEndClose::active()->where('fiscal_year', '>', $fy->startYear)->orderByDesc('fiscal_year')->first();
+            if ($later) {
+                throw new LedgerException("Reopen {$this->yearEnd->year((int) $later->fiscal_year)->label()} first.");
+            }
+
+            $allContras = [];
+            $ids = $close->transactionIds();
+            foreach ($ids as $id) {
+                $txn = Transaction::withoutGlobalScopes()->lockForUpdate()->findOrFail($id);
+                $originals = $txn->entries()->whereNull('contra_of_id')->orderBy('id')->get();
+                $accounts = $this->lock($originals->pluck('account_id')->unique()->all());
+                $lines = $originals->map(fn (LedgerEntry $e) => $this->line($accounts[$e->account_id], Money::toCents($e->credit), Money::toCents($e->debit),
+                    $e->entry_date->format('Y-m-d'), $e->id, 'close'))->all();
+                $contras = array_map(fn (LedgerEntry $e) => $e->id, $this->postClose($txn, $lines, $fy));
+                $txn->update(['status' => 'void']);
+                // Finding 6: the branch's auditors see why its closing entry became void.
+                AuditLog::record('transaction.year_end_reopened', $txn, ['status' => 'posted'],
+                    ['status' => 'void', 'reason' => $reason, 'contra_line_ids' => $contras, 'ref_no' => $txn->ref_no], $txn->branch_id);
+                $allContras = array_merge($allContras, $contras);
+            }
+
+            $old = ['closed_by' => $close->closed_by, 'closed_at' => $close->closed_at?->toIso8601String(), 'total_net' => $close->totalNet()];
+            $close->update(['status' => YearEndClose::REOPENED, 'reopened_by' => auth()->id(), 'reopened_at' => now(), 'reopen_reason' => $reason]);
+            AuditLog::record('year.reopened', $close, $old, ['reason' => $reason, 'contra_line_ids' => $allContras, 'transaction_ids' => $ids]);
+            $this->notifyYearEnd('reopened', $fy, $close->totalNet(), $reason);
+
+            return $close->fresh();
+        }, self::ATTEMPTS);
+    }
+
+    /**
+     * The private close path (R8 "Lock exemption"): skips assertOpen, reached only from closeYear / reopenYear, no flag.
+     * Only `origin = close` lines dated E of the year being closed or reopened, only on income, expense, head office,
+     * branch current and retained earnings accounts (never a money account), and never below a later active close.
+     *
+     * @return LedgerEntry[]
+     */
+    private function postClose(Transaction $txn, array $lines, FiscalYear $fy): array
+    {
+        if ($txn->type !== Transaction::YEAR_END_CLOSE) {
+            throw new LedgerException('Only a year-end close transaction can take closing lines.');
+        }
+        $through = YearEnd::closedThrough(share: true);
+        foreach ($lines as $l) {
+            $acc = $l['account'];
+            $okAccount = ! $acc->isMoney() && in_array($acc->type, Account::CLOSE_TYPES, true)
+                && ($acc->type !== 'category' || in_array($acc->class, ['income', 'expense'], true));
+            if ($l['origin'] !== 'close' || ! $okAccount || $l['date'] !== $fy->end() || ($through !== null && $through > $fy->end())) {
+                throw new LedgerException("Closing line on account #{$acc->id} refused: not allowed for the year-end close of {$fy->label()}.");
+            }
+        }
+
+        return $this->post($txn, $lines);
+    }
+
+    /** R8: every branch row, in id order (as PeriodLockController), so a close and a lock change run one after the other. */
+    private function lockBranches(): void
+    {
+        Branch::query()->orderBy('id')->lockForUpdate()->get(['id']);
+    }
+
+    private function notifyYearEnd(string $event, FiscalYear $fy, string $total, ?string $reason = null): void
+    {
+        $admins = User::where('is_super_admin', true)->where('status', 'active')->get();
+        $actor = auth()->user();
+        if ($admins->isEmpty()) {
+            return;
+        }
+        try {
+            Notification::send($admins, new YearEndNotification($event, $fy->label(), $actor ? "{$actor->name} <{$actor->email}>" : 'System',
+                BusinessDate::now()->format('Y-m-d H:i'), Money::format($total), $reason));
+        } catch (\Throwable $e) {
+            report($e);
+        }
+    }
+
     // ---------------------------------------------------------------- helpers
 
     /** The private back-fill path: resolve, lock and insert the planned lines without any period-lock check. */
@@ -347,6 +536,10 @@ class LedgerService
         foreach ($planned as $p) {
             if ($p['ref'][0] === PostingRules::MONEY) {
                 throw new LedgerException("Back-fill of {$txn->ref_no} refused: it may not post to a money account.");
+            }
+            // Settings review finding 4: the lock exemption of this path never reaches a closed fiscal year.
+            if ($closed = $this->yearEnd->closedYearOf($p['date'], share: true)) {
+                throw new LedgerException('Back-fill of '.($txn->ref_no ?? "#{$txn->id}")." refused: {$closed->label()} is closed.");
             }
             // Memoised per reference for the run (review R2): chart accounts are never deleted.
             $key = implode(':', $p['ref']);
@@ -510,6 +703,7 @@ class LedgerService
         }
         uasort($checks, fn ($a, $b) => [$a[0]->is_main, $a[1]] <=> [$b[0]->is_main, $b[1]]);
         foreach ($checks as [$branch, $date]) {
+            $this->assertYearOpen($date);
             if ($headOfficeSide && $branch->is_main) {
                 if (PeriodLock::isLocked($branch->id, $date, share: true)) {
                     throw new LedgerException('The period '.substr($date, 0, 7)." is locked for {$branch->code} (head office side of this transfer).");
@@ -521,8 +715,17 @@ class LedgerService
         }
     }
 
+    /** Settings spec R8 "While a year is closed": no posting dated <= E of the latest active close (backs up the locks). */
+    private function assertYearOpen(string $date): void
+    {
+        if ($closed = $this->yearEnd->closedYearOf($date, share: true)) {
+            throw new LedgerException("{$closed->label()} is closed.");
+        }
+    }
+
     private function assertOpen(int $branchId, string $date): void
     {
+        $this->assertYearOpen($date);
         // Locking read: a concurrent period lock for this branch/month waits for this posting (reviewer R5).
         if (PeriodLock::isLocked($branchId, $date, share: true)) {
             throw new LedgerException('The period '.substr($date, 0, 7).' is locked.');
@@ -588,6 +791,10 @@ class LedgerService
     private function entry(Transaction $txn, array $l, bool $applyBalance = true): LedgerEntry
     {
         $acc = $l['account'];
+        // Settings review finding 3: Retained earnings is written only by the year-end close.
+        if ($acc->type === Account::RETAINED_EARNINGS && $l['origin'] !== 'close') {
+            throw new LedgerException('Retained earnings can only be posted by the year-end close.');
+        }
         $entry = LedgerEntry::create([
             'transaction_id' => $txn->id,
             'contra_of_id' => $l['contra_of'],
@@ -618,7 +825,7 @@ class LedgerService
     private function finish(Transaction $txn): Transaction
     {
         $prefix = ['capital' => 'CAP', 'opening_allocation' => 'OPN', 'fund_allocation' => 'ALC', 'fund_return' => 'RET',
-            'branch_transfer' => 'TRF', 'internal_transfer' => 'INT', 'income' => 'INC', 'expense' => 'EXP', 'reversal' => 'REV'][$txn->type];
+            'branch_transfer' => 'TRF', 'internal_transfer' => 'INT', 'income' => 'INC', 'expense' => 'EXP', 'reversal' => 'REV', 'year_end_close' => 'YEC'][$txn->type];
         $txn->ref_no = sprintf('%s-%s-%s-%06d', $txn->branch->code, $prefix, substr((string) $txn->txn_date->format('Y'), 0, 4), $txn->id);
         $txn->save();
         AuditLog::record("transaction.{$txn->type}", $txn, null, $txn->only(['ref_no', 'amount', 'txn_date', 'from_account_id', 'to_account_id', 'account_id', 'category_id']));

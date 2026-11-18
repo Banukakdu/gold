@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Models\Concerns\BranchScoped;
 use App\Services\ChartOfAccounts;
+use App\Support\Settings;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -26,6 +27,12 @@ class Account extends Model
 
     public const CLASSES = ['asset', 'liability', 'equity', 'income', 'expense'];
 
+    /** AG-092: written only by the year-end close (LedgerService::postClose, review finding 3). */
+    public const RETAINED_EARNINGS = 'retained_earnings';
+
+    /** Accounts the year-end close may post to (settings spec R8): never a money account. */
+    public const CLOSE_TYPES = ['category', 'head_office', 'branch_current', self::RETAINED_EARNINGS];
+
     protected $fillable = ['branch_id', 'code', 'name', 'type', 'class', 'category_id', 'counterparty_branch_id',
         'bank_name', 'account_no', 'currency', 'is_main_account', 'status'];
 
@@ -36,6 +43,8 @@ class Account extends Model
         // R1: a cash / bank / wallet account gets the next 11xxx code of its branch when it is created.
         static::creating(function (Account $a) {
             $a->type ??= 'cash';
+            // AG-092 R2: new accounts take the currency setting (the column is informational; amounts are never converted).
+            $a->currency ??= app(Settings::class)->currencyCode();
             if ($a->isMoney()) {
                 $a->class = 'asset';
                 $a->code ??= app(ChartOfAccounts::class)->nextMoneyCode((int) $a->branch_id);

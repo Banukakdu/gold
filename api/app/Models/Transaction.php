@@ -29,6 +29,9 @@ class Transaction extends Model
 
     public const REVERSAL = 'reversal';
 
+    /** AG-092 R7: one per branch per year-end close; changes only by reopening the year. */
+    public const YEAR_END_CLOSE = 'year_end_close';
+
     public const TRANSFER_TYPES = [self::OPENING_ALLOCATION, self::FUND_ALLOCATION, self::FUND_RETURN, self::BRANCH_TRANSFER, self::INTERNAL_TRANSFER];
 
     protected $guarded = ['id'];

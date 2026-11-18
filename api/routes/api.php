@@ -8,9 +8,11 @@ use App\Http\Controllers\Api\V1\BranchController;
 use App\Http\Controllers\Api\V1\CategoryController;
 use App\Http\Controllers\Api\V1\ChartOfAccountsController;
 use App\Http\Controllers\Api\V1\DashboardController;
+use App\Http\Controllers\Api\V1\FiscalYearController;
 use App\Http\Controllers\Api\V1\PeriodLockController;
 use App\Http\Controllers\Api\V1\ReportController;
 use App\Http\Controllers\Api\V1\RoleController;
+use App\Http\Controllers\Api\V1\SettingsController;
 use App\Http\Controllers\Api\V1\TransactionController;
 use App\Http\Controllers\Api\V1\TransferController;
 use App\Http\Controllers\Api\V1\UserController;
@@ -23,6 +25,17 @@ Route::prefix('v1')->group(function () {
     Route::middleware('auth:sanctum')->group(function () {
         Route::post('auth/logout', [AuthController::class, 'logout']);
         Route::get('me', [AuthController::class, 'me']);
+
+        // AG-092 settings (docs/specs/settings.md section 5): outside `branch`, like `me`. The logo is removed with a POST
+        // action; there is deliberately no DELETE route (nothing is hard-deleted).
+        Route::get('settings/public', [SettingsController::class, 'publicSettings']);
+        Route::get('settings/logo', [SettingsController::class, 'logo']);
+        Route::middleware('super')->group(function () {
+            Route::get('settings', [SettingsController::class, 'show']);
+            Route::put('settings', [SettingsController::class, 'update']);
+            Route::post('settings/logo', [SettingsController::class, 'uploadLogo'])->middleware('throttle:attachments-upload');
+            Route::post('settings/logo/remove', [SettingsController::class, 'removeLogo']);
+        });
 
         // Everything below runs in the context of the branch in X-Branch-Id
         Route::middleware('branch')->group(function () {
@@ -99,6 +112,14 @@ Route::prefix('v1')->group(function () {
             Route::get('period-locks/review', [PeriodLockController::class, 'review'])->middleware('super');
             Route::post('period-locks', [PeriodLockController::class, 'store'])->middleware('super');
             Route::post('period-locks/{periodLock}/unlock', [PeriodLockController::class, 'unlock'])->middleware('super');
+
+            // AG-092 fiscal years and the year-end close (S5): Super Admin only, any switcher mode.
+            Route::middleware('super')->group(function () {
+                Route::get('fiscal-years', [FiscalYearController::class, 'index']);
+                Route::get('fiscal-years/{startYear}/preview', [FiscalYearController::class, 'preview'])->whereNumber('startYear');
+                Route::post('fiscal-years/{startYear}/close', [FiscalYearController::class, 'close'])->whereNumber('startYear');
+                Route::post('fiscal-years/{startYear}/reopen', [FiscalYearController::class, 'reopen'])->whereNumber('startYear');
+            });
 
             // Nothing is hard-deleted: there is deliberately no DELETE route for users, roles or templates (AC 27).
         });

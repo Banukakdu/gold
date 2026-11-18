@@ -69,7 +69,9 @@ class DashboardController extends Controller
                 ->map(fn ($b) => $b->only(['id', 'code', 'name']) + ['balance' => Money::add(Account::withoutGlobalScopes()->money()->where('branch_id', $b->id)->sum('current_balance'))]),
             'top_expense_categories' => $topExpenses,
             'trend' => $trend,
-            'recent' => Transaction::with(['branch:id,code', 'category:id,name'])->latest('txn_date')->latest('id')->limit(10)
+            // AG-092 (settings spec R5, review finding 15): the dashboard is unchanged by a year-end close; a closing
+            // transaction moves no money and is not a recent entry.
+            'recent' => Transaction::with(['branch:id,code', 'category:id,name'])->where('type', '<>', Transaction::YEAR_END_CLOSE)->latest('txn_date')->latest('id')->limit(10)
                 ->get(['id', 'ref_no', 'branch_id', 'type', 'txn_date', 'amount', 'category_id', 'status', 'description']),
         ];
     }

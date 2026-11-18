@@ -70,7 +70,7 @@ class BackfillTest extends TestCase
         $this->artisan('migrate:fresh', ['--force' => true])->assertExitCode(0);
         app(PermissionRegistrar::class)->forgetCachedPermissions();
         $this->seed(DatabaseSeeder::class);
-        $this->artisan('migrate:rollback', ['--step' => 2, '--force' => true])->assertExitCode(0);
+        $this->artisan('migrate:rollback', ['--step' => 3, '--force' => true])->assertExitCode(0);
         $this->assertFalse(Schema::hasColumn('ledger_entries', 'origin'));
         $this->admin = User::where('is_super_admin', true)->firstOrFail();
         $this->main = Branch::main();
@@ -331,6 +331,8 @@ class BackfillTest extends TestCase
         } finally {
             $this->app->maintenanceMode()->deactivate();
         }
+        // The AG-092 migration (Retained earnings) completes the chart as in the clean run.
+        $this->artisan('migrate', ['--path' => 'database/migrations/2026_11_23_000000_settings_and_year_end.php', '--force' => true])->assertExitCode(0);
         $this->assertSame($clean, [$this->describeLines(), $this->allBalances()]);
 
         // A re-run adds nothing and writes its own audit row.

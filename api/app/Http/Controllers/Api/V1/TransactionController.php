@@ -163,6 +163,7 @@ class TransactionController extends Controller
     /** AG-063: edit descriptive fields (amount/account changes = void and re-enter, keeps the ledger simple and auditable). */
     public function update(Request $request, Transaction $transaction)
     {
+        abort_if($transaction->type === Transaction::YEAR_END_CLOSE, 422, LedgerService::YEAR_END_LOCKED);
         abort_unless(in_array($transaction->type, [Transaction::INCOME, Transaction::EXPENSE]) && $transaction->status === 'posted', 422, 'This entry cannot be edited.');
         $date = $transaction->txn_date->format('Y-m-d');
         abort_if(PeriodLock::isLocked($transaction->branch_id, $date), 422, 'The period '.substr($date, 0, 7).' is locked.');
@@ -199,6 +200,9 @@ class TransactionController extends Controller
 
     public function void(Request $request, Transaction $transaction)
     {
+        if ($transaction->type === Transaction::YEAR_END_CLOSE) {
+            return response()->json(['message' => LedgerService::YEAR_END_LOCKED], 422);
+        }
         // Type first: transfers have no *.void permission, and the answer for them is "use reverse" (AC 5).
         if (! in_array($transaction->type, [Transaction::INCOME, Transaction::EXPENSE], true)) {
             return response()->json(['message' => 'Only income and expense entries can be voided. Use reverse for transfers.'], 422);

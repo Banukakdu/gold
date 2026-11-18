@@ -4,10 +4,10 @@ namespace App\Services;
 
 use App\Exports\ReportWorkbook;
 use App\Models\AuditLog;
-use App\Models\Setting;
 use App\Models\User;
 use App\Support\Money;
 use App\Support\ReportParams;
+use App\Support\Settings;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Str;
@@ -112,17 +112,38 @@ class ReportExporter
     /** Header block (finding 4): identical lines at the top of every PDF page and every Excel sheet. */
     public function header(string $name, ReportParams $p, array $data, User $user): array
     {
-        $company = (string) Setting::get('company_name', config('app.name'));
-        $logo = (string) Setting::get('company_logo', '');
-        $printed = 'Printed by '.$user->name.' at '.now()->setTimezone('Asia/Colombo')->format('Y-m-d H:i').' (Asia/Colombo)';
+        $settings = app(Settings::class);
+        $company = $settings->companyName();
+        // AG-092 R3: built from the stored file after its sha256 check; null (no logo, no error for the user) otherwise.
+        $logo = (string) $settings->logoDataUri();
+        $now = now()->setTimezone('Asia/Colombo');
+        $printed = 'Printed by '.$user->name.' at '.$settings->formatDate($now->format('Y-m-d')).' '.$now->format('H:i').' (Asia/Colombo)';
+        $currency = 'Amounts in '.$settings->currencyCode();
+        $basis = $data['basis'] ?? ReportService::basis($name);
+        $title = self::TITLES[$name];
+        $fy = $data['fiscal_year'] ?? null;
+        $notes = [];
+        if ($name === 'trial-balance') {
+            // Review finding 12: the basis is in the title.
+            $title = 'Trial balance - '.(($data['closing_entries'] ?? false) ? 'post-closing' : 'pre-closing');
+            // Review finding 5: a year closed again says how often it was reopened; a reopened year says so.
+            if ($fy && $fy['closed'] && $fy['reopen_count'] > 0) {
+                $notes[] = "Reopened {$fy['reopen_count']} time(s)";
+            }
+            if ($fy && $fy['reopened']) {
+                $notes[] = "{$fy['label']} was reopened on ".$settings->formatDate(substr((string) $fy['reopened']['at'], 0, 10))
+                    ." by {$fy['reopened']['by']}: {$fy['reopened']['reason']}";
+            }
+        }
         $lines = array_values(array_filter([
             $company,
-            self::TITLES[$name],
+            $title,
             'Branches: '.$p->branchLabel(),
             'Period: '.self::periodLabel($p->from, $p->to),
-            'Amounts in LKR',
-            ReportService::basis($name),
+            $currency,
+            $basis,
             $printed,
+            ...$notes,
             $data['provisional'] ? 'PROVISIONAL - period not locked' : null,
         ]));
 
@@ -130,20 +151,30 @@ class ReportExporter
             'company' => $company,
             // Only embedded PNG/JPEG (data URIs): dompdf does not fetch remote files, and no SVG.
             'logo' => preg_match('#^data:image/(png|jpeg);base64,[A-Za-z0-9+/=\s]+$#', $logo) ? $logo : null,
-            'title' => self::TITLES[$name],
+            'title' => $title,
             'branches' => $p->branchLabel(),
             'period' => self::periodLabel($p->from, $p->to),
+            'currency' => $currency,
             'printed' => $printed,
-            'basis' => ReportService::basis($name),
+            'basis' => $basis,
+            'notes' => $notes,
             'provisional' => $data['provisional'],
             'lines' => $lines,
         ];
     }
 
-    /** Finding 11: a full calendar year is labelled as such until the fiscal-year setting exists. */
+    /**
+     * Settings spec S6: an exact fiscal year reads "FY 2026-27, <from> to <to>"; a Jan-Dec range keeps the calendar
+     * label (only when the fiscal year does not start in January). Dates in the date format setting (S3).
+     */
     public static function periodLabel(string $from, string $to): string
     {
-        $range = "{$from} to {$to}";
+        $settings = app(Settings::class);
+        $range = $settings->formatDate($from).' to '.$settings->formatDate($to);
+        $fy = $settings->fiscalYear($from);
+        if ($from === $fy->start() && $to === $fy->end()) {
+            return "{$fy->label()}, {$range}";
+        }
         $f = CarbonImmutable::parse($from);
         if ($f->format('m-d') === '01-01' && $to === $f->format('Y').'-12-31') {
             return "Year {$f->format('Y')} (calendar), {$range}";

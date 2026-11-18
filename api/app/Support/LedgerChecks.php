@@ -5,6 +5,7 @@ namespace App\Support;
 use App\Models\Account;
 use App\Models\Branch;
 use App\Models\Transaction;
+use App\Models\YearEndClose;
 use App\Services\ReportService;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -97,7 +98,9 @@ final class LedgerChecks
 
         $dr = Money::sqlCents('le.debit');
         $cr = Money::sqlCents('le.credit');
+        // AG-092 (settings spec R9 V5): the year-end close lines are not I&E figures.
         $ledger = DB::table('ledger_entries as le')->join('accounts as a', 'a.id', '=', 'le.account_id')->where('a.type', 'category')
+            ->where('le.origin', '<>', 'close')
             ->groupBy('a.branch_id', 'a.category_id', 'a.class')
             ->selectRaw("a.branch_id, a.category_id, a.class, SUM($dr) - SUM($cr) as net")->get()
             ->mapWithKeys(fn ($r) => [$r->branch_id.':'.$r->category_id => $r->class === 'income' ? -(int) $r->net : (int) $r->net]);
@@ -126,6 +129,79 @@ final class LedgerChecks
             ->whereNotExists(fn ($q) => $q->select(DB::raw(1))->from('ledger_entries as le')->join('accounts as a', 'a.id', '=', 'le.account_id')
                 ->whereColumn('le.transaction_id', 't.id')->whereNotIn('a.type', Account::MONEY_TYPES))
             ->orderBy('t.id')->get(['t.id as transaction_id', 't.ref_no', 't.txn_date', 'b.code as branch', 't.type']);
+    }
+
+    /**
+     * V7 (settings spec R9 + review finding 8). For every active close of [S, E]:
+     *  - each branch's income and expense accounts net to 0.00 over all lines dated <= E;
+     *  - the close's lines on HO in B (non-main B) or on 32000 in MAIN's own closing transaction equal -N(B) of `summary`;
+     * and MAIN 32000 = -sum(total_net of active closes). Returns the offenders as [check, branch, detail, difference].
+     */
+    public static function yearEnd(): Collection
+    {
+        $out = collect();
+        $dr = Money::sqlCents('le.debit');
+        $cr = Money::sqlCents('le.credit');
+        $codes = Branch::pluck('code', 'id');
+        $codeIds = $codes->flip();
+        $closes = YearEndClose::active()->orderBy('fiscal_year')->get();
+        $total = 0;
+        foreach ($closes as $c) {
+            $end = $c->period_end->format('Y-m-d');
+            $label = 'FY start '.$c->fiscal_year;
+            $rows = DB::table('ledger_entries as le')->join('accounts as a', 'a.id', '=', 'le.account_id')->whereIn('a.class', ['income', 'expense'])
+                ->whereDate('le.entry_date', '<=', $end)->groupBy('le.branch_id', 'le.account_id', 'a.code', 'a.name')
+                ->havingRaw("SUM($dr) <> SUM($cr)")->selectRaw("le.branch_id, a.code, a.name, SUM($dr) - SUM($cr) as diff")->get();
+            foreach ($rows as $r) {
+                $out->push(['check' => "{$label}: income/expense not cleared", 'branch' => $codes[$r->branch_id] ?? '', 'detail' => "{$r->code} {$r->name}", 'diff' => (int) $r->diff]);
+            }
+            foreach ($c->summary['by_branch'] ?? [] as $code => $b) {
+                $net = Money::toCents($b['net'] ?? '0');
+                $txn = $b['transaction_id'] ?? null;
+                $branchId = $codeIds[$code] ?? null;
+                $isMain = $branchId !== null && Branch::whereKey($branchId)->value('is_main');
+                $q = DB::table('ledger_entries as le')->join('accounts as a', 'a.id', '=', 'le.account_id')->where('le.transaction_id', $txn ?? 0)->whereNull('le.contra_of_id');
+                $isMain ? $q->where('a.type', 'retained_earnings') : $q->where('a.type', 'head_office');
+                $moved = (int) $q->selectRaw("COALESCE(SUM($dr) - SUM($cr), 0) as v")->value('v');
+                if ($moved !== -$net) {
+                    $out->push(['check' => "{$label}: result moved differs from summary", 'branch' => (string) $code, 'detail' => 'summary net '.Money::format(Money::fromCents($net)), 'diff' => $moved + $net]);
+                }
+            }
+            $total += Money::toCents($c->totalNet());
+        }
+        $re = DB::table('ledger_entries as le')->join('accounts as a', 'a.id', '=', 'le.account_id')->where('a.type', 'retained_earnings')
+            ->selectRaw("COALESCE(SUM($dr) - SUM($cr), 0) as v")->value('v');
+        if ((int) $re !== -$total) {
+            $out->push(['check' => 'Retained earnings = -sum(total_net) of active closes', 'branch' => 'MAIN', 'detail' => 'expected '.Money::format(Money::fromCents(-$total)), 'diff' => (int) $re + $total]);
+        }
+
+        return $out;
+    }
+
+    /**
+     * V8 (settings spec R9 + review findings 3 and 7): offenders as [rule, line id, ref, date].
+     *  - close lines only in year_end_close transactions, and those have no other origin;
+     *  - for each active close, every line dated in [S, E] was created at or before closed_at, or is one of its own lines;
+     *  - every line on a retained_earnings account has origin close.
+     */
+    public static function closeLines(): Collection
+    {
+        $base = fn () => DB::table('ledger_entries as le')->join('transactions as t', 't.id', '=', 'le.transaction_id')
+            ->select('le.id', 't.ref_no', 'le.transaction_id', 'le.entry_date')->orderBy('le.id');
+        $out = collect();
+        $add = fn (string $rule, $rows) => $rows->each(fn ($r) => $out->push(['rule' => $rule, 'id' => $r->id, 'ref' => $r->ref_no ?? "#{$r->transaction_id}", 'date' => substr((string) $r->entry_date, 0, 10)]));
+        $add('close line outside a year-end close', $base()->where('le.origin', 'close')->where('t.type', '<>', Transaction::YEAR_END_CLOSE)->get());
+        $add('other origin in a year-end close', $base()->where('le.origin', '<>', 'close')->where('t.type', Transaction::YEAR_END_CLOSE)->get());
+        foreach (YearEndClose::active()->get() as $c) {
+            $add("line in closed FY start {$c->fiscal_year} created after the close", $base()
+                ->whereDate('le.entry_date', '>=', $c->period_start->format('Y-m-d'))->whereDate('le.entry_date', '<=', $c->period_end->format('Y-m-d'))
+                ->where('le.created_at', '>', $c->closed_at->copy()->setTimezone(config('app.timezone'))->format('Y-m-d H:i:s'))
+                ->whereNotIn('le.transaction_id', $c->transactionIds() ?: [0])->get());
+        }
+        $add('Retained earnings line not from the close', $base()->join('accounts as a', 'a.id', '=', 'le.account_id')
+            ->where('a.type', 'retained_earnings')->where('le.origin', '<>', 'close')->get());
+
+        return $out;
     }
 
     /** @return array<int, int> ledger balance (debit - credit, cents) by account id */

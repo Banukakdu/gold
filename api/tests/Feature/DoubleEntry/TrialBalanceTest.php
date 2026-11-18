@@ -135,7 +135,7 @@ class TrialBalanceTest extends ReportTestCase
         $this->assertSame('attachment; filename="trial-balance_2026-10-01_2026-10-31.pdf"', $pdf->headers->get('Content-Disposition'));
         $pages = $this->pdfPages($pdf->getContent());
         $all = implode(' ', $pages);
-        foreach (['Trial Balance', 'Amounts in LKR', 'All posted lines; period columns exclude voided entries', '1,000,000.00', '332,500.00', '139,000.00',
+        foreach (['Trial balance - pre-closing', 'Amounts in LKR', 'All posted lines; period columns exclude voided entries', '1,000,000.00', '332,500.00', '139,000.00',
             'Head office current account', 'Prepared by', 'Checked by', 'Approved by'] as $text) {
             $this->assertStringContainsString($text, $all);
         }
@@ -147,7 +147,7 @@ class TrialBalanceTest extends ReportTestCase
         $this->assertSame(['MAIN Main Branch', 'GAL Galle', 'KDY Kandy'], array_slice($book->getSheetNames(), 0, 3));
         $ws = $book->getSheet(2);
         $rows = $ws->toArray(null, true, false);
-        $this->assertSame('Trial Balance', $rows[1][0]);
+        $this->assertSame('Trial balance - pre-closing', $rows[1][0]);
         $total = collect($rows)->first(fn ($r) => ($r[1] ?? null) === 'Total');
         $this->assertEquals([332500, 332500], [$total[7], $total[8]]);
         // QA B3: the Class column shows the account class, as on the screen (not the group).

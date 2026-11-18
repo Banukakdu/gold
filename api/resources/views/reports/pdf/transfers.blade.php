@@ -8,7 +8,7 @@
         <tbody>
         <tr class="carry"><td colspan="5">Brought forward</td><td class="num">{{ $m($page['bf']['amount']) }}</td><td colspan="3"></td></tr>
         @forelse ($page['rows'] as $r)
-            <tr><td>{{ $r['txn_date'] }}</td><td>{{ $r['ref_no'] }}</td><td>{{ \App\Services\ReportExporter::movementLabel($r) }}</td>
+            <tr><td>{{ app(\App\Support\Settings::class)->formatDate($r['txn_date']) }}</td><td>{{ $r['ref_no'] }}</td><td>{{ \App\Services\ReportExporter::movementLabel($r) }}</td>
                 <td>{{ $r['from']['branch_code'] }} - {{ $r['from']['account'] }}</td><td>{{ $r['to']['branch_code'] }} - {{ $r['to']['account'] }}</td>
                 <td class="num">{{ $m($r['amount']) }}</td><td>{{ \App\Services\ReportExporter::statusLabel($r) }}</td>
                 <td>{{ \Illuminate\Support\Str::limit((string) $r['description'], 40) }}</td><td>{{ $r['created_by'] }}</td></tr>

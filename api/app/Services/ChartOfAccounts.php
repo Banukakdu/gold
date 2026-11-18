@@ -12,7 +12,8 @@ use Illuminate\Support\Facades\DB;
 /**
  * Chart of accounts per branch (docs/specs/double-entry.md R1). Codes are 5 digits; the first digit is the class:
  *  11001-11999 money accounts (per branch, by creation), 15 + branch id (3 digits) inter-branch, 31000 Owner's capital
- *  (MAIN only), 4PPSS income and 5PPSS expense categories (same code in every branch). 32000 is reserved (AG-092).
+ *  (MAIN only), 32000 Retained earnings (MAIN only, written only by the year-end close, AG-092), 4PPSS income and 5PPSS
+ *  expense categories (same code in every branch).
  *
  * Accounts are never deleted and codes never reused. This class creates and renames chart accounts; it never posts
  * and never writes current_balance (that is LedgerService only).
@@ -21,7 +22,12 @@ class ChartOfAccounts
 {
     public const OWNER_CAPITAL_CODE = '31000';
 
-    public const RESERVED_RETAINED_EARNINGS = '32000';
+    public const RETAINED_EARNINGS_CODE = '32000';
+
+    /** Kept for readers of the double-entry code: the code is no longer only reserved. */
+    public const RESERVED_RETAINED_EARNINGS = self::RETAINED_EARNINGS_CODE;
+
+    public const NAME_RETAINED_EARNINGS = 'Retained earnings';
 
     public const MAX_BRANCH_ID = 999;
 
@@ -118,6 +124,7 @@ class ChartOfAccounts
         $this->takeCreated();
         if ($branch->is_main) {
             $this->ownerCapital();
+            $this->retainedEarnings();
         } elseif ($main = Branch::where('is_main', true)->first()) {
             $this->headOffice($branch, $main);
             $this->branchCurrent($branch, $main);
@@ -171,6 +178,15 @@ class ChartOfAccounts
             ['name' => self::NAME_OWNER_CAPITAL, 'type' => 'owner_capital', 'class' => 'equity']);
     }
 
+    /** AG-092: 32000 Retained earnings in MAIN (class equity, type retained_earnings). Only the year-end close posts to it. */
+    public function retainedEarnings(): Account
+    {
+        $main = Branch::main();
+
+        return $this->ensure(['branch_id' => $main->id, 'code' => self::RETAINED_EARNINGS_CODE],
+            ['name' => self::NAME_RETAINED_EARNINGS, 'type' => 'retained_earnings', 'class' => 'equity']);
+    }
+
     /** "Head office current account" in a non-main branch. */
     public function headOffice(Branch $branch, ?Branch $main = null): Account
     {
@@ -221,6 +237,8 @@ class ChartOfAccounts
             PostingRules::HEAD_OFFICE => $this->headOffice(Branch::findOrFail($ref[1])),
             PostingRules::BRANCH_CURRENT => $this->branchCurrent(Branch::findOrFail($ref[1])),
             PostingRules::OWNER_CAPITAL => $this->ownerCapital(),
+            PostingRules::RETAINED_EARNINGS => $this->retainedEarnings(),
+            PostingRules::ACCOUNT => Account::withoutGlobalScopes()->findOrFail($ref[1]),
         };
         foreach ($this->takeCreated() as $new) {
             AuditLog::record('account.created', $new, null, $new->only(['code', 'name', 'type', 'class', 'category_id', 'counterparty_branch_id']) + ['system' => true]);

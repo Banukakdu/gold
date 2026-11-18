@@ -9,12 +9,13 @@ use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\PeriodLock;
 use App\Models\Role;
-use App\Models\Setting;
 use App\Models\Transaction;
 use App\Models\User;
+use App\Models\YearEndClose;
 use App\Services\ReportExporter;
 use App\Services\ReportService;
 use App\Support\BranchContext;
+use App\Support\Settings;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
@@ -52,6 +53,9 @@ class AuditLogController extends Controller
         'reports' => [[], ['report.exported', 'audit.exported']],
         'logins' => [[], ['auth.login']],
         'attachments' => [['attachment.'], []],
+        // AG-092 R12
+        'settings' => [['settings.'], []],
+        'year_end' => [['year.'], ['transaction.year_end_close', 'transaction.year_end_reopened']],
     ];
 
     public const LABELS = [
@@ -77,6 +81,13 @@ class AuditLogController extends Controller
         'attachment.downloaded' => 'Attachment downloaded',
         'attachment.missing' => 'Attachment file missing',
         'attachment.integrity_failed' => 'Attachment file changed',
+        'settings.updated' => 'Settings changed',
+        'settings.logo_uploaded' => 'Logo uploaded',
+        'settings.logo_removed' => 'Logo removed',
+        'year.closed' => 'Fiscal year closed',
+        'year.reopened' => 'Fiscal year reopened',
+        'transaction.year_end_close' => 'Year-end close recorded',
+        'transaction.year_end_reopened' => 'Year-end close cancelled (year reopened)',
     ];
 
     public function index(Request $request)
@@ -118,7 +129,7 @@ class AuditLogController extends Controller
 
         $user = $request->user();
         $lines = [
-            (string) Setting::get('company_name', config('app.name')),
+            app(Settings::class)->companyName(),
             'Audit log',
             'Branches: '.$this->branchLabel($f),
             'Period: '.$f['from'].' to '.$f['to'].' (Asia/Colombo days)',
@@ -331,9 +342,12 @@ class AuditLogController extends Controller
             PeriodLock::class => isset($s['lock'][$id])
                 ? PeriodLock::label($s['lock'][$id]->period).' ('.($s['lock'][$id]->branch->code ?? 'all branches').')'
                 : "#{$id}",
+            YearEndClose::class => app(Settings::class)->fiscalYearStarting((int) ($a->new_values['fiscal_year'] ?? $a->old_values['fiscal_year'] ?? YearEndClose::find($id)?->fiscal_year ?? 0))->label(),
             default => match ($a->event) {
                 'report.exported' => ReportExporter::TITLES[$a->new_values['name'] ?? ''] ?? '',
                 'audit.exported' => 'Audit log',
+                'settings.updated' => 'Settings',
+                'settings.logo_uploaded', 'settings.logo_removed' => 'Logo',
                 'ledger.legacy_voids_identified' => ($a->new_values['count'] ?? 0).' legacy voids',
                 default => '',
             },
