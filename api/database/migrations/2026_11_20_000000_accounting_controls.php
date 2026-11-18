@@ -87,7 +87,7 @@ return new class extends Migration
             $table->dropIndex(['user_id']);
         });
 
-        // Unlocked (historical) rows cannot satisfy the old unique key; they are kept only while the new schema exists.
+        // Note: rolling back fails on purpose once unlock history exists (two rows per branch+period break the old unique key).
         Schema::table('period_locks', function (Blueprint $table) {
             $table->dropIndex(['period', 'branch_id']);
             $table->dropForeign(['unlocked_by']);

@@ -19,6 +19,8 @@ import { AuthService } from '../core/auth.service';
           @if (auth.isSuperAdmin()) { <a routerLink="/allocations/new" routerLinkActive="on">Fund a branch</a> }
           @if (auth.can('account.view')) { <a routerLink="/accounts" routerLinkActive="on">Accounts</a> }
           @if (auth.can('report.view')) { <a routerLink="/reports" routerLinkActive="on">Reports</a> }
+          @if (auth.can('audit.view')) { <a routerLink="/audit-log" routerLinkActive="on">Audit log</a> }
+          @if (auth.isSuperAdmin()) { <a routerLink="/period-locks" routerLinkActive="on">Period locks</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/branches" routerLinkActive="on">Branches</a> }
           @if (auth.can('user.view')) { <a routerLink="/users" routerLinkActive="on">Users</a> }
           @if (auth.can('role.view')) { <a routerLink="/roles" routerLinkActive="on">Roles</a> }
@@ -62,6 +64,9 @@ export class ShellComponent {
     } else if (this.router.url.startsWith('/transactions?')) {
       // Drill-down filters (branches[], category) belong to the previous branch: start from a plain list.
       this.router.navigateByUrl('/transactions');
+    } else if (this.router.url.startsWith('/audit-log') && !this.auth.can('audit.view')) {
+      // audit.view is per branch: leave if the new branch does not grant it.
+      this.router.navigateByUrl('/dashboard');
     } else if (this.router.url.startsWith('/reports') && !this.auth.can('report.view')) {
       // Reports are per branch permission (report.view); leave if the new branch does not grant it.
       this.router.navigateByUrl('/dashboard');

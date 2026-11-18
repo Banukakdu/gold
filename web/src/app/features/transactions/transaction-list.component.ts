@@ -46,13 +46,14 @@ import { errorText } from '../../core/api.interceptor';
               <td>{{ t.account?.name ?? ((t.from_account?.name ?? '') + ' → ' + (t.to_account?.name ?? '')) }}</td>
               <td>{{ t.payee_payer || t.description }}</td>
               <td class="num" [class.neg]="t.type === 'expense'">{{ t.amount | money }}</td>
-              <td><span class="tag" [attr.data-s]="t.status">{{ t.status }}</span></td>
+              <td><span class="tag" [attr.data-s]="t.status">{{ t.status }}</span>
+                @if (t.legacy_void_note) { <br /><small class="muted">{{ t.legacy_void_note }}</small> }</td>
               <td>{{ t.creator?.name }} @if (t.creator_tag) { <span class="tag" data-s="inactive">{{ t.creator_tag }}</span> }</td>
               <td>
                 @if (t.status === 'posted' && (t.type === 'income' || t.type === 'expense') && auth.can(t.type + '.void')) {
                   <button class="link" (click)="void(t)">Void</button>
                 }
-                @if (t.status === 'posted' && isTransfer(t.type) && auth.can('transfer.reverse')) {
+                @if (t.status === 'posted' && canReverse(t.type)) {
                   <button class="link" (click)="reverse(t)">Reverse</button>
                 }
               </td>
@@ -118,9 +119,15 @@ export class TransactionListComponent implements OnInit {
 
   label(t: string) { return TYPE_LABELS[t] ?? t; }
   isTransfer(t: string) { return ['opening_allocation', 'fund_allocation', 'fund_return', 'branch_transfer', 'internal_transfer'].includes(t); }
+  /** Controls review finding 8: opening balances and top-ups are reversed by a Super Admin only. */
+  canReverse(t: string) {
+    if (!this.isTransfer(t) || !this.auth.can('transfer.reverse')) return false;
+    return !['opening_allocation', 'fund_allocation'].includes(t) || this.auth.isSuperAdmin();
+  }
 
   void(t: Transaction) {
-    const reason = prompt(`Void ${t.ref_no}? Enter a reason:`);
+    // Controls review finding 10: void is for entries recorded in error only.
+    const reason = prompt(`Void ${t.ref_no}?\n\nUse Void only for an entry recorded in error. For a real refund or return, record a new entry on the day it happens.\n\nReason (required):`);
     if (!reason) return;
     this.http.post(`/api/v1/transactions/${t.id}/void`, { reason }).subscribe({
       next: () => this.load(this.page()?.current_page ?? 1), error: e => this.msg.set(errorText(e)) });
