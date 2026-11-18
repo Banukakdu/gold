@@ -57,6 +57,20 @@ abstract class CategoriesTestCase extends ControlsTestCase
         return Category::findOrFail($id);
     }
 
+    /** An I&E response without the "<code> only" labels: a promote removes the tag, never a figure (review finding 8). */
+    public static function withoutBranchTags(array $r): array
+    {
+        foreach (['income', 'expense'] as $t) {
+            foreach ($r[$t]['categories'] ?? [] as $i => $c) {
+                foreach ($c['subs'] as $j => $s) {
+                    unset($r[$t]['categories'][$i]['subs'][$j]['branch_only']);
+                }
+            }
+        }
+
+        return $r;
+    }
+
     /** @return array<string, string> account status by branch code */
     protected function statuses(Category $c): array
     {

@@ -122,6 +122,21 @@ class BackfillTest extends TestCase
     }
 
     /** Responses of the four reports, the dashboard and the branch list (reports spec E-1..E-4 periods). */
+    /** The I&E shows each category's ledger code (categories review finding 8); the back-fill assigns the codes. */
+    private function withoutCodes(array $r): array
+    {
+        foreach (['income', 'expense'] as $t) {
+            foreach ($r[$t]['categories'] ?? [] as $i => $c) {
+                unset($r[$t]['categories'][$i]['code']);
+                foreach ($c['subs'] as $j => $s) {
+                    unset($r[$t]['categories'][$i]['subs'][$j]['code']);
+                }
+            }
+        }
+
+        return $r;
+    }
+
     private function reportResponses(): array
     {
         $out = [];
@@ -131,8 +146,8 @@ class BackfillTest extends TestCase
         foreach ($periods as [$from, $to]) {
             $q = ['from' => $from, 'to' => $to];
             foreach (['income-expense', 'branch-comparison', 'transfers'] as $name) {
-                $out["{$name} {$from}"] = $this->asAdmin()->getJson("/api/v1/reports/{$name}?".http_build_query($q))->assertOk()->json();
-                $out["{$name} {$from} KDY"] = $this->asAdmin($kdy->id)->getJson("/api/v1/reports/{$name}?".http_build_query($q))->assertOk()->json();
+                $out["{$name} {$from}"] = $this->withoutCodes($this->asAdmin()->getJson("/api/v1/reports/{$name}?".http_build_query($q))->assertOk()->json());
+                $out["{$name} {$from} KDY"] = $this->withoutCodes($this->asAdmin($kdy->id)->getJson("/api/v1/reports/{$name}?".http_build_query($q))->assertOk()->json());
             }
             if ($from !== '2026-09-01' || $to === '2026-09-30') {
                 foreach ([$kdy, $gal, $this->main] as $b) {

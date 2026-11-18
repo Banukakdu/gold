@@ -32,7 +32,7 @@ class ClosedYearTest extends YearEndTestCase
             'tb_post' => $get('trial-balance', self::FY + ['closing_entries' => 1]),
             'tb_post_c' => $get('trial-balance', self::FY + ['view' => 'consolidated', 'closing_entries' => 1]),
             'tb_april_c' => $get('trial-balance', ['from' => '2027-04-01', 'to' => '2027-04-10', 'view' => 'consolidated']),
-            'ie_fy' => $get('income-expense', self::FY),
+            'ie_fy' => CategoriesTestCase::withoutBranchTags($get('income-expense', self::FY)),
             'ie_kdy' => $this->sa($this->kdy)->getJson('/api/v1/reports/income-expense?'.http_build_query(self::FY))->assertOk()->json(),
         ];
     }

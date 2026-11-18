@@ -29,8 +29,9 @@ class PromoteTest extends CategoriesTestCase
         $lines = LedgerEntry::where('account_id', $origin->id)->orderBy('id')->get()->toArray();
         $q = ['from' => '2026-10-01', 'to' => '2026-11-30'];
         $tbBefore = [$this->tb($q + ['view' => 'consolidated']), $this->tb($q)];
-        $ieBefore = [$this->sa($this->kdy)->getJson('/api/v1/reports/income-expense?from=2026-10-01&to=2026-10-31')->json(),
-            $this->sa()->getJson('/api/v1/reports/income-expense?from=2026-10-01&to=2026-11-30')->json()];
+        $ie = fn () => [$this->sa($this->kdy)->getJson('/api/v1/reports/income-expense?from=2026-10-01&to=2026-10-31')->json(),
+            self::withoutBranchTags($this->sa()->getJson('/api/v1/reports/income-expense?from=2026-10-01&to=2026-11-30')->json())];
+        $ieBefore = $ie();
         $entries = LedgerEntry::count();
 
         $this->promote($c)->assertOk()->assertJsonPath('branch', null)->assertJsonPath('ledger_code', $c->ledger_code)
@@ -68,8 +69,7 @@ class PromoteTest extends CategoriesTestCase
         $this->assertSame($tbBefore, [$this->tb($q + ['view' => 'consolidated']), $this->tb($q)]);
         $rows = collect($tbBefore[0]['rows'])->where('key', 'cat:'.$c->ledger_code);
         $this->assertCount(1, $rows);
-        $this->assertSame($ieBefore, [$this->sa($this->kdy)->getJson('/api/v1/reports/income-expense?from=2026-10-01&to=2026-10-31')->json(),
-            $this->sa()->getJson('/api/v1/reports/income-expense?from=2026-10-01&to=2026-11-30')->json()]);
+        $this->assertSame($ieBefore, $ie());
         $this->artisan('ledger:verify')->assertExitCode(0);
         // The other branches can now post to it.
         $this->spend($c->fresh(), '2026-11-10', '10.00', $this->gal);
