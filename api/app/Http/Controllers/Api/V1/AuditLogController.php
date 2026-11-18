@@ -365,7 +365,8 @@ class AuditLogController extends Controller
                 : "#{$id}",
             YearEndClose::class => app(Settings::class)->fiscalYearStarting((int) ($a->new_values['fiscal_year'] ?? $a->old_values['fiscal_year'] ?? YearEndClose::find($id)?->fiscal_year ?? 0))->label(),
             default => match ($a->event) {
-                'report.exported' => ReportExporter::TITLES[$a->new_values['name'] ?? ''] ?? '',
+                // AG-065 R14: 'transactions' is not a ReportService name (that would open reports/transactions/export).
+                'report.exported' => (ReportExporter::TITLES + ['transactions' => 'Transactions'])[$a->new_values['name'] ?? ''] ?? '',
                 'audit.exported' => 'Audit log',
                 'settings.updated' => 'Settings',
                 'settings.logo_uploaded', 'settings.logo_removed' => 'Logo',

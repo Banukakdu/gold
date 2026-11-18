@@ -167,3 +167,41 @@ button.att-danger { color: var(--neg); border-color: var(--neg); }
 .warn { background: #fdf0d5; color: #8a5a00; border: 1px solid #f1d9a6; padding: 8px 10px; border-radius: 6px; }
 /* Categories S1 (QA Q4): a clearly dimmed backdrop behind the dialogs and sheets. */
 .att-backdrop.cat-backdrop { background: rgba(20, 16, 8, .55); }
+/* AG-065 transaction list (docs/specs/transaction-search.md S1): filter panel, chips, phone cards below 760px. */
+.ts-toggle { display: none; }
+.ts-panel { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-bottom: 10px; }
+.ts-panel > label, .ts-field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); min-width: 140px; }
+.ts-panel input, .ts-panel select { width: auto; }
+.ts-wide input { min-width: 260px; }
+.ts-status { border: 0; padding: 0; margin: 0; display: flex; flex-direction: row; gap: 10px; align-items: center; flex-wrap: wrap;
+  legend { padding: 0; margin-bottom: 4px; } label { display: flex; gap: 4px; align-items: center; color: var(--ink); } input { width: auto; } }
+.ts-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.ts-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.ts-sort { width: auto; }
+.ts-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.ts-chip { display: inline-flex; align-items: center; gap: 2px; background: #f1ead8; color: var(--gold); border-radius: 14px;
+  padding: 2px 4px 2px 10px; font-size: 13px; overflow-wrap: anywhere; button.link { text-decoration: none; font-size: 16px; min-width: 28px; } }
+.ts-wrap { overflow-wrap: anywhere; }
+.ts-cards { display: none; list-style: none; margin: 0; padding: 0; }
+.ts-pager { flex-wrap: wrap; gap: 8px; select { width: auto; } }
+@media (max-width: 760px) {
+  .ts-toggle { display: block; width: 100%; min-height: 44px; margin-bottom: 10px; }
+  .ts-panel { display: none; flex-direction: column; align-items: stretch; }
+  .ts-panel.open { display: flex; }
+  .ts-panel > label, .ts-field { min-width: 0; width: 100%; }
+  .ts-panel input, .ts-panel select, .ts-wide input { width: 100%; min-width: 0; }
+  .ts-actions { flex-direction: column; button { width: 100%; min-height: 44px; } }
+  .ts-bar { flex-direction: column; align-items: stretch; }
+  .ts-sort { width: 100%; min-height: 44px; }
+  .ts-card { overflow-x: visible; padding: 10px; }
+  .ts-table { display: none; }
+  .ts-cards { display: block; }
+  .ts-cards li { padding: 10px 0; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .ts-cards li.struck .ts-l1, .ts-cards li.struck .ts-l2 { text-decoration: line-through; color: var(--muted); }
+  .ts-l1 { display: flex; justify-content: space-between; gap: 8px; b { white-space: nowrap; } }
+  .ts-l2, .ts-l3 { font-size: 13px; overflow-wrap: anywhere; }
+  .ts-l3 { color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  .ts-card-actions:empty { display: none; }
+  .ts-card-actions button.link { min-height: 44px; min-width: 44px; }
+  .ts-pager { button { min-height: 44px; flex: 1; } span { order: 3; width: 100%; text-align: center; } select { order: 4; width: 100%; } }
+}

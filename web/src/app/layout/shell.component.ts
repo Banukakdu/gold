@@ -70,13 +70,20 @@ export class ShellComponent implements OnInit {
   ngOnInit() { this.settings.load(); }
 
   switch(id: string) {
+    // AG-065 S1: the list keeps its URL filters on a branch switch; branches[] applies in All branches mode only, so it
+    // is dropped (with the page) before the switch, and the list reloads for the new branch.
+    if (this.router.url.startsWith('/transactions?') && id !== 'all') {
+      const tree = this.router.parseUrl(this.router.url);
+      if (tree.queryParams['branches'] !== undefined) {
+        const { branches: _b, page: _p, ...rest } = tree.queryParams;
+        this.router.navigate(['/transactions'], { queryParams: rest }).then(() => this.auth.switchBranch(id));
+        return;
+      }
+    }
     this.auth.switchBranch(id);
     // Entry forms and statements need a single branch; send the user back to the dashboard.
     if (this.router.url.includes('/new/') || this.router.url.includes('/statement')) {
       this.router.navigateByUrl('/dashboard');
-    } else if (this.router.url.startsWith('/transactions?')) {
-      // Drill-down filters (branches[], category) belong to the previous branch: start from a plain list.
-      this.router.navigateByUrl('/transactions');
     } else if (this.router.url.startsWith('/audit-log') && !this.auth.can('audit.view')) {
       // audit.view is per branch: leave if the new branch does not grant it.
       this.router.navigateByUrl('/dashboard');

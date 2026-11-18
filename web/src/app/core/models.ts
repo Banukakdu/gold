@@ -43,10 +43,10 @@ export interface Transaction {
   description?: string;
   payee_payer?: string;
   branch?: { code: string; name: string };
-  category?: { name: string; parent?: { name: string } };
+  category?: { name: string; is_active?: boolean; parent?: { name: string; is_active?: boolean } | null };
   account?: { name: string };
-  from_account?: { name: string };
-  to_account?: { name: string };
+  from_account?: { name: string; branch?: { code: string } };
+  to_account?: { name: string; branch?: { code: string } };
   creator?: { id: number; name: string };
   creator_tag?: string | null;
   entries_count?: number;
@@ -55,6 +55,14 @@ export interface Transaction {
   /** AG-062: active attachments, and removed ones (accounting review finding 6). */
   attachments_count?: number;
   attachments_removed_count?: number;
+  /** AG-065 R10: false on an incoming row in branch mode (read-only: actions follow the sending branch). */
+  in_active_branch?: boolean;
+  /** 'in' when the row was received from a branch outside the scope set. */
+  direction?: 'in' | null;
+  reversal_of_id?: number | null;
+  reversal_of_ref?: string | null;
+  reversed_by_ref?: string | null;
+  reversed_by?: { id: number; ref_no: string } | null;
 }
 
 export interface Page<T> {
