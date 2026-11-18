@@ -2,15 +2,34 @@
 
 namespace App\Models;
 
+use App\Exceptions\ImmutableRecordException;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
+/** Read-only once written (AG-090). The database refuses UPDATE/DELETE too (triggers). */
 class AuditLog extends Model
 {
     public const UPDATED_AT = null;
 
     protected $guarded = ['id'];
 
-    protected $casts = ['old_values' => 'array', 'new_values' => 'array'];
+    protected $casts = ['old_values' => 'array', 'new_values' => 'array', 'created_at' => 'datetime'];
+
+    protected static function booted(): void
+    {
+        static::updating(fn () => throw new ImmutableRecordException('Audit log rows cannot be changed.'));
+        static::deleting(fn () => throw new ImmutableRecordException('Audit log rows cannot be deleted.'));
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class);
+    }
+
+    public function branch(): BelongsTo
+    {
+        return $this->belongsTo(Branch::class);
+    }
 
     public static function record(string $event, ?Model $model = null, ?array $old = null, ?array $new = null, ?int $branchId = null): self
     {

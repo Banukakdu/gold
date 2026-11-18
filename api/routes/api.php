@@ -1,10 +1,12 @@
 <?php
 
 use App\Http\Controllers\Api\V1\AccountController;
+use App\Http\Controllers\Api\V1\AuditLogController;
 use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\BranchController;
 use App\Http\Controllers\Api\V1\CategoryController;
 use App\Http\Controllers\Api\V1\DashboardController;
+use App\Http\Controllers\Api\V1\PeriodLockController;
 use App\Http\Controllers\Api\V1\ReportController;
 use App\Http\Controllers\Api\V1\RoleController;
 use App\Http\Controllers\Api\V1\TransactionController;
@@ -71,6 +73,17 @@ Route::prefix('v1')->group(function () {
             Route::post('users/{user}/role', [UserController::class, 'assignRole'])->middleware('perm:user.edit');
             Route::post('users/{user}/remove-from-branch', [UserController::class, 'removeFromBranch'])->middleware('perm:user.edit');
             Route::post('users/{user}/resend-invite', [UserController::class, 'resendInvite'])->middleware('perm:user.edit');
+            // AG-090 audit log (docs/specs/controls.md): read-only, no PUT/PATCH/DELETE routes (AC 28).
+            Route::get('audit-logs', [AuditLogController::class, 'index'])->middleware('perm:audit.view');
+            Route::get('audit-logs/actors', [AuditLogController::class, 'actors'])->middleware('perm:audit.view');
+            Route::post('audit-logs/export', [AuditLogController::class, 'export'])->middleware('perm:audit.view');
+
+            // AG-091 period locks: Super Admin only; an unlock keeps the row as history.
+            Route::get('period-locks', [PeriodLockController::class, 'index'])->middleware('super');
+            Route::get('period-locks/review', [PeriodLockController::class, 'review'])->middleware('super');
+            Route::post('period-locks', [PeriodLockController::class, 'store'])->middleware('super');
+            Route::post('period-locks/{periodLock}/unlock', [PeriodLockController::class, 'unlock'])->middleware('super');
+
             // Nothing is hard-deleted: there is deliberately no DELETE route for users, roles or templates (AC 27).
         });
     });

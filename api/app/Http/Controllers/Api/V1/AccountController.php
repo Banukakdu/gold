@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Account;
 use App\Models\AuditLog;
 use App\Models\LedgerEntry;
+use App\Models\Transaction;
 use App\Support\BranchContext;
 use App\Support\Money;
 use Illuminate\Http\Request;
@@ -65,27 +66,42 @@ class AccountController extends Controller
         return $account;
     }
 
-    /** AG-032: statement with opening balance, running balance and closing balance. */
+    /**
+     * AG-032: statement with opening balance, running balance and closing balance.
+     * Controls R3: lines of voided entries (original + contra, same date) are left out unless include_voided=1.
+     * Opening and closing are the same either way, because a void nets to zero on its own date.
+     */
     public function statement(Request $request, Account $account)
     {
-        $data = $request->validate(['from' => 'required|date', 'to' => 'required|date|after_or_equal:from']);
+        $data = $request->validate(['from' => 'required|date', 'to' => 'required|date|after_or_equal:from', 'include_voided' => 'nullable|boolean']);
+        $withVoided = (bool) ($data['include_voided'] ?? false);
 
         $opening = (string) LedgerEntry::where('account_id', $account->id)->whereDate('entry_date', '<', $data['from'])
             ->selectRaw('COALESCE(SUM(debit - credit),0) b')->value('b');
 
-        $entries = LedgerEntry::with('transaction:id,ref_no,type,description,payee_payer,category_id')
+        $entries = LedgerEntry::with('transaction:id,ref_no,type,status,description,payee_payer,category_id')
             ->where('account_id', $account->id)->whereDate('entry_date', '>=', $data['from'])->whereDate('entry_date', '<=', $data['to'])
+            ->when(! $withVoided, fn ($q) => $q->whereHas('transaction', fn ($t) => $t->where('status', '!=', 'void')))
             ->orderBy('entry_date')->orderBy('id')->get();
 
+        $reasons = $entries->whereNotNull('contra_of_id')->isEmpty() ? collect() : AuditLog::where('event', 'transaction.voided')
+            ->where('auditable_type', Transaction::class)->whereIn('auditable_id', $entries->whereNotNull('contra_of_id')->pluck('transaction_id')->unique())
+            ->get()->mapWithKeys(fn ($a) => [$a->auditable_id => $a->new_values['reason'] ?? null]);
+
         $running = Money::toCents($opening);
-        $rows = $entries->map(function ($e) use (&$running) {
+        $rows = $entries->map(function ($e) use (&$running, $reasons) {
             $running += Money::toCents($e->debit) - Money::toCents($e->credit);
+            $contra = $e->contra_of_id !== null;
 
             return [
                 'date' => $e->entry_date->format('Y-m-d'),
                 'ref_no' => $e->transaction->ref_no,
                 'type' => $e->transaction->type,
-                'description' => $e->transaction->description ?? $e->transaction->payee_payer,
+                'status' => $e->transaction->status,
+                'contra' => $contra,
+                'description' => $contra
+                    ? trim("Void of {$e->transaction->ref_no}: ".($reasons[$e->transaction_id] ?? ''), ': ')
+                    : ($e->transaction->description ?? $e->transaction->payee_payer),
                 'in' => $e->debit,
                 'out' => $e->credit,
                 'balance' => Money::fromCents($running),
@@ -95,6 +111,7 @@ class AccountController extends Controller
         return [
             'account' => $account->load('branch:id,code,name'),
             'from' => $data['from'], 'to' => $data['to'],
+            'include_voided' => $withVoided,
             'opening_balance' => Money::add($opening),
             'entries' => $rows,
             'closing_balance' => Money::fromCents($running),

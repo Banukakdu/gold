@@ -13,6 +13,7 @@ use App\Services\LedgerService;
 use App\Support\BranchContext;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 
 class TransactionController extends Controller
 {
@@ -59,8 +60,9 @@ class TransactionController extends Controller
             ->when($f['max'] ?? null, fn ($q, $v) => $q->where('amount', '<=', $v))
             ->when($f['q'] ?? null, fn ($q, $v) => $q->where(fn ($w) => $w->where('ref_no', 'like', "%$v%")->orWhere('description', 'like', "%$v%")->orWhere('payee_payer', 'like', "%$v%")->orWhere('reference', 'like', "%$v%")));
 
-        $page = $q->paginate($f['per_page'] ?? 25);
+        $page = $q->withCount('entries')->paginate($f['per_page'] ?? 25);
         $this->tagAuthors($page->getCollection());
+        $this->markLegacyVoids($page->getCollection());
 
         return $page;
     }
@@ -68,7 +70,9 @@ class TransactionController extends Controller
     public function show(Transaction $transaction)
     {
         $transaction->load(['entries', 'branch', 'category.parent', 'account', 'fromAccount.branch', 'toAccount.branch', 'creator:id,name,status,is_super_admin']);
+        $transaction->setAttribute('entries_count', $transaction->entries->count());
         $this->tagAuthors(collect([$transaction]));
+        $this->markLegacyVoids(collect([$transaction]));
 
         return $transaction;
     }
@@ -104,14 +108,18 @@ class TransactionController extends Controller
     public function update(Request $request, Transaction $transaction)
     {
         abort_unless(in_array($transaction->type, [Transaction::INCOME, Transaction::EXPENSE]) && $transaction->status === 'posted', 422, 'This entry cannot be edited.');
-        abort_if(PeriodLock::isLocked($transaction->branch_id, $transaction->txn_date->format('Y-m-d')), 422, 'The period is locked.');
+        $date = $transaction->txn_date->format('Y-m-d');
+        abort_if(PeriodLock::isLocked($transaction->branch_id, $date), 422, 'The period '.substr($date, 0, 7).' is locked.');
         $request->user()->canDo("{$transaction->type}.edit") || abort(403, "Missing permission: {$transaction->type}.edit");
 
         $data = $request->validate([
             'payee_payer' => 'nullable|string|max:255', 'payment_method' => 'nullable|string|max:30',
             'reference' => 'nullable|string|max:255', 'description' => 'nullable|string|max:2000',
-            'category_id' => 'sometimes|exists:categories,id',
-        ]);
+            // Controls R5: an active category of the same type, global or of the entry's branch.
+            'category_id' => ['sometimes', 'integer', Rule::exists('categories', 'id')
+                ->where('type', $transaction->type)->where('is_active', true)
+                ->where(fn ($q) => $q->whereNull('branch_id')->orWhere('branch_id', $transaction->branch_id))],
+        ], ['category_id.exists' => "Choose an active {$transaction->type} category of this branch."]);
         $old = $transaction->only(array_keys($data));
         $transaction->update($data);
         AuditLog::record('transaction.updated', $transaction, $old, $data);
@@ -121,6 +129,10 @@ class TransactionController extends Controller
 
     public function void(Request $request, Transaction $transaction)
     {
+        // Type first: transfers have no *.void permission, and the answer for them is "use reverse" (AC 5).
+        if (! in_array($transaction->type, [Transaction::INCOME, Transaction::EXPENSE], true)) {
+            return response()->json(['message' => 'Only income and expense entries can be voided. Use reverse for transfers.'], 422);
+        }
         $request->user()->canDo("{$transaction->type}.void") || abort(403, "Missing permission: {$transaction->type}.void");
 
         return $this->ledger->void($transaction, $request->validate(['reason' => 'required|string|max:500'])['reason']);
@@ -140,6 +152,18 @@ class TransactionController extends Controller
             }
             $t->setAttribute('creator_tag', $tag);
         }
+    }
+
+    /** Controls S4 / R6: a void with no ledger lines was voided before contra entries existed. */
+    private function markLegacyVoids($txns): void
+    {
+        $legacy = $txns->filter(fn ($t) => $t->status === 'void' && (int) $t->entries_count === 0);
+        if ($legacy->isEmpty()) {
+            return;
+        }
+        $since = AuditLog::where('event', 'ledger.legacy_voids_identified')->oldest('id')->value('created_at');
+        $note = 'Voided before '.($since ? substr((string) $since, 0, 10) : 'the ledger change').'; ledger lines were not kept.';
+        $legacy->each(fn ($t) => $t->setAttribute('legacy_void_note', $note));
     }
 
     /** @return array<string, true> keyed "user_id:branch_id" */

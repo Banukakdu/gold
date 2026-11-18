@@ -100,9 +100,11 @@ class AccessAuditTest extends UsersAndRolesTestCase
         $this->assertSame(['status' => 'inactive'], $row->new_values);
         $this->assertSame($this->kdy->id, $row->branch_id);
 
+        // Read-only: GET, plus POST only for the Excel export (controls spec section 5); never PUT/PATCH/DELETE.
         foreach (Route::getRoutes() as $r) {
             if (str_contains($r->uri(), 'audit')) {
-                $this->assertSame(['GET', 'HEAD'], $r->methods());
+                $expected = str_ends_with($r->uri(), 'audit-logs/export') ? ['POST'] : ['GET', 'HEAD'];
+                $this->assertSame($expected, $r->methods());
             }
         }
     }

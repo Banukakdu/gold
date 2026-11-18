@@ -28,7 +28,7 @@ use RuntimeException;
  *  - a reversal (type `reversal`, `reversal_of_id` -> original) counts on its own date in the ORIGINAL's
  *    column with the opposite sign. For ledger entries this means: classify by the original's type and by the
  *    side the original entry had on that account (the reversal entry sits on the other side), amount negated.
- *  - voided entries have no ledger entries and their transaction status is `void`: never counted.
+ *  - voided entries net to zero (contra entries on the original date) and are excluded by status: never counted.
  *
  * LedgerEntry has no branch scope and a transfer's `transactions.branch_id` is the sending branch, so every query
  * here runs on the query builder (no global scopes) and filters on the branch set resolved in params().
@@ -157,20 +157,19 @@ class ReportService
         ];
     }
 
-    /** Finding 7: true when any month in the range is not locked for any branch in scope. */
+    /**
+     * Finding 7: true when any month in the range is not locked for any branch in scope.
+     * Locks are cumulative (controls review finding 1): a month is locked for B when an active lock for B or for all
+     * branches exists for that month or a later one.
+     */
     public function provisional(ReportParams $p): bool
     {
-        $months = [];
-        for ($m = CarbonImmutable::parse($p->from)->startOfMonth(); $m->format('Y-m') <= substr($p->to, 0, 7); $m = $m->addMonth()) {
-            $months[] = $m->format('Y-m');
-        }
-        $locks = PeriodLock::whereIn('period', $months)->get(['branch_id', 'period']);
-        foreach ($months as $month) {
-            $global = $locks->where('period', $month)->whereNull('branch_id')->isNotEmpty();
-            foreach ($p->branchIds() as $id) {
-                if (! $global && $locks->where('period', $month)->where('branch_id', $id)->isEmpty()) {
-                    return true;
-                }
+        $through = PeriodLock::closedThrough();
+        $last = substr($p->to, 0, 7);
+        foreach ($p->branchIds() as $id) {
+            $closed = max((string) $through['global'], (string) ($through['branches'][$id] ?? ''));
+            if ($closed < $last) {
+                return true;
             }
         }
 
