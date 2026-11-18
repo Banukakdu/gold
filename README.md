@@ -85,6 +85,28 @@ streamed by the API after an access check.
 6. Rolling back the migration is refused once any attachment exists (rows and files are evidence); restore a backup
    taken before the migration instead.
 
+### Deploying the double-entry release (chart of accounts, balanced postings, trial balance)
+
+The migrations `2026_11_22_000000_double_entry_schema` and `2026_11_22_000001_double_entry_backfill` add the chart of
+accounts to `accounts` (codes, classes, category accounts, Owner's capital in MAIN, head office / branch current
+accounts), a `ledger_entries_line_check` trigger (same MySQL trigger privilege as above) and the missing lines of every
+existing entry, so each entry balances in total and per branch. Cash, bank and wallet balances do not change, and
+neither do the existing reports. Take a database backup first: the back-fill cannot be rolled back once it has run.
+
+1. **Before:** `php artisan ledger:verify`; it must pass. The schema migration also refuses to start (before any change)
+   if a balance differs from the ledger, a line breaks the line rules, or an income/expense has no category.
+2. **Dry run:** `php artisan ledger:backfill-double-entry --dry-run`. It works on the old schema and writes nothing. It
+   lists the lines to add by type and branch, the locked months that get lines, and a sample of 20 entries. The
+   accountant reviews and signs the output; keep it with the deploy record.
+3. `php artisan down`, then `php artisan migrate --force` (chart and back-fill; one `ledger.double_entry_backfilled`
+   audit row per run). If it stops half-way, fix the reported entry and run `php artisan ledger:backfill-double-entry`:
+   it completes the rest and never adds lines twice.
+4. **After:** `php artisan ledger:verify`; it must pass, including the new checks V1-V6 (every entry balanced, line
+   rules, trial balance nets to zero, inter-branch pairs eliminate, category accounts agree with the Income &
+   Expense report, back-fill complete).
+5. `php artisan up`, only after step 4 passes. Then print the last month's trial balance (Reports > Trial balance,
+   Consolidated) for the accountant.
+
 ## How it works
 
 **Branch context.** The app sends the active branch in an `X-Branch-Id` header. Middleware checks the user belongs
@@ -97,7 +119,8 @@ from those permissions. Roles with `branch_id = NULL` are global templates (Bran
 Nobody can grant a permission they don't hold.
 
 **Money.** All postings go through `app/Services/LedgerService.php`:
-each transaction writes balanced ledger entries (debit = money in, credit = money out) inside one DB transaction with
+each transaction writes full double entry against the branch's chart of accounts (balanced in total and per branch;
+on a cash, bank or wallet account debit = money in, credit = money out) inside one DB transaction with
 row locks on the accounts, updates the cached `accounts.current_balance`, and writes an audit log. Nothing is deleted:
 income/expense entries are voided, transfers are reversed. Locked periods (`period_locks`) reject postings.
 Amounts are handled as integer cents (`app/Support/Money.php`), never floats.
@@ -122,6 +145,7 @@ All under `/api/v1`, bearer token from `POST auth/login`, plus `X-Branch-Id`.
 `POST incomes` · `POST expenses` · `POST capital` · `POST allocations` · `POST transfers` ·
 `GET|POST transactions/{id}/attachments` · `GET transactions/{id}/attachments/{attachment}/download` ·
 `POST transactions/{id}/attachments/{attachment}/remove` ·
+`GET chart-of-accounts` · `GET reports/trial-balance` · `POST reports/trial-balance/export` ·
 `GET permissions` · `GET|POST roles` · `PUT roles/{id}` · `GET|POST users` · `PUT users/{id}` · `POST users/{id}/role`
 
 ## Status against the backlog (docs/Account-gold_Product_Backlog.xlsx)
