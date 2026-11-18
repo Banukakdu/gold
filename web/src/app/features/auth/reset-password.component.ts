@@ -53,6 +53,7 @@ export class ResetPasswordComponent {
   }
 
   submit() {
+    if (this.busy()) return; // QA Q1: a double click sends one request
     this.error.set('');
     this.passwordError.set('');
     if (this.password !== this.confirm) { this.passwordError.set('The passwords do not match.'); return; }

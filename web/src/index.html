@@ -5,6 +5,9 @@
   <title>Account-gold</title>
   <base href="/">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Password reset spec 4.3 / reviewer R5: in the first HTML, so no request made while a page with a reset or
+       invitation token in its address can send it as a Referer. Serve a Referrer-Policy header too (README). -->
+  <meta name="referrer" content="no-referrer">
   <link rel="icon" type="image/x-icon" href="favicon.ico">
 </head>
 <body>

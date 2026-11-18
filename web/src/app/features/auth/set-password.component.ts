@@ -46,6 +46,7 @@ export class SetPasswordComponent {
   }
 
   submit() {
+    if (this.busy()) return; // QA Q1: a double click sends one request
     if (this.password !== this.confirm) { this.error.set('The passwords do not match.'); return; }
     this.busy.set(true);
     this.error.set('');

@@ -48,6 +48,7 @@ export class ForgotPasswordComponent {
   }
 
   send() {
+    if (this.busy()) return; // QA Q1: a double click sends one request
     const email = this.sentTo() || this.email.trim();
     this.busy.set(true);
     this.error.set('');

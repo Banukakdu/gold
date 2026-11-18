@@ -1,17 +1,15 @@
-import { DestroyRef, afterNextRender, inject } from '@angular/core';
+import { afterNextRender, inject } from '@angular/core';
 import { Location } from '@angular/common';
-import { Meta } from '@angular/platform-browser';
 import { HttpErrorResponse } from '@angular/common/http';
 
 /**
- * Password reset spec 4.3 link safety (also /set-password, Q6): no Referer header while the page is open, and the
- * token is removed from the address bar once read. Call in a component's constructor or field initialiser.
+ * Password reset spec 4.3 link safety (also /set-password, Q6): the token is removed from the address bar once read.
+ * "No Referer" is not set here: that is too late for requests made while the app loads (reviewer R5), so it is in
+ * index.html (<meta name="referrer" content="no-referrer">) and in the host's Referrer-Policy header (README).
+ * Call in a component's constructor or field initialiser.
  */
 export function protectTokenLink(): void {
-  const meta = inject(Meta);
   const location = inject(Location);
-  meta.updateTag({ name: 'referrer', content: 'no-referrer' });
-  inject(DestroyRef).onDestroy(() => meta.removeTag('name="referrer"'));
 
   // After the first render, so the router has already written the navigated URL that we now replace.
   afterNextRender(() => {
