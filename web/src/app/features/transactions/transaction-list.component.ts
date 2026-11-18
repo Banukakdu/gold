@@ -77,13 +77,17 @@ export class TransactionListComponent implements OnInit {
   ngOnInit() {
     this.load(1);
     // "Created by" keeps former members (accounting review finding 3).
-    this.http.get<{ id: number; name: string; tag: string | null }[]>('/api/v1/transactions/creators').subscribe(c => this.creators.set(c));
+    this.http.get<{ id: number; name: string; tag: string | null }[]>('/api/v1/transactions/creators').subscribe({
+      next: c => this.creators.set(c), error: () => this.creators.set([]) });
   }
 
   load(p: number) {
     let params = new HttpParams().set('page', p);
     for (const [k, v] of Object.entries(this.f)) if (v) params = params.set(k, v);
-    this.http.get<Page<Transaction>>('/api/v1/transactions', { params }).subscribe(r => this.page.set(r));
+    this.http.get<Page<Transaction>>('/api/v1/transactions', { params }).subscribe({
+      next: r => { this.page.set(r); this.msg.set(''); },
+      error: e => this.msg.set(errorText(e)), // 401 is handled by the interceptor (back to login)
+    });
   }
 
   label(t: string) { return TYPE_LABELS[t] ?? t; }

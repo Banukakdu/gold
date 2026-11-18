@@ -77,6 +77,8 @@ export interface UserRow {
   last_login_at: string | null;
   memberships: Membership[];
   roles_in_branch?: string[];
+  /** Detail only: why the actor cannot change profile/status/invitation (B5, B6, B2), or null. */
+  profile_locked_reason?: string | null;
 }
 
 export interface RoleRow {

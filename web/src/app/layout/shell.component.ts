@@ -27,10 +27,11 @@ import { AuthService } from '../core/auth.service';
         <header class="top">
           <label class="switcher">
             <span>Branch</span>
-            <select [value]="auth.activeBranchId()" (change)="switch($any($event.target).value)">
-              @if (auth.isSuperAdmin()) { <option value="all">All branches</option> }
+            <!-- [selected] per option: the options render after /me loads, so [value] on the select alone is lost on reload -->
+            <select (change)="switch($any($event.target).value)">
+              @if (auth.isSuperAdmin()) { <option value="all" [selected]="auth.activeBranchId() === 'all'">All branches</option> }
               @for (b of auth.me()?.branches; track b.id) {
-                <option [value]="b.id">{{ b.code }} · {{ b.name }}</option>
+                <option [value]="b.id" [selected]="auth.activeBranchId() === '' + b.id">{{ b.code }} · {{ b.name }}</option>
               }
             </select>
           </label>

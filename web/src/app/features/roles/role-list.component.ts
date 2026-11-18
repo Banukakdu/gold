@@ -29,7 +29,7 @@ import { errorText } from '../../core/api.interceptor';
                 <td class="num">{{ r.permissions.length }}</td>
                 <td class="num">{{ r.users_count }}</td>
                 <td><span class="tag" [attr.data-s]="r.status">{{ r.status === 'inactive' ? 'Role inactive' : 'active' }}</span></td>
-                <td><a [routerLink]="['/roles', r.id]">{{ auth.can('role.manage') ? 'Edit' : 'View' }}</a></td>
+                <td><a [routerLink]="['/roles', r.id]">{{ canEdit(r) ? 'Edit' : 'View' }}</a></td>
               </tr>
             } @empty {
               <tr><td colspan="5" class="muted">
@@ -82,6 +82,9 @@ export class RoleListComponent implements OnInit {
   });
 
   ngOnInit() { this.load(); }
+
+  /** Same rule as the editor and the API: role.manage and no permission the actor lacks. */
+  canEdit(r: RoleRow) { return this.auth.can('role.manage') && r.permissions.every(p => this.auth.can(p)); }
 
   load() {
     this.http.get<RoleRow[]>('/api/v1/roles').subscribe({ next: r => this.roles.set(r), error: e => this.error.set(errorText(e)) });

@@ -30,6 +30,7 @@ import { errorText } from '../../core/api.interceptor';
         <label>Phone <input name="phone" [(ngModel)]="p.phone" [disabled]="!canEdit(u)" maxlength="30" /></label>
         <label>Status <span><span class="tag" [attr.data-s]="u.status">{{ u.status }}</span></span></label>
         <label>Last login <span>{{ u.last_login_at ? (u.last_login_at | date: 'd MMM y, HH:mm') : 'Invitation pending' }}</span></label>
+        @if (auth.can('user.edit') && u.profile_locked_reason) { <p class="muted wide">{{ u.profile_locked_reason }}</p> }
         @if (canEdit(u)) {
           <div class="wide actions" style="gap: 8px">
             @if (!u.last_login_at && u.status === 'active') { <button type="button" class="ghost" (click)="resend(u)">Resend invitation</button> }
@@ -51,8 +52,8 @@ import { errorText } from '../../core/api.interceptor';
                 <td>{{ m.branch_code }} · {{ m.branch_name }}</td>
                 <td>
                   @if (editing() === m.branch_id) {
-                    <select [(ngModel)]="newRoleId" name="r{{ m.branch_id }}">
-                      @for (r of branchRoles(); track r.id) { <option [ngValue]="r.id">{{ r.name }}</option> }
+                    <select [(ngModel)]="changeRoleId" name="r{{ m.branch_id }}">
+                      @for (r of changeRoles(); track r.id) { <option [ngValue]="r.id">{{ r.name }}</option> }
                     </select>
                   } @else { {{ m.role_name ?? '—' }} }
                 </td>
@@ -75,14 +76,14 @@ import { errorText } from '../../core/api.interceptor';
         @if (auth.isSuperAdmin() && !u.is_super_admin) {
           <h2>Add to branch</h2>
           <form class="filters" (ngSubmit)="addToBranch(u)">
-            <select name="add_branch" [(ngModel)]="addBranchId" (ngModelChange)="loadRoles($event)">
+            <select name="add_branch" [(ngModel)]="addBranchId" (ngModelChange)="loadAddRoles($event)">
               <option [ngValue]="null">Pick a branch</option>
               @for (b of otherBranches(u); track b.id) { <option [ngValue]="b.id">{{ b.code }} · {{ b.name }}</option> }
             </select>
-            <select name="add_role" [(ngModel)]="newRoleId" [disabled]="!addBranchId">
-              @for (r of branchRoles(); track r.id) { <option [ngValue]="r.id">{{ r.name }}</option> }
+            <select name="add_role" [(ngModel)]="addRoleId" [disabled]="!addBranchId">
+              @for (r of addRoles(); track r.id) { <option [ngValue]="r.id">{{ r.name }}</option> }
             </select>
-            <button type="submit" [disabled]="!addBranchId || !newRoleId">Add to branch</button>
+            <button type="submit" [disabled]="!addBranchId || !addRoleId">Add to branch</button>
           </form>
         }
       </div>
@@ -99,8 +100,11 @@ export class UserDetailComponent implements OnInit {
   ok = signal('');
   errors = signal<Record<string, string>>({});
   editing = signal<number | null>(null);
-  branchRoles = signal<RoleRow[]>([]);
-  newRoleId: number | null = null;
+  /** Each form has its own branch-specific role options. */
+  changeRoles = signal<RoleRow[]>([]);
+  addRoles = signal<RoleRow[]>([]);
+  changeRoleId: number | null = null;
+  addRoleId: number | null = null;
   addBranchId: number | null = null;
   p = { name: '', email: '', phone: '' };
 
@@ -114,7 +118,7 @@ export class UserDetailComponent implements OnInit {
   }
 
   /** Profile edits: the API also enforces B5 (shared users) and B6 (Super Admin). */
-  canEdit(u: UserRow) { return this.auth.can('user.edit') && (!u.is_super_admin || this.auth.isSuperAdmin()); }
+  canEdit(u: UserRow) { return this.auth.can('user.edit') && !u.profile_locked_reason; }
 
   canManage(u: UserRow, m: Membership) {
     if (u.id === this.auth.me()?.id || (u.is_super_admin && !this.auth.isSuperAdmin())) return false;
@@ -128,28 +132,37 @@ export class UserDetailComponent implements OnInit {
   /** Requests about one membership run in that branch's context. */
   private h(branchId: number) { return { headers: new HttpHeaders({ 'X-Branch-Id': String(branchId) }) }; }
 
-  loadRoles(branchId: number | null) {
-    this.branchRoles.set([]);
-    this.newRoleId = null;
-    if (!branchId) return;
+  /** Assignable roles of one branch: active, not templates, nothing the actor lacks. */
+  private rolesOf(branchId: number, into: (rs: RoleRow[]) => void) {
     this.http.get<RoleRow[]>('/api/v1/roles', this.h(branchId)).subscribe({
-      next: rs => this.branchRoles.set(rs.filter(r => !r.is_template && r.status === 'active' && r.permissions.every(p => this.auth.can(p)))),
+      next: rs => into(rs.filter(r => !r.is_template && r.status === 'active' && r.permissions.every(p => this.auth.can(p)))),
       error: e => this.error.set(errorText(e)),
     });
   }
 
-  startChange(branchId: number) { this.editing.set(branchId); this.loadRoles(branchId); }
+  loadAddRoles(branchId: number | null) {
+    this.addRoles.set([]);
+    this.addRoleId = null;
+    if (branchId) this.rolesOf(branchId, rs => this.addRoles.set(rs));
+  }
+
+  startChange(branchId: number) {
+    this.editing.set(branchId);
+    this.changeRoles.set([]);
+    this.changeRoleId = null;
+    this.rolesOf(branchId, rs => { if (this.editing() === branchId) this.changeRoles.set(rs); });
+  }
 
   saveRole(u: UserRow, branchId: number) {
-    if (!this.newRoleId) return;
-    this.http.post(`/api/v1/users/${u.id}/role`, { role_id: this.newRoleId }, this.h(branchId)).subscribe({
+    if (!this.changeRoleId) return;
+    this.http.post(`/api/v1/users/${u.id}/role`, { role_id: this.changeRoleId }, this.h(branchId)).subscribe({
       next: () => { this.editing.set(null); this.done('Role changed.'); }, error: e => this.fail(e) });
   }
 
   addToBranch(u: UserRow) {
-    if (!this.addBranchId || !this.newRoleId) return;
-    this.http.post(`/api/v1/users/${u.id}/role`, { role_id: this.newRoleId }, this.h(this.addBranchId)).subscribe({
-      next: () => { this.addBranchId = null; this.done('Added to branch.'); }, error: e => this.fail(e) });
+    if (!this.addBranchId || !this.addRoleId) return;
+    this.http.post(`/api/v1/users/${u.id}/role`, { role_id: this.addRoleId }, this.h(this.addBranchId)).subscribe({
+      next: () => { this.loadAddRoles(null); this.addBranchId = null; this.done('Added to branch.'); }, error: e => this.fail(e) });
   }
 
   remove(u: UserRow, m: Membership) {

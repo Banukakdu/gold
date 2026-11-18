@@ -138,7 +138,11 @@ export class RoleEditorComponent implements OnInit {
   }
 
   grantable(keys: string[]) { return keys.filter(k => this.auth.can(k)); }
-  allIn(keys: string[]) { return keys.every(k => this.selected().has(k)); }
+  /** "Select all" is checked only when every key the actor may grant in that module is ticked. */
+  allIn(keys: string[]) {
+    const g = this.grantable(keys);
+    return g.length > 0 && g.every(k => this.selected().has(k));
+  }
 
   toggle(k: string, on: boolean) {
     const s = new Set(this.selected());
