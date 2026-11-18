@@ -43,7 +43,7 @@ Actions: sub-category amount = drill-down link (F3). Empty: "No income or expens
 
 ### 4.3 Branch Comparison `/reports/branch-comparison` (AG-083)
 Filters: Period type (Month default / Quarter / Year / Custom) with month picker (YYYY-MM), quarter (Q1-Q4 + year), year, or From/To. Client converts to `from`/`to` (calendar year). Branches.
-Table: one row per branch (Main first, then by code): Branch | Opening balance | Funds received | Income | Expenses | Transfers in | Transfers out | Closing balance; footer "Total". Inactive branches tagged. Note under table: "Closing = Opening + Funds received + Income - Expenses + Transfers in - Transfers out. Internal transfers between accounts of the same branch are not shown."
+Table: one row per branch (Main first, then by code): Branch | Opening balance | Capital introduced | Funds received | Income | Expenses | Transfers in | Transfers out | Closing balance; footer "Total". Inactive branches tagged. Note under table: "Closing = Opening + Capital introduced + Funds received + Income - Expenses + Transfers in - Transfers out. Internal transfers between accounts of the same branch are not shown."
 Empty: "No branches to show."
 
 ### 4.4 Transfers & Allocations `/reports/transfers` (AG-084)
@@ -88,7 +88,7 @@ PDF/Excel header: company name `Setting::get('company_name', config('app.name'))
 - **R2 What counts.** Transactions with status `posted` or `reversed`, plus their `reversal` transactions (`posted`). Voided entries have no ledger entries and are excluded everywhere. Future `pending`/`rejected` never count.
 - **R3 Reversals net out.** Original counts on its date in its column; the reversal counts on the reversal date in **the original's column with opposite sign** (reversal of income = negative income; reversal of a GAL->KDY transfer = -amount in the GAL->KDY cell, not +amount KDY->GAL). Same period nets to 0; across periods each period shows its part (totals may be negative).
 - **R4 Income & Expense** uses only `income`, `expense` and reversals of them, by `txn_date`, grouped by `category_id` (parent = Category, child = Sub-category). Capital, allocations, returns, branch and internal transfers are never income/expense. Percent = amount / type total x 100, half-up to 1 decimal from cents; `null` ("—") when type total <= 0; percents may not add to exactly 100.0. A line shows if any counted transaction hit it in the period, even if it nets to 0.00.
-- **R5 Branch Comparison** from each branch's ledger entries (`entry_date`): Opening = SUM(debit - credit) before `from`; Funds received = debits of `capital`, `opening_allocation`, `fund_allocation`; Income = debits of `income`; Expenses = credits of `expense`; Transfers in = debits of `branch_transfer`, `fund_return`; Transfers out = credits of `opening_allocation`, `fund_allocation`, `fund_return`, `branch_transfer`; `internal_transfer` not shown (nets 0 in branch); reversal entries per R3. Closing = Opening + Funds received + Income - Expenses + Transfers in - Transfers out and **must equal** SUM(debit - credit) up to `to` (server asserts; mismatch = 500 + log). All accounts incl. inactive.
+- **R5 Branch Comparison** from each branch's ledger entries (`entry_date`): Opening = SUM(debit - credit) before `from`; Capital introduced = debits of `capital`; Funds received = debits of `opening_allocation`, `fund_allocation`; Income = debits of `income`; Expenses = credits of `expense`; Transfers in = debits of `branch_transfer`, `fund_return`; Transfers out = credits of `opening_allocation`, `fund_allocation`, `fund_return`, `branch_transfer`; `internal_transfer` not shown (nets 0 in branch); reversal entries per R3. Closing = Opening + Capital introduced + Funds received + Income - Expenses + Transfers in - Transfers out and **must equal** SUM(debit - credit) up to `to` (server asserts; mismatch = 500 + log). All accounts incl. inactive.
 - **R6 Transfers & Allocations** lists `opening_allocation`, `fund_allocation` (label "Top-up"), `fund_return`, `branch_transfer` and their reversals; `internal_transfer`, `capital` excluded. Net moved = originals - reversals. Matrix (A,B) = originals A->B minus reversals of A->B originals.
 - **R7 Cash Book** from ledger entries per account: Receipts = SUM(debit), Payments = SUM(credit) per `entry_date`; reversal entries appear gross on their date, matching `GET /accounts/{id}/statement`.
 - **R8** Money in integer cents via `Money`, no floats; dates with `whereDate`. Deactivated branches, accounts, categories stay in reports. Single currency (LKR).
@@ -123,7 +123,7 @@ October 2026: (1) 10-01 Income KDY Cash Retail 50,000.00 (2) 10-02 Income KDY Ca
 8. Given a Cashier, When calling any `/v1/reports/*`, Then 403, and the Reports menu is hidden.
 9. Given a Viewer, When opening a report, Then data loads, export buttons are hidden, and POST export returns 403.
 10. Given the E-1 screen, When clicking Retail 79,000.00, Then `/transactions` opens filtered (Retail, 2026-10-01..31, types income + reversal, same branches) and lists entries (1), (5), (13) totalling 79,000.00; clicking Service income "(no sub-category)" lists only entry (2).
-11. Given All mode, When branch-comparison runs for October, Then rows and Total equal E-2, and each row satisfies Closing = Opening + Funds received + Income - Expenses + Transfers in - Transfers out.
+11. Given All mode, When branch-comparison runs for October, Then rows and Total equal E-2, and each row satisfies Closing = Opening + Capital introduced + Funds received + Income - Expenses + Transfers in - Transfers out.
 12. Given E-2, When each branch's closing is compared with the sum of its accounts' statement closings at 2026-10-31, Then they match (MAIN 620,000.00; KDY 254,300.00 + 40,000.00; GAL 137,200.00).
 13. Given Period = Quarter Q4 2026, When applied, Then the request uses from=2026-10-01, to=2026-12-31; Year 2026 = 2026-01-01..2026-12-31; Month 2026-02 = 2026-02-01..2026-02-28.
 14. Given a deactivated branch with history, When branch-comparison runs in All mode, Then it is listed with tag "Inactive" and its figures.
@@ -143,7 +143,7 @@ October 2026: (1) 10-01 Income KDY Cash Retail 50,000.00 (2) 10-02 Income KDY Ca
 - Q1 The dashboard drops `reversed` originals entirely; should it follow R3? Assumed: dashboard unchanged here; numbers differ only for cross-period reversals.
 - Q2 Transfer approval / receipt acknowledgement is not built (LedgerService always posts). Assumed: status shows Posted / Reversed / Reversal only; Pending and In transit come with those stories and never count in totals.
 - Q3 Cash book shows reversals gross (receipt and payment) rather than hiding the pair. Assumed gross, to match the statement and the cash count; accountant to confirm.
-- Q4 Main branch "Funds received" includes Capital. Assumed yes, so the Total row reconciles (Funds + In - Out = Capital in period).
+- Q4 Resolved by the Accounting review (finding 2): Capital has its own "Capital introduced" column; across all branches Funds received + Transfers in - Transfers out = 0.00. E-2 figures are unchanged (Capital 0.00 in October).
 - Q5 Year and quarter use the calendar year until the fiscal-year setting (AG-092) exists.
 - Q6 Mixed currencies: assumed all accounts are LKR; no conversion.
 - Q7 Exports are synchronous with a 5,000-row cap for Excel and a 1,000-row cap for PDF (PDF rendering is memory-heavy); above it the user switches to Excel or narrows filters until AG-087 (queued exports) ships.
@@ -186,3 +186,38 @@ Reviewed by the accountant against `LedgerService` as it stands (reversal = tran
 32. Given October not locked for GAL, When any report covering GAL in October runs or is exported, Then "PROVISIONAL - period not locked" is shown; after October is locked for all branches in scope, it is not.
 33. Given the KDY Cash book 10-12..10-16, Then the 10-12 line shows "(reversed by <ref>)", the 10-14 line "Reversal of <ref>", and receipts 15,000.00 / payments 15,000.00 for the period.
 34. Given GAL income in November of Retail -4,000.00 and Service income 12,500.00, When income-expense runs, Then total 8,500.00, Retail -47.1 %, Service income 147.1 %.
+
+## Accountant sign-off
+Checked on branch `feature/reports` (HEAD `ddf729f`) against the Accounting review above. `php artisan test`: 103 passed (1,229 assertions, in-memory DB); `pint --test` passed. QA: 33/34 ACs passed in browser and in the downloaded files with all E-1..E-4 figures matching; the one failure (AC 22, PDF performance) is fixed by the 1,000-row PDF cap (`ReportService::PDF_EXPORT_CAP`, `ReportExporter::download` + `raisePdfLimits`; tests `test_ac22_pdf_cap`, `test_ac22_row_cap`). Role templates as delivered match section 2 (`PermissionSeeder.php:28-35`: Accountant view+export, Viewer view only, Cashier neither).
+
+### Findings
+| # | Finding | Result | Evidence |
+|---|---|---|---|
+| 1 | MUST reversal classified by the original | DONE | `ReportService.php:290-300` (comparison: original's type via `COALESCE(o.type, t.type)`, reversal debit/credit swapped and negated); `:187-191` (I&E: original's category, negated); `:380-382` (matrix: reversal keeps original's `branch_id`/`related_branch_id`, `LedgerService.php:143-148`, negated). Tests `test_ac26_reversal_is_classified_by_the_original` (incl. expense and cross-period income reversals), `test_ac4_reversal_by_period`, `test_ac15_ac31_october_equals_e3`. |
+| 2 | MUST capital in its own column | DONE | `COMPARISON_KEYS` + `match` at `ReportService.php:276, 310-321`; closing formula includes Capital; screen, PDF and Excel columns "Capital introduced". Reconciliation to the ledger at `:322-326` (500 + log on mismatch, `test_unreconciled_ledger_is_a_server_error`). `test_ac27_september_with_capital` asserts Total (Funds + In - Out) = 0.00. |
+| 3 | MUST dashboard on R3 basis | DONE | `DashboardController.php` uses `ReportService::countedTransactions` for totals, top-5 and 12-month trend. `test_ac28_dashboard_follows_r3`: October 91,500.00 / 10,000.00 (= E-1), GAL November -4,000.00, branch mode KDY 62,500.00 / 8,200.00. |
+| 4 | MUST printed/exported content | DONE | PDF `layout.blade.php`: fixed header on every page (company, title, branches, period, "Amounts in LKR", basis line, "Printed by <name> at <time> (Asia/Colombo)", PROVISIONAL); "Page x of y" via `page_text` (`ReportExporter.php:165`); signature block (`signatures.blade.php`) on Cash Book and Branch Comparison. Excel: same header lines on every sheet, totals row, frozen header (`ReportSheet.php:47-62`). Cash book browser print: `ReportHeadComponent` + `ag-signatures` (page numbers there depend on the browser's print settings; the PDF export is the controlled copy). Test `test_ac21_ac29_accountant_exports_every_report`. |
+| 5 | SHOULD page totals | DONE | `ReportExporter::carryPages`; B/F, page total, C/F in `cash-book.blade.php:12,23-24` and `transfers.blade.php:9,18-19` (last C/F labelled "= Net moved"). Screen footer "Net moved for the whole period (all pages)". Test `test_ac30_page_carry_forward`. |
+| 6 | SHOULD signed reversal amounts | DONE | `ReportService.php:363`; Excel numeric signed cell. Test `test_ac15_ac31_october_equals_e3`. |
+| 7 | SHOULD PROVISIONAL marker | DONE | `ReportService::provisional` (`:161-178`, global or per-branch `PeriodLock`, every month x every branch in scope); screen, PDF and Excel. Test `test_ac32_provisional_marker`. |
+| 8 | SHOULD cash book reversal cross-refs | DONE | `ReportService::lineText` (`:525-538`), gross presentation. `test_ac18_kdy_cash_equals_e4` asserts "(reversed by <ref>)" / "Reversal of <ref>". |
+| 9 | SHOULD percent rules | DONE | `ReportService::percent` (`:262-272`, integer cents, half away from zero, null when total <= 0; category % from category amount). Tests `test_percent_rounding_is_half_away_from_zero`, `test_ac34_negative_line_percent`, `test_ac6_cross_period_reversal_gives_negative_total`. |
+| 10 | SHOULD subset-of-branches note | DONE | `subset` flag (`ReportService.php:126`); note on screen, PDF and Excel for comparison and matrix. Test `test_branch_user_and_subset_note`. |
+| 11 | SHOULD calendar-year label | DONE | `ReportExporter::periodLabel`, web `periodLabel` and "Year (calendar)" option. |
+| 12 | SHOULD (separate story) void deletes entries | NOT DONE - deferred by design | `LedgerService.php:179` still `entries()->delete()`. See view below. |
+
+### Deferred (out of this feature)
+- Void keeps entries + posts contra entries (finding 12) -> **AG-063** (edit/void), with **AG-091** (period lock) as the control.
+- Fiscal year start (April-March) and company logo upload -> **AG-092**.
+- Queued exports above the 1,000 PDF / 5,000 Excel caps, with download link -> **AG-087** (notification **AG-094**).
+- Pending / In transit transfer and expense states (never count in totals) -> **AG-051**, **AG-052**, **AG-064**.
+- Bank reconciliation report -> **AG-033**; audit trail report -> **AG-090**; Cash Flow Summary -> **AG-086**; scheduled emails -> **AG-088**.
+
+### LedgerService::void hard-delete
+Not a release blocker for this feature; it stays a separate backlog item (AG-063). Reasons: (a) the reports already use the only correct basis available today (voided = no entries, excluded everywhere; transaction row, `[Void]` note and `transaction.voided` audit log are kept, so the who/when/why survives); (b) `void` calls `assertOpen` on the original date, so a locked month cannot change, and every report of an unlocked month now prints "PROVISIONAL - period not locked" (finding 7), so nobody signs a figure that can still move; (c) fixing it changes posting logic in `LedgerService`, which is outside the scope of a read-only reporting feature. It remains a conflict with the "nothing is hard-deleted" rule and should be prioritised before go-live with real data: post a contra entry on the void date instead of deleting.
+
+### Housekeeping (non-blocking, BA)
+Spec body still shows the pre-review text in 4.3 note, R5 ("Funds received = debits of `capital`, ...") and Q4, and the E-2 table has no Capital column. The code, ACs 26-27 and finding 2 are correct; the BA should update those lines so the spec matches the build.
+
+### Verdict
+**SIGNED OFF.** All 4 MUST and 7 in-scope SHOULD findings are done and covered by tests; figures reconcile (opening + in - out = closing per branch, asserted against the ledger; branch rows sum to Total; matrix net sums to 0.00).

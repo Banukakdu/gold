@@ -111,14 +111,20 @@ export class CashBookComponent implements OnInit {
 
   ngOnInit() {
     // The account picker needs account.view; without it the report covers all accounts in scope.
-    this.http.get<Account[]>('/api/v1/accounts').subscribe({ next: a => this.accounts.set(a), error: () => this.accounts.set([]) });
     const { q, branches } = readQuery(this.route, this.auth.isAllBranches());
     this.f = { from: q.get('from') ?? this.f.from, to: q.get('to') ?? this.f.to };
     this.branches.set(branches);
     this.chosen.set(q.getAll('accounts').map(Number).filter(n => n > 0));
-    // All mode needs a branch first: say so once, as the field error the API would give (QA bug 5).
-    if (this.needsBranch()) this.errs.set({ branches: 'Select at least one branch' });
-    else this.load();
+    // Load only after the account list arrives, so account ids left in the URL from another branch are dropped.
+    const start = () => {
+      // All mode needs a branch first: say so once, as the field error the API would give (QA bug 5).
+      if (this.needsBranch()) this.errs.set({ branches: 'Select at least one branch' });
+      else this.load();
+    };
+    this.http.get<Account[]>('/api/v1/accounts').subscribe({
+      next: a => { this.accounts.set(a); start(); },
+      error: () => { this.accounts.set([]); this.chosen.set([]); start(); },
+    });
   }
 
   load() {
