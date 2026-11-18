@@ -254,3 +254,80 @@ Reviewed against `feature/attachments` (controls already merged: `PeriodLock::lo
 39. Given E with 1 active and 1 removed file and F with none, then the list shows "1 (1 removed)" for E, the filter "none" returns F and not E, and "has removed" returns E. (Finding 6)
 40. Given `inv.pdf` is active on KDY entry E, when the same bytes are uploaded to KDY entry F, then 201 with `also_on: [E ref]`, S2 shows the note, and the audit row records `also_on`. When a GAL user uploads the same bytes to a GAL entry, `also_on` is empty. (Finding 7)
 41. Given one file with a missing file and one with a changed hash, when `attachments:verify` runs, then both are listed by ref and attachment id and the exit code is non-zero. With every file intact, the exit code is 0. (Finding 9)
+
+## Accountant sign-off
+Checked on `feature/attachments` (build `433d6a2...HEAD`, tip `0aa90f6`) against the Accounting review above. `php artisan test`: **193 passed** (SQLite). I also ran six throwaway probe tests (not committed). They covered the unlock window, a Super Admin trying to remove from a locked month, review counts under a global lock, `attachments:verify` on a removed file, `added_after` after an unlock, and the list filter. All six pass. The diff does not touch `LedgerService`, `ledger_entries` or `accounts.current_balance`. AC 18 shows that balances, ledger lines and the October report do not change when a file is added.
+
+**Findings**
+1. MUST, immutability at database level: **DONE.**
+   - The `BEFORE DELETE` trigger and the `BEFORE UPDATE` trigger are in `2026_11_21_000000_create_attachments_table.php:58-77`. They exist for both MySQL and SQLite. The update trigger refuses any change to a frozen column, any update that is not a removal, and any change after a removal.
+   - All four foreign keys restrict deletes (`:31-43`).
+   - Rollback is refused while evidence rows exist (`:83`).
+   - The model guards are in `Attachment.php:41-50`.
+   - Tests: `RemovalTest::test_ac34_database_triggers_refuse_raw_changes` and `test_ac22_…`. AC 34 covers a raw delete, sha256/path/transaction_id/added_after changes, rewriting or undoing a removal, and deleting the parent entry.
+   - The MySQL trigger bodies run only in the `api-mysql` CI job (MySQL 8.4). That job must be green on the PR.
+2. MUST, the stored file cannot be swapped: **DONE.**
+   - Every download hashes the exact bytes it would send (`AttachmentController.php:153-175`).
+   - On a mismatch it returns 409, sends no file bytes, and writes an `attachment.integrity_failed` row with the stored and actual hashes, under the entry's branch.
+   - A missing or unreadable file returns 410 and writes an `attachment.missing` row (`:160-166`). Both rows are written without an exception, so they persist.
+   - Files are stored `0440` (`:99`). The only `delete()` on the disk is the rollback of a file that was never recorded (`:133-136`). `DownloadTest::test_ac27_…` enforces that.
+   - Tests: `test_ac35_changed_file_is_409_and_audited`, `test_ac26_ac35_missing_file_is_410_and_audited`, `test_files_are_read_only_on_disk`. A probe also returned 409 for a removed, tampered file downloaded by an auditor.
+3. MUST, removal lock uses the entry's own date under the cumulative rule: **DONE.**
+   - The lock check is `PeriodLock::isLocked($txn->branch_id, $txn->txn_date, share: true)`, inside the transaction, after the entry and attachment rows are locked (`AttachmentController.php:201-208`).
+   - `RemovalTest::test_ac36_…` covers four cases: a November lock blocks an October entry, a November entry is blocked, a global lock counts, and a GAL lock does not.
+   - A probe confirmed the Super Admin gets the same 422, in All mode and in KDY mode.
+4. MUST, evidence added after the close or the void is marked on the entry: **DONE.**
+   - The frozen column `added_after` (`close` / `void` / `reversal`) is set at upload (`AttachmentController.php:86-94`), returned by the API (`:331`) and shown as a tag on S2 (`transaction-detail.component.ts:100,183`).
+   - It is also recorded in the audit rows for adding and removing a file.
+   - Tests: `test_ac18_ac37_…` and `test_ac20_ac37_…`.
+   - A probe confirmed the tag survives an unlock.
+   - See follow-up A for files added while a month is unlocked.
+
+Q6, every download audited including Open: **DONE.**
+- Open calls the same endpoint (`transaction-detail.component.ts:283`). There is no audit row for lists or failed validation.
+- Test: `DownloadTest::test_ac25_…`.
+
+5. SHOULD, month-end review counts removed files: **DONE.**
+   - `PeriodLockController.php:86-113` adds `files_removed` and `files_removed_self`. A removal is dated by the entry's month, and only newly closed months are counted.
+   - The Lock confirm shows "N files removed (M by the uploader) … (Audit log > Attachments, Self only)" (`period-locks.component.ts:193-194`). It is information only.
+   - Test: `EvidenceReviewTest::test_ac38_…`.
+   - Probes confirmed two more cases: a global lock counts all branches, and a re-lock after an unlock counts removals made during the unlock.
+6. SHOULD, missing evidence is visible: **DONE.**
+   - The Files column shows "N (M removed)". The filter offers Files: any / Has files / No files / Has removed files (`TransactionController.php:33,64-76`).
+   - Test: `test_ac39_…`.
+7. SHOULD, the same receipt on two entries is flagged: **DONE.**
+   - `also_on` is limited to the entry's branch, except for a Super Admin in All mode. It appears on S2 and in the audit row (`AttachmentController.php:285-304`).
+   - Test: `test_ac40_…`.
+8. SHOULD, complete audit values: **DONE.**
+   - `attachment.added` records `own_entry`, `added_after` and `also_on` (`:115-127`).
+   - `attachment.removed` records `added_after` in the old values and `txn_status` and `self` in the new values (`:211-223`).
+   - All five events appear in the Attachments group with labels (`AuditLogController.php`).
+   - Tests: `test_ac21_…`, `test_ac33_…`.
+9. SHOULD, retention and restore check: **DONE.**
+   - `attachments:verify` (`AttachmentsVerify.php:22-66`) checks removed files too and is read-only. It lists problems by ref and attachment id, and exits 1 on any problem.
+   - Test: `test_ac41_…`.
+   - The README deploy section (`README.md:62-88`) covers:
+     - PHP and web server upload limits;
+     - a private, writable folder;
+     - backing up the files **together with** the database in the same run;
+     - retention for the statutory period;
+     - running `attachments:verify` after every deploy and every restore, next to `ledger:verify`;
+     - a runtime DB user without DROP, ALTER or TRIGGER, because TRUNCATE skips triggers;
+     - rollback refused once evidence exists.
+10. Segregation of duties: **as designed.**
+    - The role templates are unchanged (`PermissionSeeder.php:27-36`), and there is no new key.
+    - The Cashier has no `audit.view`. A Cashier can add files only to entries they recorded and remove only their own uploads, and only while the entry is posted and its month is open (`AttachmentController.php:246-256`).
+    - Removed content is downloadable only with `audit.view` or by the Super Admin (`:150`; `RemovalTest::test_ac23_…`).
+    - A probe confirmed that a second Cashier gets 403 and the Super Admin in All mode gets 200.
+    - Removal metadata and reasons stay visible to every `transaction.view` user (Q4).
+
+**Follow-ups (SHOULD, not blocking)**
+- A. **Files added while a month is unlocked are not marked.** A probe showed that a file added to an October entry after October is locked and then unlocked gets `added_after: null`. Two possible fixes:
+  - set `close` when the entry's month has ever been covered by a lock, including an unlocked one; or
+  - add "files added while unlocked" to the re-lock review.
+
+  This does not block release because the unlock itself is audited, needs a reason, and re-opens the month to every correction, not only to files.
+- B. Downloads refused with 403 "Only auditors can download removed files." are not audited. Consider adding an `attachment.download_refused` row.
+- C. The `0440` mode only slows down tampering, because the PHP user owns the files. The real controls are the sha256 check on download and `attachments:verify` after restores. Keep that order in the runbook.
+
+**Verdict: SIGNED OFF.** All four MUST findings and all SHOULD findings 5-9 are done, with evidence in tests. The one condition before merge is that the `api-mysql` CI job (MySQL 8.4 triggers) is green on the pull request.
