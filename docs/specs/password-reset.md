@@ -388,3 +388,76 @@ Reviewer: accountant (pre-development). No money, ledger or period effect. Revie
 - **Q6:** Apply it now (finding 9).
 - **Q7:** No controls impact. Leave it to the reviewer.
 - **Q8:** Accepted.
+
+## Accountant sign-off
+Reviewer: accountant (post-development). Build: `git diff a129a12...HEAD` on `feature/password-reset` (HEAD 5c87ac3). No money, ledger, period or report effect. `PermissionSeeder` and the role templates are unchanged by this build, so segregation of duties stays as signed off in the users-and-roles spec.
+
+**Tests.** A clean copy of HEAD, with its own storage directory, passes the full suite: 359 tests, 6313 assertions. `tests/Feature/Auth` passes 47 of 47 in the repo folder too. In the shared repo folder, 2 or 3 `Attachments/UploadTest` cases failed, and which ones varied between runs. Those tests share the fake disk `storage/framework/testing/disks/attachments` with a test run going on in parallel in the same folder (`storage/logs` and the `branding` fake disk changed while I was not running there). This build does not touch attachments, and the same tests pass in the isolated copy. It is not a build defect.
+
+### Findings
+1. **MUST, Super Admin switch off by default: DONE.**
+   - `config/auth.php:99` reads `(bool) env('AUTH_SUPER_ADMIN_EMAIL_RESET', false)`, and `.env.example` sets it to `false`.
+   - The N1 job writes `auth.password_reset_refused` `{email, reason: super_admin_email_reset_disabled}` and sends no link (`Jobs/SendPasswordResetLink.php:36-43`, `PasswordResets::refusal`). The response is the same 202.
+   - N2 refuses the token, and so does N5 (set-password), because both use `emailResetAllowed` (`AuthController.php:92, 132`).
+   - Tests: `test_ac40_super_admin_email_reset_is_off_by_default` and `test_ac41_super_admin_token_refused_once_the_switch_is_off`. The ac41 test covers an old link on both pages.
+2. **MUST, console recovery command: DONE.**
+   - `Console/Commands/AuthResetPassword.php`: hidden input entered twice, checked against `Password::defaults()` and `confirmed`.
+   - In one transaction it sets the password, revokes every API token, deletes the reset row, and writes `auth.password_reset` `{user_id, email, via: console, tokens_revoked}` with a null actor (ip null, user agent `console`).
+   - After that it clears the lock keys of every IP (`LoginThrottle::clearAll`), sends the "password changed" email (from the server console), and sends the R13b alert.
+   - Tests: both `test_ac43_*` and `test_console_reset_of_a_cashier_sends_no_admin_alert`.
+3. **MUST, requester's IP and user agent on the queued rows: DONE.**
+   - N1 passes `$request->ip()` and `userAgent()` to the job (`AuthController.php:110`).
+   - The job writes them on both the `requested` and `refused` rows through the new `$client` argument of `AuditLog::record` (`SendPasswordResetLink.php:61`, `Models/AuditLog.php:243-244`).
+   - Test: `test_ac44_queued_job_writes_the_requesters_ip_and_user_agent`. It uses the `database` queue, the worker runs with another IP and agent, and both rows carry `10.1.2.3` / `UA-test`.
+4. **MUST, actor on reset: DONE.**
+   - `auth()->setUser($user)` runs before `AuditLog::record('auth.password_reset', …)` inside the transaction (`AuthController.php:137`).
+   - Test: `test_ac18_audit_row_has_the_actor_and_no_secrets` checks that `user_id` equals the user, `auditable` is the user, the ip is the request's and `branch_id` is null.
+5. **MUST, email change: DONE.**
+   - `UserController::update` (`:222-251`) deletes the reset/invitation row for the old email inside the transaction, before the update. The same happens on deactivation.
+   - After commit it sends `EmailChangedNotification` on demand to the old address, naming the new address and the admin, whoever made the change. A mail failure is only reported.
+   - A case-only change (`C2@x.com` for `c2@x.com`) correctly sends nothing.
+   - Tests: `test_ac45_the_old_address_is_told_about_an_email_change` (Super Admin and Branch Admin) and `test_ac26_email_change_or_deactivation_kills_the_link`.
+6. **SHOULD, only Super Admin with the switch on: DONE.** The reason is `no_other_super_admin`. The link is also refused at use if the other Super Admin was deactivated in the meantime. Tests: `test_ac42_*` and `test_n8_*`.
+7. **SHOULD, alert on refused Super Admin request: DONE.**
+   - `AccessAlerts::passwordResetRefused` sends to the other active Super Admins only.
+   - The R4 per-email limit (3 per 15 minutes) caps it.
+   - Test: `test_ac40_*`.
+8. **SHOULD, tokens out of logs at rest: DONE.**
+   - The README "Password reset" item 2 says not to use `MAIL_MAILER=log` in production and never to show `failed_jobs`.
+   - A database error on reset is re-thrown without its SQL bindings (`PasswordResets::consume`, test `test_q1_a_database_error_never_reports_the_password_hash`).
+9. **SHOULD, link safety on `/set-password`: DONE.**
+   - `protectTokenLink()` is used on both pages.
+   - `index.html` has `<meta name="referrer" content="no-referrer">`.
+   - The README asks for a `Referrer-Policy` header.
+10. **Lockout: DONE and correct.**
+    - The 15-minute lock starts at the 5th failure (`LoginThrottle`, `test_ac29_*`).
+    - Attempts are counted before the hash check (`test_r2_*`).
+    - One `auth.locked_out` row is written per lock, through `Cache::add`. The row has a null actor, the user as auditable, and `{email}` only (`test_ac30_one_locked_out_row_per_lock`).
+    - A reset clears the lock for the request's IP (`test_ac23_*`). The console command clears it for every IP (`test_ac43_*`).
+    - The `email|ip` design (Q3) is kept as decided.
+
+### Other checks
+- **Alerts.**
+  - R13b goes only to *other* active Super Admins, and only when a Super Admin or branch administrator is reset by email or by the console. A Cashier reset sends no alert (`test_ac20_who_gets_the_admin_alert`, the console Cashier test).
+  - The user always gets "password changed", with the time, the IP (or "server console") and no link (`test_ac19_*`).
+  - Every alert is queued `afterCommit`, and a mail failure never undoes the reset (`test_ac21_*`).
+  - The alert and email-change mails hold no link or token.
+- **No secrets in audit rows.**
+  - Rows written: `requested` and `refused` hold `{email[, reason]}`. `auth.password_reset` holds `{user_id, email, first_password|via, tokens_revoked}`. `locked_out` holds `{email}`. `logout` and `user.password_set` hold no values.
+  - `test_ac18_*` dumps the whole `audit_logs` table and finds no plain password, bcrypt hash, reset token or token hash.
+  - The audit viewer still masks keys that look like `password|token|secret`. Only the bool `first_password` and the int `tokens_revoked` are shown (`AuditLogController.php:46, 373`).
+  - The "Logins" group now covers every `auth.*` event and has labels (`test_ac33_*`).
+- **No user enumeration in the log.** An unknown email on N1 writes no row (`test_ac4_*`). Only `auth.locked_out` records a typed address, as decided in Q8.
+- **README operator notes.** These are present and correct:
+  - `FRONTEND_URL` and the queue worker share one `.env`;
+  - a real mailer, not `log`;
+  - `failed_jobs` is never shown;
+  - the Super Admin switch and when to turn it on;
+  - the recovery command, including that the bootstrap Super Admin replaces `ADMIN_PASSWORD` with it (also in `.env.example`);
+  - the Referrer-Policy header;
+  - an email change notifies the old address;
+  - the lockout rules.
+
+**Follow-up (not blocking, already decided as a later item):** `auth.suspicious`, which detects 20 or more failures in 15 minutes for one email from any IP (Q3), when the controls backlog is next planned. Revisit the Super Admin switch default when AG-005 2FA ships.
+
+**Verdict: SIGNED OFF.** All five MUST findings and all four SHOULD findings are done, with code and tests as evidence. Nothing must change before the pull request.
