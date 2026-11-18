@@ -48,6 +48,8 @@ class BranchAdmins
      */
     public static function assertNotLast(int $branchId, array $losing, array $gaining = []): void
     {
+        // Serialise all access changes within this branch: lock the branch row first.
+        Branch::whereKey($branchId)->lockForUpdate()->first();
         $before = self::ids($branchId);
         if (! $before) {
             return;

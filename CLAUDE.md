@@ -13,6 +13,7 @@ Product docs: `docs/Account-gold_Project_Document.pdf`, backlog `docs/Account-go
 
 ## Commands
 - API tests: `cd api && php artisan test` · lint: `./vendor/bin/pint --test`
+- Queue worker (invitation emails and access alerts are queued): `cd api && php artisan queue:work`. Locally you can set `QUEUE_CONNECTION=sync` in `api/.env` instead.
 - Web build: `cd web && npx ng build` · dev: `npx ng serve` (proxies /api to :8000)
 - Use `npm ci` in CI; if you change `web/package.json`, commit the updated lock file.
 

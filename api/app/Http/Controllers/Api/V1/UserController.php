@@ -182,8 +182,8 @@ class UserController extends Controller
         if ($user->status !== 'active') {
             throw ValidationException::withMessages(['user' => 'This user is inactive. Activate them first.']);
         }
-        $this->sendInvitation($user);
         AuditLog::record('user.invite_resent', $user, null, ['user_id' => $user->id, 'email' => $user->email, 'branch_id' => $branchId], $branchId);
+        $this->sendInvitation($user);
 
         return ['ok' => true];
     }
