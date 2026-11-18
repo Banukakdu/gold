@@ -108,9 +108,17 @@ neither do the existing reports. Take a database backup first: the back-fill can
      error): MySQL has kept the columns and keys it had already added. Fix the cause and run `php artisan migrate
      --force` again; the migration adds only what is missing and replaces the trigger. Do not restore part of the
      schema by hand.
-   - **If the back-fill step fails**, fix the reported entry and run `php artisan ledger:backfill-double-entry` (the
-     app must still be down; `--force` runs it while the app is up, with a weaker safety check). It completes the rest
-     and never adds lines twice.
+   - **If the back-fill step fails** (`2026_11_22_000001_double_entry_backfill` FAIL): keep the app down. Each stop
+     writes a `ledger.double_entry_backfill_stopped` audit row with the error and what was committed before it. **Do
+     not edit ledger, transaction or account rows by hand** to get past the error.
+     - If the cause is outside the data (lost connection, lock timeout, disk full), fix it and run
+       `php artisan migrate --force` again. It completes the rest, never adds lines twice, and records the migration.
+     - If the error names an entry (for example one that does not balance), stop the deploy: restore the backup taken
+       before step 3 and bring the old release back up, or escalate to the developer and the accountant with the
+       error and the audit row.
+     - `php artisan ledger:backfill-double-entry` does the same work for a supervised re-run (the app must be down;
+       `--force` runs it while the app is up, with a weaker safety check). After it, still run
+       `php artisan migrate --force` so that `2026_11_22_000001_double_entry_backfill` is recorded as run.
 4. **After:** `php artisan ledger:verify`; it must pass, including the new checks V1-V6 (every entry balanced, line
    rules, trial balance nets to zero, inter-branch pairs eliminate, category accounts agree with the Income &
    Expense report, back-fill complete).

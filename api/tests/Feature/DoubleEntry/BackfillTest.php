@@ -337,9 +337,21 @@ class BackfillTest extends TestCase
         $before = LedgerEntry::count();
         $this->artisan('ledger:backfill-double-entry', ['--force' => true])->expectsOutputToContain('lines added: 0')->assertExitCode(0);
         $this->assertSame($before, LedgerEntry::count());
-        $runs = AuditLog::where('event', 'ledger.double_entry_backfilled')->orderBy('id')->get()->map(fn ($a) => $a->new_values['lines'])->all();
-        $this->assertSame([33 - $partial, 0], $runs, 'the stopped run wrote no row; the completing run and the re-run wrote one each');
+        // Accountant sign-off A: every run leaves a row, the stopped one too, and together they account for every line.
+        $runs = AuditLog::whereIn('event', ['ledger.double_entry_backfill_stopped', 'ledger.double_entry_backfilled'])->orderBy('id')->get();
+        $this->assertSame(['ledger.double_entry_backfill_stopped', 'ledger.double_entry_backfilled', 'ledger.double_entry_backfilled'], $runs->pluck('event')->all());
+        $this->assertSame([$partial, 33 - $partial, 0], $runs->map(fn ($a) => $a->new_values['lines'])->all());
+        $this->assertSame(33, $runs->sum(fn ($a) => $a->new_values['lines']));
+        $this->assertSame('Simulated stop', $runs[0]->new_values['error']);
+        $this->assertNull($runs[0]->user_id);
         $this->artisan('ledger:verify')->assertExitCode(0);
+
+        // README recovery (sign-off C): `migrate` afterwards records the back-fill migration and adds nothing.
+        $this->assertFalse(DB::table('migrations')->where('migration', '2026_11_22_000001_double_entry_backfill')->exists());
+        $lines = LedgerEntry::count();
+        $this->migrate();
+        $this->assertTrue(DB::table('migrations')->where('migration', '2026_11_22_000001_double_entry_backfill')->exists());
+        $this->assertSame($lines, LedgerEntry::count());
     }
 
     /** Back-filled lines by meaning (not by id): transaction ref, branch, account, sides, date, contra. */
@@ -375,6 +387,9 @@ class BackfillTest extends TestCase
         $this->artisan('ledger:backfill-double-entry', ['--force' => true])->expectsOutputToContain('BAD-1 has back-filled lines but does not balance')->assertExitCode(1);
         $this->assertSame(1, LedgerEntry::where('transaction_id', $id)->where('origin', 'backfill')->count());
         $this->assertSame(1, AuditLog::where('event', 'ledger.double_entry_backfilled')->count());
+        $stopped = AuditLog::where('event', 'ledger.double_entry_backfill_stopped')->sole();
+        $this->assertStringContainsString('BAD-1 has back-filled lines but does not balance', $stopped->new_values['error']);
+        $this->assertSame(0, $stopped->new_values['lines'], 'the re-run had nothing else to add before BAD-1');
     }
 
     public function test_ac36_inactive_category_and_inactive_branch_are_backfilled(): void

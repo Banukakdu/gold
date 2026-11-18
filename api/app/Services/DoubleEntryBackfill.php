@@ -13,6 +13,7 @@ use App\Support\DoubleEntryPreflight;
 use App\Support\Money;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
+use Throwable;
 
 /**
  * Chart creation and back-fill of existing history (docs/specs/double-entry.md R1, R6). Used by the
@@ -164,27 +165,42 @@ class DoubleEntryBackfill
         // saves a disk flush per entry. A stop rolls back the open batch only; a re-run completes it. While other
         // postings may run ($concurrent), every entry commits on its own so no account lock is held for long.
         $batch = $dryRun || $concurrent ? 1 : max(1, $this->batch);
-        Transaction::withoutGlobalScopes()->orderBy('id')->chunkById(500, function ($txns) use ($one, $batch, $dryRun) {
-            foreach ($txns->chunk($batch) as $group) {
-                $dryRun ? $group->each($one) : DB::transaction(fn () => $group->each($one));
-            }
-        });
+        $committed = $sum;
+        try {
+            Transaction::withoutGlobalScopes()->orderBy('id')->chunkById(500, function ($txns) use ($one, $batch, $dryRun, &$sum, &$committed) {
+                foreach ($txns->chunk($batch) as $group) {
+                    if ($dryRun) {
+                        $group->each($one);
 
-        // R6 safety: no cash / bank / wallet balance may change. Valid only while nothing else posts (maintenance mode,
-        // or the migration); `ledger:backfill-double-entry` refuses otherwise unless --force (review R5).
-        // With $concurrent (--force while the app is up) other postings move balances legitimately, so only the
-        // invariant is checked: every money account's cached balance still equals its ledger (no back-fill line on it).
-        $after = $this->moneyBalances();
-        $broken = $concurrent
-            ? array_filter($after, fn ($v) => explode('|', $v)[0] !== explode('|', $v)[1])
-            : ($before !== $after);
-        if ($broken) {
-            throw new RuntimeException('The back-fill changed a cash, bank or wallet balance. This must never happen; restore the backup and report it.');
+                        continue;
+                    }
+                    DB::transaction(fn () => $group->each($one));
+                    $committed = $sum;
+                }
+            });
+
+            // R6 safety: no cash / bank / wallet balance may change. Valid only while nothing else posts (maintenance
+            // mode, or the migration); `ledger:backfill-double-entry` refuses otherwise unless --force (review R5).
+            // With $concurrent (--force while the app is up) other postings move balances legitimately, so only the
+            // invariant is checked: every money account's cached balance still equals its ledger (no back-fill line on it).
+            $after = $this->moneyBalances();
+            $broken = $concurrent
+                ? array_filter($after, fn ($v) => explode('|', $v)[0] !== explode('|', $v)[1])
+                : ($before !== $after);
+            if ($broken) {
+                throw new RuntimeException('The back-fill changed a cash, bank or wallet balance. This must never happen; restore the backup and report it.');
+            }
+        } catch (Throwable $e) {
+            if (! $dryRun) {
+                // An account created in a rolled-back batch no longer exists (review NIT).
+                $this->ledger->forgetBackfillMemo();
+                // Accountant sign-off A: a stopped run still leaves a trail of what it committed (the open batch rolled back).
+                AuditLog::create(['user_id' => null, 'branch_id' => null, 'event' => 'ledger.double_entry_backfill_stopped',
+                    'new_values' => ['error' => mb_substr($e->getMessage(), 0, 1000)] + self::normalise($committed)]);
+            }
+            throw $e;
         }
-        ksort($sum['by_type']);
-        ksort($sum['by_branch']);
-        ksort($sum['locked_periods']);
-        $sum['locked_periods'] = array_values($sum['locked_periods']);
+        $sum = self::normalise($sum);
         $sum['money_balances_unchanged'] = true;
 
         // A fresh install (no history at all) has nothing to record.
@@ -193,6 +209,17 @@ class DoubleEntryBackfill
         }
 
         return $sum + ['sample' => $sample, 'seconds' => round(microtime(true) - $started, 1)];
+    }
+
+    /** Counts as stored in the audit rows: sorted keys, locked periods as a list. */
+    private static function normalise(array $sum): array
+    {
+        ksort($sum['by_type']);
+        ksort($sum['by_branch']);
+        ksort($sum['locked_periods']);
+        $sum['locked_periods'] = array_values($sum['locked_periods']);
+
+        return $sum;
     }
 
     /**

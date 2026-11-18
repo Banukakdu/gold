@@ -4,6 +4,7 @@ namespace Tests\Feature\DoubleEntry;
 
 use App\Models\AuditLog;
 use App\Models\PeriodLock;
+use App\Services\ReportService;
 use App\Support\Money;
 use Illuminate\Support\Carbon;
 use Tests\Feature\Reports\ReportTestCase;
@@ -42,6 +43,28 @@ class TrialBalanceTest extends ReportTestCase
     public function test_ac42_consolidated_october_equals_e7(): void
     {
         $this->assertE7($this->tb($this->october(['view' => 'consolidated'])));
+    }
+
+    /** Accountant sign-off B: consolidated rows follow the group order (Assets first), then the keys within a group. */
+    public function test_consolidated_rows_are_in_group_order(): void
+    {
+        $rows = $this->tb($this->october(['view' => 'consolidated']))['rows'];
+        $order = array_flip(array_keys(ReportService::TB_GROUPS));
+        $groups = array_column($rows, 'group');
+        $this->assertSame('asset', $groups[0]);
+        $ranks = array_map(fn ($g) => $order[$g], $groups);
+        $sorted = $ranks;
+        sort($sorted);
+        $this->assertSame($sorted, $ranks, 'each group appears once, in order: '.implode(', ', array_unique($groups)));
+        $money = array_values(array_filter($rows, fn ($r) => $r['group'] === 'asset'));
+        $this->assertStringStartsWith('MAIN · ', $money[0]['label']);
+        $codes = fn ($g) => array_map(fn ($r) => substr($r['key'], 4), array_values(array_filter($rows, fn ($r) => $r['group'] === $g)));
+        foreach (['income', 'expense'] as $g) {
+            $c = $codes($g);
+            $s = $c;
+            sort($s);
+            $this->assertSame($s, $c, "{$g} rows by code");
+        }
     }
 
     public function test_ac43_consolidated_subset_is_not_eliminated(): void

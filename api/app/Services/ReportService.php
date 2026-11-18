@@ -651,7 +651,17 @@ class ReportService
                 $lines[$key]['pair_branch'] = $a->type === 'head_office' ? $a->branch_id : $a->counterparty_branch_id;
             }
         }
-        uasort($lines, fn ($x, $y) => $x['sort'] <=> $y['sort']);
+        // Accountant sign-off B: group order first, then the keys within the group, element by element. Comparing the
+        // arrays whole would order shorter arrays first (PHP compares array length before values), so money rows
+        // (three keys) would follow the one-key income and expense rows.
+        uasort($lines, function ($x, $y) {
+            $c = $x['sort'][0] <=> $y['sort'][0];
+            for ($i = 1, $n = max(count($x['sort']), count($y['sort'])); $c === 0 && $i < $n; $i++) {
+                $c = ($x['sort'][$i] ?? '') <=> ($y['sort'][$i] ?? '');
+            }
+
+            return $c;
+        });
 
         $rows = [];
         $tot = ['by_branch' => array_fill_keys($ids, 0), 'elimination' => 0, 'dr' => 0, 'cr' => 0];
