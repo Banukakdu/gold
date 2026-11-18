@@ -76,6 +76,12 @@ return new class extends Migration
             Schema::table('ledger_entries', fn (Blueprint $table) => $table->string('origin', 10)->default('posting'));
         }
 
+        // Review R3b: the chart code lock, one row that no foreign key references (see ChartOfAccounts::lockChart).
+        if (! Schema::hasTable('chart_code_locks')) {
+            Schema::create('chart_code_locks', fn (Blueprint $table) => $table->unsignedTinyInteger('id')->primary());
+        }
+        DB::table('chart_code_locks')->insertOrIgnore(['id' => 1]);
+
         // A trigger left by a run that stopped (or an older definition) is replaced, never duplicated (MySQL error 1359).
         DB::unprepared('DROP TRIGGER IF EXISTS '.self::TRIGGER);
         DB::unprepared(self::triggerSql($driver));
@@ -96,6 +102,7 @@ return new class extends Migration
     {
         // The trigger reads accounts, so it goes before the accounts columns.
         DB::unprepared('DROP TRIGGER IF EXISTS '.self::TRIGGER);
+        Schema::dropIfExists('chart_code_locks');
 
         // Native DROP COLUMN on SQLite >= 3.35 and MySQL: ledger_entries is not rebuilt, so its immutability triggers stay.
         Schema::table('ledger_entries', function (Blueprint $table) {

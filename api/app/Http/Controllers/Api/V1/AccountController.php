@@ -7,6 +7,7 @@ use App\Models\Account;
 use App\Models\AuditLog;
 use App\Models\LedgerEntry;
 use App\Models\Transaction;
+use App\Services\LedgerService;
 use App\Support\BranchContext;
 use App\Support\Money;
 use Illuminate\Http\Request;
@@ -44,13 +45,13 @@ class AccountController extends Controller
             'is_main_account' => 'boolean',
         ]);
         $data['branch_id'] ??= $ctx->branchId;
-        // One DB transaction: the 11xxx code is assigned under a lock on the branch row (review R3).
+        // One DB transaction: the 11xxx code is assigned under the chart code lock, retried on a deadlock (review R3, R3b).
         $acc = DB::transaction(function () use ($data) {
             $acc = Account::create($data);
             AuditLog::record('account.created', $acc, null, $data);
 
             return $acc;
-        });
+        }, LedgerService::ATTEMPTS);
 
         return response()->json($acc, 201);
     }

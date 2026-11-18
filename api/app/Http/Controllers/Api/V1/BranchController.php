@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Account;
 use App\Models\AuditLog;
 use App\Models\Branch;
+use App\Services\LedgerService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -46,7 +47,7 @@ class BranchController extends Controller
 
             // N7: the new branch's cash, bank and wallet accounts, not its whole chart.
             return response()->json($branch->load(['accounts' => fn ($q) => $q->money()]), 201);
-        });
+        }, LedgerService::ATTEMPTS);
     }
 
     public function update(Request $request, Branch $branch)

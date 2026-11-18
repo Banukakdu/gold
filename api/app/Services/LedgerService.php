@@ -37,6 +37,12 @@ class LedgerService
 
     public const MONEY_ONLY = 'Choose a cash, bank or wallet account.';
 
+    /**
+     * Review R3b: a posting that loses a deadlock (MySQL 1213 / 40001) or a lock wait is retried as a whole, up to
+     * this many attempts, instead of answering 500. Nested in an outer DB transaction, the outer one decides.
+     */
+    public const ATTEMPTS = 3;
+
     public const WRONG_BRANCH = 'A ledger line is on an account of another branch. Nothing was posted.';
 
     /** Back-fill only: account id per posting-rule reference (see postBackfill). */
@@ -68,7 +74,7 @@ class LedgerService
             $this->post($txn, $lines);
 
             return $this->finish($txn);
-        });
+        }, self::ATTEMPTS);
     }
 
     /**
@@ -112,7 +118,7 @@ class LedgerService
             $this->post($txn, $lines);
 
             return $this->finish($txn);
-        });
+        }, self::ATTEMPTS);
     }
 
     /** Record income (Dr money, Cr income category) or expense (Dr expense category, Cr money). */
@@ -156,7 +162,7 @@ class LedgerService
             $this->post($txn, $lines);
 
             return $this->finish($txn);
-        });
+        }, self::ATTEMPTS);
     }
 
     /**
@@ -199,7 +205,7 @@ class LedgerService
             ]);
 
             return $ids;
-        });
+        }, self::ATTEMPTS);
     }
 
     /**
@@ -245,7 +251,7 @@ class LedgerService
             AuditLog::record('transaction.reversed', $original, ['status' => 'posted'], ['status' => 'reversed', 'reversal_id' => $txn->id, 'reversal_date' => $date, 'reason' => $reason, 'self' => (int) $original->created_by === (int) auth()->id()]);
 
             return $this->finish($txn);
-        });
+        }, self::ATTEMPTS);
     }
 
     /**
@@ -289,7 +295,7 @@ class LedgerService
             ]);
 
             return $txn->fresh();
-        });
+        }, self::ATTEMPTS);
     }
 
     /**
@@ -324,6 +330,12 @@ class LedgerService
             $this->backfillRefs = [];
             throw $e;
         }
+    }
+
+    /** Drop the back-fill account memo (after a rolled-back batch: an account created in it no longer exists). */
+    public function forgetBackfillMemo(): void
+    {
+        $this->backfillRefs = [];
     }
 
     // ---------------------------------------------------------------- helpers

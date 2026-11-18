@@ -36,21 +36,28 @@ class ChartOfAccounts
 
     // ------------------------------------------------------------------ codes
 
+    public const LOCK_TABLE = 'chart_code_locks';
+
     /**
-     * Review R3: codes are max + 1, so two requests at once could pick the same code (duplicate key, HTTP 500). Each
-     * assignment first locks a row FOR UPDATE inside the caller's DB transaction: the account's branch for money codes,
-     * the Main branch (one chart-wide lock) for category codes and system accounts. The second request waits and then
-     * reads the first one's code. Callers run in a DB transaction (controllers, migration, LedgerService).
+     * Review R3 / R3b: codes are max + 1, so two requests at once could pick the same code (duplicate key, HTTP 500).
+     * Every code assignment and every creation of a missing chart account first locks the single row of
+     * `chart_code_locks` FOR UPDATE inside the caller's DB transaction; the second request waits, then reads the first
+     * one's code. No foreign key references that table, so postings (which take shared locks on `branches`, `accounts`
+     * and `categories` through their foreign keys) never wait on it and it cannot close a deadlock cycle with them.
+     * Callers run in a DB transaction (controllers, migration, LedgerService) and retry on a concurrency error.
      */
-    private function lockRow(?int $branchId = null): void
+    private function lockChart(): void
     {
-        $q = DB::table('branches')->lockForUpdate();
-        $branchId === null ? $q->where('is_main', true)->value('id') : $q->where('id', $branchId)->value('id');
+        if (DB::table(self::LOCK_TABLE)->where('id', 1)->lockForUpdate()->value('id') === null) {
+            // The migration inserts the row; recreate it if it was removed, then lock it.
+            DB::table(self::LOCK_TABLE)->insertOrIgnore(['id' => 1]);
+            DB::table(self::LOCK_TABLE)->where('id', 1)->lockForUpdate()->value('id');
+        }
     }
 
     public function nextMoneyCode(int $branchId): string
     {
-        $this->lockRow($branchId);
+        $this->lockChart();
         $max = DB::table('accounts')->where('branch_id', $branchId)->whereBetween('code', ['11001', '11999'])->max('code');
         $next = $max ? (int) $max + 1 : 11001;
         if ($next > 11999) {
@@ -68,7 +75,7 @@ class ChartOfAccounts
     /** 4PP00 / 5PP00 for a parent, 4PPSS / 5PPSS for a sub-category, in creation order (R1). */
     public function nextCategoryCode(Category $c): string
     {
-        $this->lockRow();
+        $this->lockChart();
         $digit = $c->type === 'income' ? '4' : '5';
         if (! $c->parent_id) {
             $max = Category::whereNull('parent_id')->where('type', $c->type)->whereNotNull('ledger_code')->max('ledger_code');
@@ -264,7 +271,7 @@ class ChartOfAccounts
             return $acc;
         }
         // Missing: take the chart lock and look again, so two requests never both create it (review R3).
-        $this->lockRow();
+        $this->lockChart();
         $acc = Account::withoutGlobalScopes()->where($keys)->lockForUpdate()->first();
         if ($acc) {
             return $acc;

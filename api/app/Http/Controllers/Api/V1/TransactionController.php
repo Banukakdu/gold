@@ -177,6 +177,8 @@ class TransactionController extends Controller
                 ->where(fn ($q) => $q->whereNull('branch_id')->orWhere('branch_id', $transaction->branch_id))],
         ], ['category_id.exists' => "Choose an active {$transaction->type} category of this branch."]);
         DB::transaction(function () use ($transaction, $data, $date) {
+            // Retried on a deadlock (review R3b): each attempt starts from the stored row.
+            $transaction->refresh();
             // Re-check with a locking read inside the write (reviewer R5), like LedgerService::assertOpen.
             abort_if(PeriodLock::isLocked($transaction->branch_id, $date, share: true), 422, 'The period '.substr($date, 0, 7).' is locked.');
             $fields = Arr::except($data, ['category_id']);
@@ -190,7 +192,7 @@ class TransactionController extends Controller
             if (array_key_exists('category_id', $data)) {
                 $this->ledger->reclassify($transaction, (int) $data['category_id']);
             }
-        });
+        }, LedgerService::ATTEMPTS);
 
         return $transaction->fresh();
     }

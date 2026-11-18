@@ -51,6 +51,27 @@ class ChartOfAccountsTest extends DoubleEntryTestCase
         $this->assertSame(['active', 'active', 'active'], collect($income)->whereIn('category_id', $ids)->pluck('status')->values()->all());
     }
 
+    /**
+     * Review R3b: code assignment locks the single `chart_code_locks` row (no foreign key points at it), never a
+     * `branches` row, which every posting share-locks through its foreign keys. The MySQL stress run is in the PR notes.
+     */
+    public function test_code_assignment_locks_the_chart_lock_row_not_branches(): void
+    {
+        $this->assertSame([1], DB::table('chart_code_locks')->pluck('id')->all());
+        $sql = [];
+        DB::listen(function ($q) use (&$sql) {
+            $sql[] = strtolower($q->sql);
+        });
+        $this->accKdy()->postJson('/api/v1/accounts', ['name' => 'Second bank', 'type' => 'bank'])->assertCreated();
+        $this->sa()->postJson('/api/v1/categories', ['type' => 'expense', 'name' => 'Lock probe'])->assertCreated();
+        $this->assertGreaterThanOrEqual(2, count(preg_grep('/from [`"]chart_code_locks[`"]/', $sql)));
+        $this->assertSame([], preg_grep('/^select .* from [`"]branches[`"] where .*for update/', $sql));
+
+        DB::table('chart_code_locks')->delete();
+        $this->accKdy()->postJson('/api/v1/accounts', ['name' => 'Third bank', 'type' => 'bank'])->assertCreated();
+        $this->assertSame([1], DB::table('chart_code_locks')->pluck('id')->all(), 'a missing lock row is recreated');
+    }
+
     /** Review R4: a branch or category inserted without model events gets its chart from ledger:chart-sync. */
     public function test_chart_sync_creates_missing_accounts(): void
     {
