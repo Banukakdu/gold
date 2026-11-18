@@ -24,6 +24,15 @@ class ReportExampleSeeder extends Seeder
 
     public function run(LedgerService $ledger): void
     {
+        $this->post($ledger);
+    }
+
+    /**
+     * Posts the example through $ledger: LedgerService, or (double-entry migration tests) a copy of the pre-feature
+     * service with the same methods, to build the history the back-fill starts from.
+     */
+    public function post(object $ledger): void
+    {
         // Demo/test data posts real ledger entries: never in production.
         if (app()->environment('production')) {
             throw new RuntimeException('ReportExampleSeeder must not run in production.');

@@ -2,6 +2,8 @@
 
 namespace App\Support;
 
+use Illuminate\Support\Facades\DB;
+
 /** Exact 2-decimal arithmetic using integer cents (no floats, no bcmath dependency). */
 final class Money
 {
@@ -37,6 +39,14 @@ final class Money
     public static function add(string|int|float|null ...$vals): string
     {
         return self::fromCents(array_sum(array_map([self::class, 'toCents'], $vals)));
+    }
+
+    /** SQL for a decimal(15,2) column (or expression) as exact integer cents, on MySQL and SQLite. */
+    public static function sqlCents(string $column): string
+    {
+        $int = DB::connection()->getDriverName() === 'mysql' ? 'SIGNED' : 'INTEGER';
+
+        return "CAST(ROUND($column * 100) AS $int)";
     }
 
     public static function cmp(string|int|float|null $a, string|int|float|null $b): int
