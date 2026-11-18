@@ -201,7 +201,7 @@ export class ExportButtonsComponent {
         <div class="print-only"><b>{{ m.company }}</b> · {{ title() }}</div>
         <div>Branches: {{ m.all_branches ? 'All branches' : branchLabel(m) }}
           @for (b of m.branches; track b.id) { @if (b.status !== 'active') { <span class="tag" data-s="inactive">{{ b.code }} inactive</span> } }</div>
-        <div>Period: {{ period(m) }} · Amounts in LKR · Posted entries incl. reversals; voided entries excluded</div>
+        <div>Period: {{ period(m) }} · Amounts in LKR · {{ basis() || 'Posted entries incl. reversals; voided entries excluded' }}</div>
         <div class="print-only">Printed by {{ auth.me()?.name }} at {{ printedAt() }}</div>
         @if (m.provisional) { <div class="provisional">PROVISIONAL - period not locked</div> }
       </div>
@@ -212,6 +212,8 @@ export class ReportHeadComponent {
   auth = inject(AuthService);
   meta = input<ReportMeta | null>(null);
   title = input('');
+  /** Basis line; the trial balance has its own (double-entry S2). */
+  basis = input('');
   /** Time of printing (QA bug 3): refreshed when the browser starts printing. */
   printedAt = signal(colomboNow());
 
