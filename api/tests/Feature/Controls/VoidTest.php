@@ -120,7 +120,7 @@ class VoidTest extends ControlsTestCase
         foreach (['ledger_entries', 'audit_logs'] as $table) {
             $before = DB::table($table)->orderBy('id')->get()->toArray();
             $column = $table === 'ledger_entries' ? 'debit' : 'event';
-            foreach ([fn () => DB::table($table)->update([$column => '9']), fn () => DB::table($table)->where('id', 1)->delete(), fn () => DB::table($table)->delete()] as $i => $call) {
+            foreach ([fn () => DB::table($table)->update([$column => '9']), fn () => DB::table($table)->where('id', $before[0]->id)->delete(), fn () => DB::table($table)->delete()] as $i => $call) {
                 try {
                     $call();
                     $this->fail("{$table} raw write {$i} did not throw");

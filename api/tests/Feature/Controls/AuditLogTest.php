@@ -6,6 +6,7 @@ use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\User;
 use App\Services\ReportService;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
@@ -161,8 +162,9 @@ class AuditLogTest extends ControlsTestCase
         $i = $this->income('2026-11-10', '10.00');
         $this->accKdy()->putJson("/api/v1/transactions/{$i['id']}", ['payee_payer' => 'New payer', 'reference' => 'R-1'])->assertOk();
         $row = $this->list($this->accKdy(), ['event' => 'transaction.updated'])['data'][0];
-        $this->assertSame(['payee_payer' => null, 'reference' => null], $row['old_values']);
-        $this->assertSame(['payee_payer' => 'New payer', 'reference' => 'R-1'], $row['new_values']);
+        // MySQL JSON columns do not keep key order, so compare key-sorted arrays.
+        $this->assertSame(['payee_payer' => null, 'reference' => null], Arr::sortRecursive($row['old_values']));
+        $this->assertSame(['payee_payer' => 'New payer', 'reference' => 'R-1'], Arr::sortRecursive($row['new_values']));
         $this->assertSame('payee_payer: — -> New payer; reference: — -> R-1', $row['summary']);
         $this->assertSame('Entry edited', $row['event_label']);
     }

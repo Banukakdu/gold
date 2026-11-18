@@ -6,6 +6,7 @@ use App\Models\AuditLog;
 use App\Models\Role;
 use App\Models\User;
 use Database\Seeders\PermissionSeeder;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Route;
 
 /** Spec users-and-roles: roles, templates (AC 20-32, 45, 46). */
@@ -132,7 +133,11 @@ class RoleManagementTest extends UsersAndRolesTestCase
             $this->assertSame($tpl->permissionKeys(), $copy->permissionKeys());
             $audit = AuditLog::where('event', 'role.copied_from_templates')->where('auditable_id', $copy->id)->firstOrFail();
             $this->assertSame($this->kdy->id, $audit->branch_id);
-            $this->assertSame(['template_id' => $tpl->id, 'name' => $tpl->name, 'permissions' => $tpl->permissionKeys()], $audit->new_values);
+            // MySQL JSON columns do not keep key order, so compare by key.
+            $this->assertSame(['name', 'permissions', 'template_id'], array_values(Arr::sort(array_keys($audit->new_values))));
+            $this->assertSame($tpl->id, $audit->new_values['template_id']);
+            $this->assertSame($tpl->name, $audit->new_values['name']);
+            $this->assertSame($tpl->permissionKeys(), $audit->new_values['permissions']);
         }
 
         $again = $this->admin($this->kdy)->postJson('/api/v1/roles/copy-templates')->assertCreated()->json();
