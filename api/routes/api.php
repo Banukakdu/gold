@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\V1\AccountController;
+use App\Http\Controllers\Api\V1\AttachmentController;
 use App\Http\Controllers\Api\V1\AuditLogController;
 use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\BranchController;
@@ -53,6 +54,14 @@ Route::prefix('v1')->group(function () {
             Route::put('transactions/{transaction}', [TransactionController::class, 'update']);
             Route::post('transactions/{transaction}/void', [TransactionController::class, 'void']);
             Route::post('transactions/{transaction}/reverse', [TransferController::class, 'reverse'])->middleware('perm:transfer.reverse');
+            // AG-062 attachments (docs/specs/attachments.md): evidence on income/expense entries. Remove is a POST
+            // action; there is deliberately no DELETE route. {attachment} must belong to {transaction} (404 otherwise).
+            Route::scopeBindings()->middleware('perm:transaction.view')->group(function () {
+                Route::get('transactions/{transaction}/attachments', [AttachmentController::class, 'index']);
+                Route::post('transactions/{transaction}/attachments', [AttachmentController::class, 'store'])->middleware('throttle:30,1');
+                Route::get('transactions/{transaction}/attachments/{attachment}/download', [AttachmentController::class, 'download']);
+                Route::post('transactions/{transaction}/attachments/{attachment}/remove', [AttachmentController::class, 'remove']);
+            });
             Route::post('incomes', [TransactionController::class, 'storeIncome'])->middleware('perm:income.create');
             Route::post('expenses', [TransactionController::class, 'storeExpense'])->middleware('perm:expense.create');
 

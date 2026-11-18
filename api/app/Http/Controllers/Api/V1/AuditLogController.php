@@ -51,6 +51,7 @@ class AuditLogController extends Controller
         'periods' => [['period.'], []],
         'reports' => [[], ['report.exported', 'audit.exported']],
         'logins' => [[], ['auth.login']],
+        'attachments' => [['attachment.'], []],
     ];
 
     public const LABELS = [
@@ -71,6 +72,11 @@ class AuditLogController extends Controller
         'audit.exported' => 'Audit log exported',
         'auth.login' => 'Login',
         'ledger.legacy_voids_identified' => 'Legacy voids identified',
+        'attachment.added' => 'Attachment added',
+        'attachment.removed' => 'Attachment removed',
+        'attachment.downloaded' => 'Attachment downloaded',
+        'attachment.missing' => 'Attachment file missing',
+        'attachment.integrity_failed' => 'Attachment file changed',
     ];
 
     public function index(Request $request)
