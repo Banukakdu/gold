@@ -2,12 +2,15 @@
 
 namespace Tests\Feature\Controls;
 
+use App\Exceptions\LedgerException;
 use App\Models\AuditLog;
 use App\Models\PeriodLock;
 use App\Models\Role;
 use App\Models\Transaction;
 use App\Models\User;
+use App\Services\LedgerService;
 use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\Auth;
 
 /** AG-091 period locks: controls spec AC 10-19, 29-31, 36-38. */
 class PeriodLockTest extends ControlsTestCase
@@ -141,6 +144,69 @@ class PeriodLockTest extends ControlsTestCase
         $this->accKdy()->postJson("/api/v1/transactions/{$oct['id']}/reverse", ['reason' => 'Wrong', 'txn_date' => $date])->assertStatus(422)->assertJsonPath('message', $msg);
 
         $this->assertSame($before, $this->snapshot());
+    }
+
+    /** Accountant sign-off A: non-ISO dates must not slip past the lock (text compare) on any money path. */
+    public function test_ac16_non_iso_dates_are_refused_on_every_path(): void
+    {
+        $oct = $this->expense('2026-10-05', '1000.00');
+        $this->lock('2026-10', null)->assertCreated();
+        $before = $this->snapshot();
+        $cat = ['income' => $this->category('income')->id, 'expense' => $this->category('expense')->id];
+
+        foreach (['2026/10/05', '5 October 2026', '20261005', '2026-10-5', '2026-10-05 10:00:00'] as $date) {
+            $this->accKdy()->postJson('/api/v1/incomes', ['account_id' => $this->kdyCash->id, 'category_id' => $cat['income'], 'txn_date' => $date, 'amount' => '10'])
+                ->assertStatus(422)->assertJsonValidationErrors('txn_date');
+            $this->accKdy()->postJson('/api/v1/expenses', ['account_id' => $this->kdyCash->id, 'category_id' => $cat['expense'], 'txn_date' => $date, 'amount' => '10'])
+                ->assertStatus(422)->assertJsonValidationErrors('txn_date');
+            $this->accKdy()->postJson('/api/v1/transfers', ['from_account_id' => $this->kdyCash->id, 'to_account_id' => $this->galCash->id, 'amount' => '10', 'txn_date' => $date, 'note' => 'x'])
+                ->assertStatus(422)->assertJsonValidationErrors('txn_date');
+            $this->sa()->postJson('/api/v1/allocations', ['from_account_id' => $this->mainAcc->id, 'to_account_id' => $this->kdyCash->id, 'amount' => '10', 'txn_date' => $date, 'kind' => 'top_up'])
+                ->assertStatus(422)->assertJsonValidationErrors('txn_date');
+            $this->sa()->postJson('/api/v1/capital', ['account_id' => $this->mainAcc->id, 'amount' => '10', 'txn_date' => $date])
+                ->assertStatus(422)->assertJsonValidationErrors('txn_date');
+            $this->accKdy()->postJson("/api/v1/transactions/{$oct['id']}/reverse", ['reason' => 'Wrong', 'txn_date' => $date])
+                ->assertStatus(422)->assertJsonValidationErrors('txn_date');
+        }
+        $this->assertSame($before, $this->snapshot());
+        $this->assertSame(0, Transaction::withoutGlobalScopes()->whereDate('txn_date', '<', '2000-01-01')->count());
+
+        // The service and the lock check refuse them too (no text compare on another format).
+        Auth::setUser($this->acc);
+        $ledger = app(LedgerService::class);
+        foreach ([
+            fn () => $ledger->incomeOrExpense('income', ['account_id' => $this->kdyCash->id, 'category_id' => $cat['income'], 'txn_date' => '2026/10/05', 'amount' => '10']),
+            fn () => $ledger->transfer($this->kdyCash->id, $this->galCash->id, '10', '20261005'),
+            fn () => $ledger->capital($this->mainAcc->id, '10', '5 October 2026'),
+            fn () => $ledger->reverse($this->txn($oct['id']), '2026/11/05'),
+        ] as $i => $call) {
+            try {
+                $call();
+                $this->fail("service call {$i} accepted a non-ISO date");
+            } catch (LedgerException $e) {
+                $this->assertSame('The date must be in YYYY-MM-DD format.', $e->getMessage());
+            }
+        }
+        $this->assertSame($before, $this->snapshot());
+        $this->expectException(\InvalidArgumentException::class);
+        PeriodLock::isLocked($this->kdy->id, '2026/10/05');
+    }
+
+    public function test_lock_review_covers_every_newly_closed_month(): void
+    {
+        $sep = $this->expense('2026-09-25', '10.00');
+        $oct = $this->expense('2026-10-05', '10.00');
+        $aug = $this->expense('2026-08-20', '10.00');
+        foreach ([$sep, $oct, $aug] as $e) {
+            $this->accKdy()->postJson("/api/v1/transactions/{$e['id']}/void", ['reason' => 'Duplicate'])->assertOk();
+        }
+        $q = "/api/v1/period-locks/review?period=2026-10&branch_id={$this->kdy->id}";
+        $this->sa()->getJson($q)->assertOk()->assertJsonPath('self_voids', 3)->assertJsonPath('closes_from', null);
+
+        $this->lock('2026-08', $this->kdy)->assertCreated();
+        $this->sa()->getJson($q)->assertOk()->assertJsonPath('self_voids', 2)->assertJsonPath('closes_from', '2026-09');
+        // A global lock newly closes different months per branch: KDY from September, GAL/MAIN from the start.
+        $this->sa()->getJson('/api/v1/period-locks/review?period=2026-10')->assertOk()->assertJsonPath('self_voids', 2)->assertJsonPath('closes_from', null);
     }
 
     public function test_ac17_reversal_in_an_open_month_leaves_the_locked_month_unchanged(): void

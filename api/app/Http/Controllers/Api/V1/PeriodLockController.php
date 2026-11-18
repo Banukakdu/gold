@@ -73,28 +73,38 @@ class PeriodLockController extends Controller
     public function review(Request $request)
     {
         $d = $request->validate(['period' => 'required|date_format:Y-m', 'branch_id' => 'nullable|integer|exists:branches,id']);
-        $start = CarbonImmutable::createFromFormat('!Y-m', $d['period']);
+        $period = $d['period'];
+
+        // Locks are cumulative: this lock newly closes, per branch, every month after that branch's current
+        // "closed through" up to $period (accountant sign-off). Count self-voids/reversals in all of them.
+        $through = PeriodLock::closedThrough();
+        $branches = ($d['branch_id'] ?? null) ? Branch::whereKey($d['branch_id'])->get() : Branch::all();
+        $after = $branches->mapWithKeys(fn ($b) => [$b->id => PeriodLock::throughFor($through, $b->id)]); // '' = nothing closed yet
+        $open = $after->filter(fn ($t) => $t < $period);
 
         $rows = AuditLog::whereIn('event', ['transaction.voided', 'transaction.reversed'])
             ->where('auditable_type', Transaction::class)
-            ->when($d['branch_id'] ?? null, fn ($q, $b) => $q->where('branch_id', $b))
-            // An entry dated in the month can only be voided or reversed from that month on.
-            ->where('created_at', '>=', $start->subDay()->format('Y-m-d H:i:s'))
-            ->get(['id', 'event', 'auditable_id', 'new_values']);
-        $rows = $rows->filter(fn ($r) => ($r->new_values['self'] ?? false) === true);
+            ->whereIn('branch_id', $open->keys())
+            ->get(['id', 'event', 'branch_id', 'auditable_id', 'new_values'])
+            ->filter(fn ($r) => ($r->new_values['self'] ?? false) === true);
 
         // Voids are dated on the original entry; reversals on the reversal entry.
-        $dates = Transaction::withoutGlobalScopes()
-            ->whereIn('id', $rows->map(fn ($r) => $r->event === 'transaction.voided' ? $r->auditable_id : ($r->new_values['reversal_id'] ?? 0)))
-            ->pluck('txn_date', 'id');
-        $inMonth = fn ($r) => ($date = $dates[$r->event === 'transaction.voided' ? $r->auditable_id : ($r->new_values['reversal_id'] ?? 0)] ?? null)
-            && $date->format('Y-m') === $d['period'];
+        $dated = fn ($r) => $r->event === 'transaction.voided' ? $r->auditable_id : ($r->new_values['reversal_id'] ?? 0);
+        $dates = Transaction::withoutGlobalScopes()->whereIn('id', $rows->map($dated))->pluck('txn_date', 'id');
+        $newlyClosed = function ($r) use ($dates, $dated, $open, $period) {
+            $month = isset($dates[$dated($r)]) ? $dates[$dated($r)]->format('Y-m') : null;
+
+            return $month !== null && $month <= $period && $month > $open[$r->branch_id];
+        };
+        $first = $open->isEmpty() ? $period : $open->min();
 
         return [
-            'period' => $d['period'],
+            'period' => $period,
             'branch_id' => $d['branch_id'] ?? null,
-            'self_voids' => $rows->where('event', 'transaction.voided')->filter($inMonth)->count(),
-            'self_reversals' => $rows->where('event', 'transaction.reversed')->filter($inMonth)->count(),
+            // First month this lock newly closes; null = every earlier month (no earlier lock).
+            'closes_from' => $open->isEmpty() ? $period : ($first === '' ? null : CarbonImmutable::createFromFormat('!Y-m', $first)->addMonth()->format('Y-m')),
+            'self_voids' => $rows->where('event', 'transaction.voided')->filter($newlyClosed)->count(),
+            'self_reversals' => $rows->where('event', 'transaction.reversed')->filter($newlyClosed)->count(),
         ];
     }
 

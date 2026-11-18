@@ -16,7 +16,7 @@ class TransferController extends Controller
     /** AG-043: owner capital into a Main account. Super Admin only. */
     public function capital(Request $request)
     {
-        $d = $request->validate(['account_id' => 'required|integer', 'amount' => 'required|numeric|gt:0|decimal:0,2', 'txn_date' => 'required|date|before_or_equal:'.BusinessDate::today(), 'note' => 'nullable|string|max:500']);
+        $d = $request->validate(['account_id' => 'required|integer', 'amount' => 'required|numeric|gt:0|decimal:0,2', 'txn_date' => 'required|date_format:Y-m-d|before_or_equal:'.BusinessDate::today(), 'note' => 'nullable|string|max:500']);
 
         return response()->json($this->ledger->capital($d['account_id'], (string) $d['amount'], $d['txn_date'], $d['note'] ?? null), 201);
     }
@@ -26,7 +26,7 @@ class TransferController extends Controller
     {
         $d = $request->validate([
             'from_account_id' => 'required|integer', 'to_account_id' => 'required|integer',
-            'amount' => 'required|numeric|gt:0|decimal:0,2', 'txn_date' => 'required|date|before_or_equal:'.BusinessDate::today(),
+            'amount' => 'required|numeric|gt:0|decimal:0,2', 'txn_date' => 'required|date_format:Y-m-d|before_or_equal:'.BusinessDate::today(),
             'kind' => 'required|in:opening,top_up', 'note' => 'nullable|string|max:500',
         ]);
         $from = Account::withoutGlobalScopes()->with('branch')->findOrFail($d['from_account_id']);
@@ -44,7 +44,7 @@ class TransferController extends Controller
     {
         $d = $request->validate([
             'from_account_id' => 'required|integer', 'to_account_id' => 'required|integer|different:from_account_id',
-            'amount' => 'required|numeric|gt:0|decimal:0,2', 'txn_date' => 'required|date|before_or_equal:'.BusinessDate::today(),
+            'amount' => 'required|numeric|gt:0|decimal:0,2', 'txn_date' => 'required|date_format:Y-m-d|before_or_equal:'.BusinessDate::today(),
             'note' => 'required|string|max:500',
         ]);
         Account::findOrFail($d['from_account_id']); // branch-scoped: must be own branch

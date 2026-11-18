@@ -183,7 +183,7 @@ class TransactionController extends Controller
         $data = $request->validate([
             'account_id' => 'required|integer',
             'category_id' => 'required|exists:categories,id',
-            'txn_date' => 'required|date|before_or_equal:'.BusinessDate::today(),
+            'txn_date' => 'required|date_format:Y-m-d|before_or_equal:'.BusinessDate::today(),
             'amount' => 'required|numeric|gt:0|decimal:0,2',
             'payee_payer' => 'nullable|string|max:255',
             'payment_method' => 'nullable|in:cash,bank_transfer,cheque,card,online',

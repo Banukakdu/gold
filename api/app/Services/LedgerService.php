@@ -26,6 +26,8 @@ class LedgerService
     /** Owner capital into a Main account (one-off opening equity). */
     public function capital(int $accountId, string $amount, string $date, ?string $note = null): Transaction
     {
+        $date = $this->date($date);
+
         return DB::transaction(function () use ($accountId, $amount, $date, $note) {
             $acc = $this->lock([$accountId])[$accountId];
             if (! $acc->is_main_account && ! $acc->branch->is_main) {
@@ -52,6 +54,8 @@ class LedgerService
         if ($fromId === $toId) {
             throw new LedgerException('Source and destination accounts must be different.');
         }
+
+        $date = $this->date($date);
 
         return DB::transaction(function () use ($fromId, $toId, $amount, $date, $note, $type) {
             $locked = $this->lock([$fromId, $toId]);
@@ -88,6 +92,8 @@ class LedgerService
         if (! in_array($type, [Transaction::INCOME, Transaction::EXPENSE], true)) {
             throw new LedgerException('Invalid type.');
         }
+
+        $data['txn_date'] = $this->date((string) ($data['txn_date'] ?? ''));
 
         return DB::transaction(function () use ($type, $data) {
             $acc = $this->lock([(int) $data['account_id']])[(int) $data['account_id']];
@@ -129,6 +135,8 @@ class LedgerService
      */
     public function reverse(Transaction $original, string $date, ?string $reason = null): Transaction
     {
+        $date = $this->date($date);
+
         return DB::transaction(function () use ($original, $date, $reason) {
             $original = Transaction::withoutGlobalScopes()->lockForUpdate()->findOrFail($original->id);
             if ($original->status !== 'posted' || $original->type === Transaction::REVERSAL) {
@@ -227,6 +235,16 @@ class LedgerService
         }
 
         return $rows->all();
+    }
+
+    /** Accountant sign-off A: one strict YYYY-MM-DD date is both lock-checked and stored. */
+    private function date(string $date): string
+    {
+        try {
+            return BusinessDate::normalize($date);
+        } catch (\InvalidArgumentException) {
+            throw new LedgerException('The date must be in YYYY-MM-DD format.');
+        }
     }
 
     private function assertOpen(int $branchId, string $date): void

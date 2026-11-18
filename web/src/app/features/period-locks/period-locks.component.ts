@@ -172,18 +172,25 @@ export class PeriodLocksComponent implements OnInit {
     this.msg.set('');
     this.ok.set('');
     const scope = branch === null ? 'all branches' : this.scopeName(branch);
-    let text = `Lock ${label(p)} for ${scope}? No entry dated in this month can be created, edited, voided or reversed until it is unlocked.`;
-    if (p === this.grid()?.current_period) text += ' This blocks today\'s entries.';
+    // Locks are cumulative (accountant sign-off): say which earlier open months this lock closes too.
+    let review: { closes_from: string | null; self_voids: number; self_reversals: number } | null = null;
     try {
-      // Finding 7: information only, it never blocks the lock.
       const params: Record<string, string> = { period: p };
       if (branch !== null) params['branch_id'] = String(branch);
-      const r = await firstValueFrom(this.http.get<{ self_voids: number; self_reversals: number }>('/api/v1/period-locks/review', { params }));
-      if (r.self_voids || r.self_reversals) {
-        const parts = [r.self_voids ? `${r.self_voids} self-void${r.self_voids === 1 ? '' : 's'}` : '', r.self_reversals ? `${r.self_reversals} self-reversal${r.self_reversals === 1 ? '' : 's'}` : ''];
-        text += `\n\n${parts.filter(Boolean).join(' and ')} this month - review the audit log first.`;
-      }
-    } catch { /* the count is optional */ }
+      review = await firstValueFrom(this.http.get<{ closes_from: string | null; self_voids: number; self_reversals: number }>('/api/v1/period-locks/review', { params }));
+    } catch { /* the review is information only */ }
+    const from = review?.closes_from;
+    const range = from === undefined ? `${label(p)} and every earlier open month`
+      : from === null ? `${label(p)} and every earlier month (there is no earlier lock)`
+      : from === p ? label(p) : `${label(from)} to ${label(p)}`;
+    let text = `Lock ${label(p)} for ${scope}? This closes ${range}. No entry dated in a closed month can be created, edited, voided or reversed until it is unlocked.`;
+    if (p === this.grid()?.current_period) text += ' This blocks today\'s entries.';
+    // Finding 7: information only, it never blocks the lock. Counts cover every month this lock newly closes.
+    if (review && (review.self_voids || review.self_reversals)) {
+      const parts = [review.self_voids ? `${review.self_voids} self-void${review.self_voids === 1 ? '' : 's'}` : '',
+        review.self_reversals ? `${review.self_reversals} self-reversal${review.self_reversals === 1 ? '' : 's'}` : ''];
+      text += `\n\n${parts.filter(Boolean).join(' and ')} ${from === p ? 'this month' : 'in these months'} - review the audit log first.`;
+    }
     if (!confirm(text)) return;
     this.busy.set(true);
     this.http.post('/api/v1/period-locks', { period: p, branch_id: branch }).subscribe({

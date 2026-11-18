@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Support\BusinessDate;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
@@ -37,8 +38,11 @@ class PeriodLock extends Model
 
     public static function lockedQuery(int $branchId, string $date, bool $share = false): Builder
     {
+        // Strict YYYY-MM-DD only: a text compare on another format ("2026/10/05") would miss the lock.
+        $period = substr(BusinessDate::normalize($date), 0, 7);
+
         return static::active()
-            ->where('period', '>=', substr($date, 0, 7))
+            ->where('period', '>=', $period)
             ->where(fn ($q) => $q->whereNull('branch_id')->orWhere('branch_id', $branchId))
             ->when($share, fn ($q) => $q->sharedLock());
     }
