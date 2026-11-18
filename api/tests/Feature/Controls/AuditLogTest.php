@@ -165,7 +165,7 @@ class AuditLogTest extends ControlsTestCase
         // MySQL JSON columns do not keep key order, so compare key-sorted arrays.
         $this->assertSame(['payee_payer' => null, 'reference' => null], Arr::sortRecursive($row['old_values']));
         $this->assertSame(['payee_payer' => 'New payer', 'reference' => 'R-1'], Arr::sortRecursive($row['new_values']));
-        $this->assertSame('payee_payer: — -> New payer; reference: — -> R-1', $row['summary']);
+        $this->assertEqualsCanonicalizing(['payee_payer: — -> New payer', 'reference: — -> R-1'], explode('; ', $row['summary']));
         $this->assertSame('Entry edited', $row['event_label']);
     }
 

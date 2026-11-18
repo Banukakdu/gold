@@ -3,11 +3,14 @@ import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { firstValueFrom } from 'rxjs';
 import { errorText } from '../../core/api.interceptor';
+import { colomboDateTime } from '../../core/dates';
 
 interface Person { id: number; name: string; tag: string | null }
 interface Lock {
   id: number; branch_id: number | null; period: string;
   locked_by: Person | null; locked_at: string; unlocked_at: string | null; unlocked_by: Person | null; unlock_reason: string | null;
+  /** R7: which months an unlock reopens (active locks only). */
+  reopens: string | null;
 }
 interface Grid {
   year: number; current_period: string;
@@ -75,7 +78,8 @@ const short = (period: string) => `${MONTHS[+period.slice(5, 7) - 1].slice(0, 3)
         <label>Reason (10-500 characters)
           <textarea rows="3" [(ngModel)]="reason" name="reason" maxlength="500"></textarea>
         </label>
-        <p class="muted">Reports for this month will show PROVISIONAL again. The lock is kept as history.</p>
+        <p><b>{{ l.reopens }}</b></p>
+        <p class="muted">Reports for the reopened months will show PROVISIONAL again. The lock is kept as history.</p>
         <button [disabled]="busy() || reason.trim().length < 10" (click)="unlock(l)">Unlock</button>
         <button class="ghost" (click)="unlocking.set(null)">Cancel</button>
       </div>
@@ -127,7 +131,8 @@ export class PeriodLocksComponent implements OnInit {
 
   monthName(p: string) { return label(p); }
   scopeName(branchId: number | null) { return branchId === null ? 'all branches' : this.grid()?.branches.find(b => b.id === branchId)?.code ?? '?'; }
-  when(iso: string) { return iso ? iso.replace('T', ' ').slice(0, 16) : ''; }
+  /** Q1: times in Asia/Colombo, like the audit log. */
+  when(iso: string) { return colomboDateTime(iso); }
 
   private locksAt(period: string, branch: number | null): Lock[] {
     return (this.grid()?.locks ?? []).filter(l => l.period === period && l.branch_id === branch);
@@ -142,12 +147,21 @@ export class PeriodLocksComponent implements OnInit {
     const by = (l: Lock) => `by ${l.locked_by?.name ?? '?'} ${this.when(l.locked_at).slice(0, 10)}`;
     const global = g.closed_through.global ?? '';
 
+    // Q2: a later lock keeps this month closed, so its unlock would be refused: say which one to unlock first.
+    const later = (through: string, scope: string): Cell | null => through > p && active
+      ? { text: 'Locked', sub: `${by(active)} · unlock ${short(through)}${scope} first`, future: false, history } : null;
+
     if (branch === null) {
+      const blocked = later(global, ' (all branches)');
+      if (blocked) return blocked;
       if (active) return { text: 'Locked', sub: by(active), action: { kind: 'unlock', label: 'Unlock all branches', lock: active }, future: false, history };
       if (global > p) return { text: `Closed (through ${short(global)})`, future, history };
       return { text: 'Open', action: { kind: 'lock', label: 'Lock all branches' }, future, history };
     }
     if (this.locksAt(p, null).some(l => !l.unlocked_at)) return { text: 'Locked (all branches)', future, history };
+    const own = g.closed_through.branches[String(branch)] ?? '';
+    const blocked = global > own ? later(global, ' (all branches)') : later(own, '');
+    if (blocked) return blocked;
     if (active) return { text: 'Locked', sub: by(active), action: { kind: 'unlock', label: 'Unlock', lock: active }, future: false, history };
     const through = [global, g.closed_through.branches[String(branch)] ?? ''].sort().pop() ?? '';
     if (through > p) return { text: `Closed (through ${short(through)})`, future, history };
@@ -188,7 +202,7 @@ export class PeriodLocksComponent implements OnInit {
   unlock(l: Lock) {
     this.busy.set(true);
     this.http.post(`/api/v1/period-locks/${l.id}/unlock`, { reason: this.reason.trim() }).subscribe({
-      next: () => { this.busy.set(false); this.unlocking.set(null); this.ok.set(`${label(l.period)} unlocked for ${this.scopeName(l.branch_id)}.`); this.load(); },
+      next: (r: any) => { this.busy.set(false); this.unlocking.set(null); this.ok.set(`${label(l.period)} unlocked for ${this.scopeName(l.branch_id)}. ${r?.message ?? ''}`); this.load(); },
       error: e => { this.busy.set(false); this.msg.set(errorText(e)); },
     });
   }

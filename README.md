@@ -34,6 +34,25 @@ In production, run `php artisan queue:work` under a process manager (e.g. Superv
 
 Tests: `cd api && php artisan test` (runs on in-memory SQLite).
 
+### Deploying the controls release (void with contra entries, audit log, period locks)
+
+The migration `2026_11_20_000000_accounting_controls` adds database triggers that refuse UPDATE/DELETE on
+`ledger_entries` and `audit_logs`.
+
+1. **MySQL privileges.** With binary logging on (the MySQL 8 default), `CREATE TRIGGER` needs the SUPER privilege
+   unless the server has `log_bin_trust_function_creators = 1`. If the app's DB user is not an admin, set it first,
+   e.g. `SET PERSIST log_bin_trust_function_creators = 1;` (or `log_bin_trust_function_creators=1` in `my.cnf`).
+   The migration checks this before changing anything and stops with a clear message otherwise.
+2. **Before the migration:** `php artisan ledger:verify`. It checks every `accounts.current_balance` against the
+   ledger (exit code 1 on any difference) and lists voids made before this release ("legacy voids", whose ledger
+   lines were deleted by the old code), flagging any without a `transaction.voided` audit row. The migration also
+   stops before any change if `period_locks` holds duplicate locks for the same branch and month.
+3. `php artisan migrate --force`
+4. **After the migration:** run `php artisan ledger:verify` again; it must exit 0. The Super Admin reviews the
+   legacy void list: where a report for that month was printed and signed before the void, re-print it and mark the
+   old copy superseded. No ledger correction is made.
+5. Rolling back is possible only while no lock has been unlocked (unlock history has two rows per branch and month).
+
 ## How it works
 
 **Branch context.** The app sends the active branch in an `X-Branch-Id` header. Middleware checks the user belongs

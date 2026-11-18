@@ -10,6 +10,7 @@ use App\Models\LedgerEntry;
 use App\Models\PeriodLock;
 use App\Models\Setting;
 use App\Models\Transaction;
+use App\Support\BusinessDate;
 use App\Support\Money;
 use Illuminate\Support\Facades\DB;
 
@@ -136,7 +137,7 @@ class LedgerService
             if ($date < $original->txn_date->format('Y-m-d')) {
                 throw new LedgerException('The reversal date cannot be before the original entry date.');
             }
-            if ($date > now()->toDateString()) {
+            if ($date > BusinessDate::today()) {
                 throw new LedgerException('The reversal date cannot be in the future.');
             }
             $entries = $original->entries()->get();
@@ -230,7 +231,8 @@ class LedgerService
 
     private function assertOpen(int $branchId, string $date): void
     {
-        if (PeriodLock::isLocked($branchId, $date)) {
+        // Locking read: a concurrent period lock for this branch/month waits for this posting (reviewer R5).
+        if (PeriodLock::isLocked($branchId, $date, share: true)) {
             throw new LedgerException('The period '.substr($date, 0, 7).' is locked.');
         }
     }

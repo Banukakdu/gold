@@ -1,6 +1,7 @@
 <?php
 
 use App\Support\LegacyVoids;
+use App\Support\MigrationPreflight;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
@@ -20,6 +21,10 @@ return new class extends Migration
 
     public function up(): void
     {
+        // Reviewer R2/R3: MySQL DDL is not transactional, so refuse to start rather than stop half-way.
+        MigrationPreflight::assertNoDuplicatePeriodLocks();
+        MigrationPreflight::assertCanCreateTriggers();
+
         Schema::table('ledger_entries', function (Blueprint $table) {
             $table->dropForeign(['transaction_id']);
             $table->foreign('transaction_id')->references('id')->on('transactions')->restrictOnDelete();
@@ -75,11 +80,6 @@ return new class extends Migration
     public function down(): void
     {
         $driver = DB::connection()->getDriverName();
-        foreach (self::IMMUTABLE as $t) {
-            foreach (['update', 'delete'] as $op) {
-                DB::unprepared("DROP TRIGGER IF EXISTS {$t}_no_{$op}");
-            }
-        }
         if ($driver === 'mysql') {
             DB::statement('ALTER TABLE period_locks DROP INDEX period_locks_active_key_unique');
             DB::statement('ALTER TABLE period_locks DROP COLUMN active_key');
@@ -119,5 +119,13 @@ return new class extends Migration
             $table->dropForeign(['transaction_id']);
             $table->foreign('transaction_id')->references('id')->on('transactions')->cascadeOnDelete();
         });
+
+        // Reviewer R4: triggers go last, so a rollback that fails earlier never leaves the tables mutable.
+        // (On SQLite the ledger_entries rebuild above already dropped its triggers; IF EXISTS covers that.)
+        foreach (self::IMMUTABLE as $t) {
+            foreach (['update', 'delete'] as $op) {
+                DB::unprepared("DROP TRIGGER IF EXISTS {$t}_no_{$op}");
+            }
+        }
     }
 };

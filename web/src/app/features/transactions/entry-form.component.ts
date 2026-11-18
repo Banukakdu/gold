@@ -5,13 +5,16 @@ import { Router } from '@angular/router';
 import { Account, Category } from '../../core/models';
 import { MoneyPipe } from '../../core/money.pipe';
 import { errorText } from '../../core/api.interceptor';
+import { LockBannerComponent } from '../period-locks/lock-banner.component';
+import { colomboToday } from '../../core/dates';
 
 /** Record income or expense (route /transactions/new/:kind). */
 @Component({
   standalone: true,
-  imports: [FormsModule, MoneyPipe],
+  imports: [FormsModule, MoneyPipe, LockBannerComponent],
   template: `
     <h1>Record {{ kind() }}</h1>
+    <ag-lock-banner />
     <form class="card form" (ngSubmit)="save()">
       <label>Date <input type="date" name="txn_date" [(ngModel)]="m.txn_date" [max]="today" required /></label>
       <label>{{ kind() === 'income' ? 'Received into' : 'Paid from' }}
@@ -49,7 +52,7 @@ export class EntryFormComponent implements OnInit {
   kind = input.required<'income' | 'expense'>();
   private http = inject(HttpClient);
   private router = inject(Router);
-  today = new Date().toISOString().slice(0, 10);
+  today = colomboToday();
   accounts = signal<Account[]>([]);
   categories = signal<Category[]>([]);
   parentIdSig = signal<number | null>(null);

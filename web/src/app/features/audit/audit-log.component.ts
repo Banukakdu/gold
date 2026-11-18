@@ -5,6 +5,7 @@ import { firstValueFrom } from 'rxjs';
 import { AuthService } from '../../core/auth.service';
 import { errorText } from '../../core/api.interceptor';
 import { ReportParams, toHttpParams } from '../reports/report-common';
+import { colomboToday } from '../../core/dates';
 
 interface Actor { id: number; name: string; tag: string | null }
 interface AuditRow {
@@ -18,13 +19,6 @@ interface AuditRow {
 }
 interface AuditPage { data: AuditRow[]; meta: { current_page: number; last_page: number; per_page: number; total: number } }
 interface DiffLine { field: string; old: string; new: string; changed: boolean }
-
-/** Today in Asia/Colombo as YYYY-MM-DD (audit days are Colombo days, spec R12). */
-function colomboToday(): string {
-  const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Colombo', year: 'numeric', month: '2-digit', day: '2-digit' })
-    .formatToParts(new Date()).map(x => [x.type, x.value]));
-  return `${p['year']}-${p['month']}-${p['day']}`;
-}
 
 function show(v: unknown): string {
   if (v === null || v === undefined) return '—';
@@ -180,6 +174,8 @@ export class AuditLogComponent implements OnInit {
   open(r: AuditRow) { this.selected.set(this.selected()?.id === r.id ? null : r); }
 
   async excel() {
+    // Q3: a double click must not export (and audit) twice; busy is set before the button re-renders.
+    if (this.busy()) return;
     this.busy.set(true);
     this.msg.set('');
     const p = this.params();

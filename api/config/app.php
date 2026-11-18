@@ -70,6 +70,9 @@ return [
 
     'timezone' => env('APP_TIMEZONE', 'UTC'),
 
+    // Business days (entry dates, "today", the current month for period locks) are Sri Lanka days.
+    'business_timezone' => env('BUSINESS_TIMEZONE', 'Asia/Colombo'),
+
     /*
     |--------------------------------------------------------------------------
     | Application Locale Configuration

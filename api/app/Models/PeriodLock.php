@@ -26,26 +26,81 @@ class PeriodLock extends Model
         return $q->whereNull('unlocked_at');
     }
 
-    public static function isLocked(int $branchId, string $date): bool
+    /**
+     * @param  bool  $share  take a shared (locking) read, used inside posting transactions (reviewer R5): on MySQL a
+     *                       concurrent lock insert for that branch and month (or later) waits until the posting commits.
+     */
+    public static function isLocked(int $branchId, string $date, bool $share = false): bool
+    {
+        return static::lockedQuery($branchId, $date, $share)->exists();
+    }
+
+    public static function lockedQuery(int $branchId, string $date, bool $share = false): Builder
     {
         return static::active()
             ->where('period', '>=', substr($date, 0, 7))
             ->where(fn ($q) => $q->whereNull('branch_id')->orWhere('branch_id', $branchId))
-            ->exists();
+            ->when($share, fn ($q) => $q->sharedLock());
     }
 
     /**
      * Latest actively locked period per scope: ['global' => 'YYYY-MM'|null, 'branches' => [branch_id => 'YYYY-MM']].
      * A month M is closed for branch B when M <= max(global, branches[B]).
      */
-    public static function closedThrough(): array
+    public static function closedThrough(?int $exceptId = null): array
     {
-        $rows = static::active()->selectRaw('branch_id, MAX(period) as period')->groupBy('branch_id')->get();
+        $rows = static::active()->when($exceptId, fn ($q, $id) => $q->whereKeyNot($id))
+            ->selectRaw('branch_id, MAX(period) as period')->groupBy('branch_id')->get();
 
         return [
             'global' => $rows->whereNull('branch_id')->first()?->period,
             'branches' => $rows->whereNotNull('branch_id')->mapWithKeys(fn ($r) => [(int) $r->branch_id => $r->period])->all(),
         ];
+    }
+
+    /** Latest closed month for a branch: max(global, own branch locks), '' when nothing is closed. */
+    public static function throughFor(array $closedThrough, int $branchId): string
+    {
+        return max((string) $closedThrough['global'], (string) ($closedThrough['branches'][$branchId] ?? ''));
+    }
+
+    /**
+     * Reviewer R7: months that become open again if this (active) lock is unlocked, per branch.
+     * Locks are cumulative, so unlocking October reopens every month back to the previous lock of the same scope.
+     *
+     * @return array<int, array{branch_id: int, code: string, from: string|null, to: string}> from null = no earlier lock
+     */
+    public function reopens(): array
+    {
+        $before = static::closedThrough();
+        $after = static::closedThrough($this->id);
+        $branches = $this->branch_id ? Branch::whereKey($this->branch_id)->get() : Branch::orderByDesc('is_main')->orderBy('code')->get();
+        $out = [];
+        foreach ($branches as $b) {
+            $was = static::throughFor($before, $b->id);
+            $now = static::throughFor($after, $b->id);
+            if ($now < $was) {
+                $out[] = ['branch_id' => $b->id, 'code' => $b->code,
+                    'from' => $now === '' ? null : CarbonImmutable::createFromFormat('!Y-m', $now)->addMonth()->format('Y-m'), 'to' => $was];
+            }
+        }
+
+        return $out;
+    }
+
+    /** One line for the unlock dialog / response. */
+    public static function reopensText(array $reopens): string
+    {
+        if (! $reopens) {
+            return 'No month reopens: every branch stays closed by its own lock.';
+        }
+        $parts = array_map(fn ($r) => $r['code'].': '.match (true) {
+            $r['from'] === null => 'every month up to '.static::label($r['to']).' (no earlier lock)',
+            $r['from'] === $r['to'] => static::label($r['to']),
+            default => static::label($r['from']).' to '.static::label($r['to']),
+        }, $reopens);
+
+        return 'Reopens '.implode('; ', $parts).'.';
     }
 
     /** "2026-10" -> "October 2026" */

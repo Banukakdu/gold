@@ -57,7 +57,8 @@ abstract class ReportTestCase extends AccountingTestCase
         $pages = [];
         preg_match_all('/stream\r?\n(.*?)endstream/s', $pdf, $m);
         foreach ($m[1] as $raw) {
-            $content = @gzuncompress(rtrim($raw, "\r\n"));
+            // Strip only the one end-of-line before "endstream": the zlib data itself may end in \r or \n bytes.
+            $content = @gzuncompress(preg_replace('/\r?\n\z/', '', $raw));
             // Page content streams are text operators; embedded font programs (DejaVu) are binary.
             if ($content === false || str_contains($content, "\0") || ! str_contains($content, ' Tf')) {
                 continue;

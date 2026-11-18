@@ -7,12 +7,14 @@ import { AuthService } from '../../core/auth.service';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
 import { Page, Transaction } from '../../core/models';
 import { errorText } from '../../core/api.interceptor';
+import { LockBannerComponent } from '../period-locks/lock-banner.component';
 
 @Component({
   standalone: true,
-  imports: [FormsModule, MoneyPipe, DatePipe],
+  imports: [FormsModule, MoneyPipe, DatePipe, LockBannerComponent],
   template: `
     <h1>Transactions</h1>
+    <ag-lock-banner />
     <form class="filters" (ngSubmit)="load(1)">
       <input type="date" name="from" [(ngModel)]="f.from" />
       <input type="date" name="to" [(ngModel)]="f.to" />

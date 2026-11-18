@@ -11,6 +11,7 @@ use App\Models\Transaction;
 use App\Models\User;
 use App\Services\LedgerService;
 use App\Support\BranchContext;
+use App\Support\BusinessDate;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -120,9 +121,13 @@ class TransactionController extends Controller
                 ->where('type', $transaction->type)->where('is_active', true)
                 ->where(fn ($q) => $q->whereNull('branch_id')->orWhere('branch_id', $transaction->branch_id))],
         ], ['category_id.exists' => "Choose an active {$transaction->type} category of this branch."]);
-        $old = $transaction->only(array_keys($data));
-        $transaction->update($data);
-        AuditLog::record('transaction.updated', $transaction, $old, $data);
+        DB::transaction(function () use ($transaction, $data, $date) {
+            // Re-check with a locking read inside the write (reviewer R5), like LedgerService::assertOpen.
+            abort_if(PeriodLock::isLocked($transaction->branch_id, $date, share: true), 422, 'The period '.substr($date, 0, 7).' is locked.');
+            $old = $transaction->only(array_keys($data));
+            $transaction->update($data);
+            AuditLog::record('transaction.updated', $transaction, $old, $data);
+        });
 
         return $transaction;
     }
@@ -178,7 +183,7 @@ class TransactionController extends Controller
         $data = $request->validate([
             'account_id' => 'required|integer',
             'category_id' => 'required|exists:categories,id',
-            'txn_date' => 'required|date|before_or_equal:today',
+            'txn_date' => 'required|date|before_or_equal:'.BusinessDate::today(),
             'amount' => 'required|numeric|gt:0|decimal:0,2',
             'payee_payer' => 'nullable|string|max:255',
             'payment_method' => 'nullable|in:cash,bank_transfer,cheque,card,online',

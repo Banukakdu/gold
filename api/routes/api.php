@@ -79,6 +79,7 @@ Route::prefix('v1')->group(function () {
             Route::post('audit-logs/export', [AuditLogController::class, 'export'])->middleware('perm:audit.view');
 
             // AG-091 period locks: Super Admin only; an unlock keeps the row as history.
+            Route::get('period-locks/status', [PeriodLockController::class, 'status']); // read-only banner (R11), any branch user
             Route::get('period-locks', [PeriodLockController::class, 'index'])->middleware('super');
             Route::get('period-locks/review', [PeriodLockController::class, 'review'])->middleware('super');
             Route::post('period-locks', [PeriodLockController::class, 'store'])->middleware('super');

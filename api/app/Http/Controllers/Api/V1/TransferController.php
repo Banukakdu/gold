@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Account;
 use App\Models\Transaction;
 use App\Services\LedgerService;
+use App\Support\BusinessDate;
 use Illuminate\Http\Request;
 
 class TransferController extends Controller
@@ -15,7 +16,7 @@ class TransferController extends Controller
     /** AG-043: owner capital into a Main account. Super Admin only. */
     public function capital(Request $request)
     {
-        $d = $request->validate(['account_id' => 'required|integer', 'amount' => 'required|numeric|gt:0|decimal:0,2', 'txn_date' => 'required|date|before_or_equal:today', 'note' => 'nullable|string|max:500']);
+        $d = $request->validate(['account_id' => 'required|integer', 'amount' => 'required|numeric|gt:0|decimal:0,2', 'txn_date' => 'required|date|before_or_equal:'.BusinessDate::today(), 'note' => 'nullable|string|max:500']);
 
         return response()->json($this->ledger->capital($d['account_id'], (string) $d['amount'], $d['txn_date'], $d['note'] ?? null), 201);
     }
@@ -25,7 +26,7 @@ class TransferController extends Controller
     {
         $d = $request->validate([
             'from_account_id' => 'required|integer', 'to_account_id' => 'required|integer',
-            'amount' => 'required|numeric|gt:0|decimal:0,2', 'txn_date' => 'required|date|before_or_equal:today',
+            'amount' => 'required|numeric|gt:0|decimal:0,2', 'txn_date' => 'required|date|before_or_equal:'.BusinessDate::today(),
             'kind' => 'required|in:opening,top_up', 'note' => 'nullable|string|max:500',
         ]);
         $from = Account::withoutGlobalScopes()->with('branch')->findOrFail($d['from_account_id']);
@@ -43,7 +44,7 @@ class TransferController extends Controller
     {
         $d = $request->validate([
             'from_account_id' => 'required|integer', 'to_account_id' => 'required|integer|different:from_account_id',
-            'amount' => 'required|numeric|gt:0|decimal:0,2', 'txn_date' => 'required|date|before_or_equal:today',
+            'amount' => 'required|numeric|gt:0|decimal:0,2', 'txn_date' => 'required|date|before_or_equal:'.BusinessDate::today(),
             'note' => 'required|string|max:500',
         ]);
         Account::findOrFail($d['from_account_id']); // branch-scoped: must be own branch
@@ -69,9 +70,9 @@ class TransferController extends Controller
         // Controls R8 / finding 4: not before the original, not in the future.
         $d = $request->validate([
             'reason' => 'required|string|max:500',
-            'txn_date' => 'nullable|date_format:Y-m-d|after_or_equal:'.$transaction->txn_date->format('Y-m-d').'|before_or_equal:today',
+            'txn_date' => 'nullable|date_format:Y-m-d|after_or_equal:'.$transaction->txn_date->format('Y-m-d').'|before_or_equal:'.BusinessDate::today(),
         ], ['txn_date.after_or_equal' => 'The reversal date cannot be before the original entry date ('.$transaction->txn_date->format('Y-m-d').').']);
 
-        return response()->json($this->ledger->reverse($transaction, $d['txn_date'] ?? now()->toDateString(), $d['reason']), 201);
+        return response()->json($this->ledger->reverse($transaction, $d['txn_date'] ?? BusinessDate::today(), $d['reason']), 201);
     }
 }
