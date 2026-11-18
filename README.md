@@ -34,6 +34,12 @@ In production, run `php artisan queue:work` under a process manager (e.g. Superv
 
 Tests: `cd api && php artisan test` (runs on in-memory SQLite).
 
+Uploading attachments locally: PHP's default `upload_max_filesize = 2M` refuses most 5 MB files. `php -d
+upload_max_filesize=6M artisan serve` does **not** work: `artisan serve` starts a child PHP process that does not
+inherit `-d` options. Set the limits in the `php.ini` that `php --ini` shows, or put a file such as
+`uploads.ini` (`upload_max_filesize = 6M` and `post_max_size = 8M`) in a folder and start the server with
+`PHP_INI_SCAN_DIR=:/path/to/folder php artisan serve` (the leading `:` keeps the default scan dir).
+
 ### Deploying the controls release (void with contra entries, audit log, period locks)
 
 The migration `2026_11_20_000000_accounting_controls` adds database triggers that refuse UPDATE/DELETE on
@@ -72,7 +78,11 @@ streamed by the API after an access check.
    (removed ones included) has its file on disk with the stored sha256, lists missing or changed files by entry ref
    and attachment id, and exits 1 on any problem. Run it after every deploy and after every backup restore, next to
    `php artisan ledger:verify`.
-5. Rolling back the migration is refused once any attachment exists (rows and files are evidence); restore a backup
+5. **Database user hardening.** The triggers stop DELETE and UPDATE, but `TRUNCATE TABLE` skips triggers (on
+   `attachments`, `ledger_entries` and `audit_logs` alike). MySQL needs the DROP privilege for TRUNCATE, so the app's
+   runtime DB user must not hold DROP (nor ALTER/TRIGGER): grant it `SELECT, INSERT, UPDATE, DELETE` on the schema and
+   run migrations with a separate admin user.
+6. Rolling back the migration is refused once any attachment exists (rows and files are evidence); restore a backup
    taken before the migration instead.
 
 ## How it works
