@@ -52,6 +52,9 @@ export interface Transaction {
   entries_count?: number;
   /** Controls S4: a void from before contra entries existed (no ledger lines). */
   legacy_void_note?: string;
+  /** AG-062: active attachments, and removed ones (accounting review finding 6). */
+  attachments_count?: number;
+  attachments_removed_count?: number;
 }
 
 export interface Page<T> {

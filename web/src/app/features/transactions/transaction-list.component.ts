@@ -2,7 +2,7 @@ import { Component, OnInit, inject, signal } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { DatePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { ActivatedRoute } from '@angular/router';
+import { ActivatedRoute, RouterLink } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
 import { Page, Transaction } from '../../core/models';
@@ -11,7 +11,7 @@ import { LockBannerComponent } from '../period-locks/lock-banner.component';
 
 @Component({
   standalone: true,
-  imports: [FormsModule, MoneyPipe, DatePipe, LockBannerComponent],
+  imports: [FormsModule, MoneyPipe, DatePipe, LockBannerComponent, RouterLink],
   template: `
     <h1>Transactions</h1>
     <ag-lock-banner />
@@ -26,6 +26,12 @@ import { LockBannerComponent } from '../period-locks/lock-banner.component';
         <option value="">Anyone</option>
         @for (c of creators(); track c.id) { <option [value]="c.id">{{ c.name }}{{ c.tag ? ' (' + c.tag + ')' : '' }}</option> }
       </select>
+      <select name="files" [(ngModel)]="f.files" aria-label="Files">
+        <option value="">Files: any</option>
+        <option value="with">Has files</option>
+        <option value="none">No files</option>
+        <option value="removed">Has removed files</option>
+      </select>
       <input name="q" placeholder="Search ref, payee, note" [(ngModel)]="f.q" />
       <button type="submit">Filter</button>
       @if (fromReport()) {
@@ -36,12 +42,12 @@ import { LockBannerComponent } from '../period-locks/lock-banner.component';
     @if (msg()) { <div class="alert">{{ msg() }}</div> }
     <div class="card">
       <table class="list">
-        <thead><tr><th>Date</th><th>Ref</th><th>Branch</th><th>Type</th><th>Category</th><th>Account</th><th>Details</th><th class="num">Amount</th><th>Status</th><th>By</th><th></th></tr></thead>
+        <thead><tr><th>Date</th><th>Ref</th><th>Branch</th><th>Type</th><th>Category</th><th>Account</th><th>Details</th><th class="num">Amount</th><th>Status</th><th>By</th><th>Files</th><th></th></tr></thead>
         <tbody>
           @for (t of page()?.data; track t.id) {
             <tr [class.struck]="t.status === 'void'">
               <td>{{ t.txn_date | date: 'd MMM y' }}</td>
-              <td class="mono">{{ t.ref_no }}</td>
+              <td class="mono"><a [routerLink]="['/transactions', t.id]">{{ t.ref_no }}</a></td>
               <td>{{ t.branch?.code }}</td>
               <td>{{ label(t.type) }}</td>
               <td>{{ t.category ? (t.category.parent?.name ? t.category.parent?.name + ' › ' : '') + t.category.name : '' }}</td>
@@ -51,6 +57,7 @@ import { LockBannerComponent } from '../period-locks/lock-banner.component';
               <td><span class="tag" [attr.data-s]="t.status">{{ t.status }}</span>
                 @if (t.legacy_void_note) { <br /><small class="muted">{{ t.legacy_void_note }}</small> }</td>
               <td>{{ t.creator?.name }} @if (t.creator_tag) { <span class="tag" data-s="inactive">{{ t.creator_tag }}</span> }</td>
+              <td style="white-space:nowrap">{{ t.attachments_count || '' }}@if (t.attachments_removed_count) { <span class="muted"> ({{ t.attachments_removed_count }} removed)</span> }</td>
               <td>
                 @if (t.status === 'posted' && (t.type === 'income' || t.type === 'expense') && auth.can(t.type + '.void')) {
                   <button class="link" (click)="void(t)">Void</button>
@@ -60,7 +67,7 @@ import { LockBannerComponent } from '../period-locks/lock-banner.component';
                 }
               </td>
             </tr>
-          } @empty { <tr><td colspan="11" class="muted">No transactions match.</td></tr> }
+          } @empty { <tr><td colspan="12" class="muted">No transactions match.</td></tr> }
         </tbody>
       </table>
       @if (page(); as p) {
@@ -79,7 +86,7 @@ export class TransactionListComponent implements OnInit {
   page = signal<Page<Transaction> | null>(null);
   msg = signal('');
   creators = signal<{ id: number; name: string; tag: string | null }[]>([]);
-  f = { from: '', to: '', type: '', created_by: '', q: '', category_id: '', category_only: '' };
+  f = { from: '', to: '', type: '', created_by: '', files: '', q: '', category_id: '', category_only: '' };
   branches: string[] = [];
   categoryName = ''; // label only, never sent to the API
   fromReport = signal(false);
@@ -89,7 +96,7 @@ export class TransactionListComponent implements OnInit {
   ngOnInit() {
     // Reports drill-down (spec E1): filters arrive as URL query params.
     const q = this.route.snapshot.queryParamMap;
-    for (const k of ['from', 'to', 'type', 'category_id', 'category_only'] as const) this.f[k] = q.get(k) ?? '';
+    for (const k of ['from', 'to', 'type', 'category_id', 'category_only', 'files'] as const) this.f[k] = q.get(k) ?? '';
     // branches[] is only valid in All mode; a stale value after a branch switch would give 403.
     this.branches = this.auth.isAllBranches() ? q.getAll('branches') : [];
     this.categoryName = q.get('category_name') ?? '';

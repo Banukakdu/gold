@@ -5,6 +5,8 @@ import { firstValueFrom } from 'rxjs';
 import { errorText } from '../../core/api.interceptor';
 import { colomboDateTime } from '../../core/dates';
 
+/** Lock confirm review (controls finding 7 + AG-062 finding 5): information only, never blocks. */
+interface Review { closes_from: string | null; self_voids: number; self_reversals: number; files_removed?: number; files_removed_self?: number }
 interface Person { id: number; name: string; tag: string | null }
 interface Lock {
   id: number; branch_id: number | null; period: string;
@@ -173,11 +175,11 @@ export class PeriodLocksComponent implements OnInit {
     this.ok.set('');
     const scope = branch === null ? 'all branches' : this.scopeName(branch);
     // Locks are cumulative (accountant sign-off): say which earlier open months this lock closes too.
-    let review: { closes_from: string | null; self_voids: number; self_reversals: number } | null = null;
+    let review: Review | null = null;
     try {
       const params: Record<string, string> = { period: p };
       if (branch !== null) params['branch_id'] = String(branch);
-      review = await firstValueFrom(this.http.get<{ closes_from: string | null; self_voids: number; self_reversals: number }>('/api/v1/period-locks/review', { params }));
+      review = await firstValueFrom(this.http.get<Review>('/api/v1/period-locks/review', { params }));
     } catch { /* the review is information only */ }
     const from = review?.closes_from;
     const range = from === undefined ? `${label(p)} and every earlier open month`
@@ -186,10 +188,16 @@ export class PeriodLocksComponent implements OnInit {
     let text = `Lock ${label(p)} for ${scope}? This closes ${range}. No entry dated in a closed month can be created, edited, voided or reversed until it is unlocked.`;
     if (p === this.grid()?.current_period) text += ' This blocks today\'s entries.';
     // Finding 7: information only, it never blocks the lock. Counts cover every month this lock newly closes.
-    if (review && (review.self_voids || review.self_reversals)) {
+    // AG-062 finding 5: evidence removed from entries in the months being closed.
+    if (review && (review.self_voids || review.self_reversals || review.files_removed)) {
+      const files = review.files_removed ?? 0, own = review.files_removed_self ?? 0;
       const parts = [review.self_voids ? `${review.self_voids} self-void${review.self_voids === 1 ? '' : 's'}` : '',
-        review.self_reversals ? `${review.self_reversals} self-reversal${review.self_reversals === 1 ? '' : 's'}` : ''];
-      text += `\n\n${parts.filter(Boolean).join(' and ')} ${from === p ? 'this month' : 'in these months'} - review the audit log first.`;
+        review.self_reversals ? `${review.self_reversals} self-reversal${review.self_reversals === 1 ? '' : 's'}` : '',
+        files ? `${files} file${files === 1 ? '' : 's'} removed (${own} by the uploader)` : ''];
+      const list = parts.filter(Boolean);
+      const joined = list.length > 1 ? `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}` : list[0];
+      text += `\n\n${joined} ${from === p ? 'this month' : 'in these months'} - review the audit log first`
+        + (files ? ' (Audit log > Attachments, Self only).' : '.');
     }
     if (!confirm(text)) return;
     this.busy.set(true);
