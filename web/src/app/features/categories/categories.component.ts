@@ -15,12 +15,12 @@ type CatType = 'income' | 'expense';
 export interface CategoryNode {
   id: number; name: string; type: CatType; parent_id: number | null; branch_id: number | null;
   branch: { id: number; code: string } | null; ledger_code: string | null; is_active: boolean; effective_active: boolean;
-  usage_count: number; year_balance: string; can_edit: boolean; can_promote: boolean; children?: CategoryNode[];
+  usage_count: number; year_balance: string; first_entry_date: string | null; can_edit: boolean; can_promote: boolean; children?: CategoryNode[];
 }
 interface ManageMeta {
   fiscal_year: { label: string; from: string; to: string };
-  locked_through: { period: string; label: string } | null;
-  closed_year: string | null;
+  locked_through: { period: string; label: string; end: string } | null;
+  closed_year: { label: string; end: string } | null;
 }
 type DialogKind = 'add' | 'addSub' | 'edit' | 'deactivate' | 'promote';
 interface Dialog { kind: DialogKind; node?: CategoryNode; parent?: CategoryNode }
@@ -87,7 +87,7 @@ interface Dialog { kind: DialogKind; node?: CategoryNode; parent?: CategoryNode 
         </div>
         <div class="cat-meta">
           <span class="mono">{{ n.ledger_code }}</span>
-          <span>{{ n.usage_count ? 'Used in ' + n.usage_count : 'Not used' }}</span>
+          <span>{{ usedText(n) }}</span>
         </div>
         @if (actions(n, parent); as acts) {
           @if (acts.length) {
@@ -109,7 +109,7 @@ interface Dialog { kind: DialogKind; node?: CategoryNode; parent?: CategoryNode 
     </ng-template>
 
     @if (dialog(); as d) {
-      <div class="att-backdrop" (click)="close()"></div>
+      <div class="att-backdrop cat-backdrop" (click)="close()"></div>
       <form class="card att-dialog cat-dialog" role="dialog" aria-modal="true" aria-labelledby="cat-dlg-title" (ngSubmit)="submit()">
         <h2 id="cat-dlg-title">{{ title(d) }}</h2>
         @switch (d.kind) {
@@ -127,16 +127,17 @@ interface Dialog { kind: DialogKind; node?: CategoryNode; parent?: CategoryNode 
             <p class="muted">Type, parent and code cannot be changed. To move entries, create the right category and change the category on each entry.</p>
             <!-- Accounting review finding 7: a rename relabels every period. -->
             @if (usage(d.node!)) {
-              <div class="warn">Used in {{ usage(d.node!) }} entries. Reports for all periods, including locked months and closed years, will show the new name.
-                @if (meta()?.locked_through; as l) { This includes locked months up to {{ l.label }}. }
-                @if (meta()?.closed_year; as y) { This includes closed {{ y }}. }
+              <!-- QA Q3: name locked months / a closed year only when this node has entries in them. -->
+              <div class="warn">{{ usedText(d.node!) }}. Reports for all periods will show the new name.
+                @if (inLocked(d.node!); as l) { This includes locked months up to {{ l }}. }
+                @if (inClosed(d.node!); as y) { This includes closed {{ y }}. }
                 Rename only to correct or clarify the name. If the category now means something different, create a new category and deactivate this one.</div>
             }
           }
           @case ('deactivate') {
             <p>Deactivate '{{ d.node!.name }}'? It will be hidden from entry forms. Past entries and reports keep it.
               @if (activeSubs(d.node!); as n) { {{ n }} active sub-categor{{ n === 1 ? 'y' : 'ies' }} will also be hidden. }
-              {{ usage(d.node!) ? 'Used in ' + usage(d.node!) + ' entries.' : 'Not used.' }}</p>
+              {{ usedText(d.node!) }}.</p>
             <!-- Accounting review finding 9: deactivating does not hide a figure. -->
             @if (+d.node!.year_balance !== 0) {
               <div class="warn">{{ settings.currency() }} {{ d.node!.year_balance | money }} this year ({{ meta()?.fiscal_year?.label }}). Its balance is still closed at year end.</div>
@@ -287,6 +288,21 @@ export class CategoriesComponent implements OnInit {
   needsName(d: Dialog) { return d.kind === 'add' || d.kind === 'addSub' || d.kind === 'edit'; }
 
   usage(n: CategoryNode) { return n.usage_count; }
+
+  /** QA Q2: "Not used", "Used in 1 entry", "Used in 5 entries". */
+  usedText(n: CategoryNode) {
+    return n.usage_count ? `Used in ${n.usage_count} entr${n.usage_count === 1 ? 'y' : 'ies'}` : 'Not used';
+  }
+
+  inLocked(n: CategoryNode): string | null {
+    const l = this.meta()?.locked_through;
+    return l && n.first_entry_date && n.first_entry_date <= l.end ? l.label : null;
+  }
+
+  inClosed(n: CategoryNode): string | null {
+    const y = this.meta()?.closed_year;
+    return y && n.first_entry_date && n.first_entry_date <= y.end ? y.label : null;
+  }
 
   activeSubs(n: CategoryNode): number { return (n.children ?? []).filter(s => s.is_active).length; }
 
