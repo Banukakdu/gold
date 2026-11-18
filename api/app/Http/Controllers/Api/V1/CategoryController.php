@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Category;
 use App\Support\BranchContext;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class CategoryController extends Controller
 {
@@ -47,14 +48,17 @@ class CategoryController extends Controller
         abort_if(Category::where('parent_id', $data['parent_id'] ?? null)->where('name', $data['name'])
             ->where(fn ($q) => $q->whereNull('branch_id')->orWhere('branch_id', $data['branch_id'] ?? null))->exists(), 422, 'A category with this name already exists here.');
 
-        return response()->json(Category::create($data), 201);
+        // Double-entry R1: the category's ledger accounts are created with it, in the same DB transaction.
+        return response()->json(DB::transaction(fn () => Category::create($data)), 201);
     }
 
     public function update(Request $request, Category $category)
     {
         $user = $request->user();
         abort_unless($user->is_super_admin || $category->branch_id === app(BranchContext::class)->branchId, 403);
-        $category->update($request->validate(['name' => 'sometimes|string|max:100', 'is_active' => 'sometimes|boolean']));
+        $data = $request->validate(['name' => 'sometimes|string|max:100', 'is_active' => 'sometimes|boolean']);
+        // Renaming or (de)activating a category renames / (de)activates its ledger accounts (double-entry R1).
+        DB::transaction(fn () => $category->update($data));
 
         return $category;
     }

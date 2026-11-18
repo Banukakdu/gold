@@ -15,7 +15,8 @@ class AccountController extends Controller
 {
     public function index(Request $request)
     {
-        $q = Account::with('branch:id,code,name')->orderBy('branch_id')->orderBy('name');
+        // Double-entry S4: the Accounts list and every picker show cash / bank / wallet accounts only.
+        $q = Account::money()->with('branch:id,code,name')->orderBy('branch_id')->orderBy('name');
         if ($request->filled('branch_id')) {
             $q->where('branch_id', $request->integer('branch_id'));
         }
@@ -26,7 +27,7 @@ class AccountController extends Controller
     /** Accounts of every branch, for picking a transfer destination (no balances exposed). */
     public function destinations()
     {
-        return Account::withoutGlobalScopes()->with('branch:id,code,name')
+        return Account::withoutGlobalScopes()->money()->with('branch:id,code,name')
             ->where('status', 'active')->orderBy('branch_id')->get(['id', 'branch_id', 'name', 'type']);
     }
 
@@ -50,6 +51,9 @@ class AccountController extends Controller
 
     public function update(Request $request, Account $account)
     {
+        if (! $account->isMoney()) {
+            return response()->json(['message' => 'This account belongs to the chart of accounts and changes with its category or branch.'], 422);
+        }
         $data = $request->validate([
             'name' => 'sometimes|string|max:255',
             'bank_name' => 'nullable|string|max:255',
@@ -73,6 +77,10 @@ class AccountController extends Controller
      */
     public function statement(Request $request, Account $account)
     {
+        // Double-entry section 2: income, expense, equity and inter-branch balances are profit / funding information.
+        if (! $account->isMoney() && ! $request->user()->canDo('report.view')) {
+            return response()->json(['message' => 'Missing permission: report.view'], 403);
+        }
         $data = $request->validate(['from' => 'required|date', 'to' => 'required|date|after_or_equal:from', 'include_voided' => 'nullable|boolean']);
         $withVoided = (bool) ($data['include_voided'] ?? false);
 
@@ -94,6 +102,7 @@ class AccountController extends Controller
             $contra = $e->contra_of_id !== null;
 
             return [
+                'transaction_id' => $e->transaction_id,
                 'date' => $e->entry_date->format('Y-m-d'),
                 'ref_no' => $e->transaction->ref_no,
                 'type' => $e->transaction->type,

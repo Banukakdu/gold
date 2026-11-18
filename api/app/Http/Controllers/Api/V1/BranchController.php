@@ -16,7 +16,8 @@ class BranchController extends Controller
     {
         $user = $request->user();
         $q = Branch::query()
-            ->withSum(['accounts as balance' => fn ($a) => $a->withoutGlobalScopes()], 'current_balance')
+            // Double-entry R8: money accounts only.
+            ->withSum(['accounts as balance' => fn ($a) => $a->withoutGlobalScopes()->money()], 'current_balance')
             ->orderByDesc('is_main')->orderBy('name');
         if (! $user->is_super_admin) {
             $q->whereIn('id', $user->branches()->pluck('branches.id'));

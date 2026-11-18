@@ -7,7 +7,7 @@ use App\Services\ReportExporter;
 use App\Services\ReportService;
 use Illuminate\Http\Request;
 
-/** AG-082..085: Income & Expense, Branch Comparison, Transfers & Allocations, Daily Cash Book (+ PDF/Excel export). */
+/** AG-082..085, AG-089: Income & Expense, Branch Comparison, Transfers & Allocations, Daily Cash Book, Trial Balance (+ PDF/Excel export). */
 class ReportController extends Controller
 {
     public function __construct(private ReportService $reports, private ReportExporter $exporter) {}
@@ -36,6 +36,12 @@ class ReportController extends Controller
         }
 
         return $this->reports->cashBook($params);
+    }
+
+    /** AG-089 trial balance (double-entry S2). */
+    public function trialBalance(Request $request)
+    {
+        return $this->reports->trialBalance($this->reports->params('trial-balance', $request->all()));
     }
 
     public function export(Request $request, string $name)

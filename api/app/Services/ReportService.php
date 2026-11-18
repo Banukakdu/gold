@@ -35,7 +35,7 @@ use RuntimeException;
  */
 class ReportService
 {
-    public const NAMES = ['income-expense', 'branch-comparison', 'transfers', 'cash-book'];
+    public const NAMES = ['income-expense', 'branch-comparison', 'transfers', 'cash-book', 'trial-balance'];
 
     /** Excel export and cash book screen cap (detail rows). */
     public const EXPORT_CAP = 5000;
@@ -70,6 +70,19 @@ class ReportService
 
     public const BASIS = 'Posted entries incl. reversals; voided entries excluded';
 
+    /** Double-entry S2 basis line of the trial balance. */
+    public const TB_BASIS = 'All posted lines; period columns exclude voided entries; income and expense are cumulative since the first entry (no year-end close yet)';
+
+    public const TB_GROUPS = ['asset' => 'Assets', 'liability' => 'Liabilities', 'equity' => 'Equity',
+        'interbranch' => 'Inter-branch (eliminated on consolidation)', 'income' => 'Income', 'expense' => 'Expenses'];
+
+    public const TB_CONSOLIDATED_MESSAGE = 'Select at least two branches in All branches mode';
+
+    public static function basis(string $name): string
+    {
+        return $name === 'trial-balance' ? self::TB_BASIS : self::BASIS;
+    }
+
     /** Same labels as the web app's TYPE_LABELS. */
     public static function typeLabel(string $type): string
     {
@@ -91,6 +104,7 @@ class ReportService
             'income-expense' => ['type' => ['nullable', Rule::in(['all', 'income', 'expense'])]],
             'transfers' => ['types' => 'nullable|array', 'types.*' => ['string', Rule::in(self::MOVEMENT_TYPES)], 'page' => 'nullable|integer|min:1'],
             'cash-book' => ['accounts' => 'nullable|array', 'accounts.*' => 'integer|distinct'],
+            'trial-balance' => ['view' => ['nullable', Rule::in(['branch', 'consolidated'])]],
             default => [],
         };
         $d = validator($input, $rules)->validate();
@@ -131,10 +145,14 @@ class ReportService
             'income-expense' => ['type' => $d['type'] ?? 'all'],
             'transfers' => ['types' => $d['types'] ?? self::MOVEMENT_TYPES, 'page' => (int) ($d['page'] ?? 1)],
             'cash-book' => ['accounts' => array_map('intval', $d['accounts'] ?? [])],
+            'trial-balance' => ['view' => $d['view'] ?? 'branch'],
             default => [],
         };
+        if ($name === 'trial-balance' && $extra['view'] === 'consolidated' && ($ctx->isScoped() || $branches->count() < 2)) {
+            throw ValidationException::withMessages(['view' => self::TB_CONSOLIDATED_MESSAGE]);
+        }
         if ($name === 'cash-book' && $extra['accounts']) {
-            $ok = DB::table('accounts')->whereIn('id', $extra['accounts'])->whereIn('branch_id', $branches->pluck('id'))->count();
+            $ok = DB::table('accounts')->whereIn('type', Account::MONEY_TYPES)->whereIn('id', $extra['accounts'])->whereIn('branch_id', $branches->pluck('id'))->count();
             if ($ok !== count($extra['accounts'])) {
                 throw ValidationException::withMessages(['accounts' => 'Unknown account.']);
             }
@@ -280,13 +298,14 @@ class ReportService
         $dr = $this->cents('le.debit');
         $cr = $this->cents('le.credit');
 
-        $before = fn (string $op, string $date) => DB::table('ledger_entries as le')->whereIn('le.branch_id', $ids)->whereDate('le.entry_date', $op, $date)
+        // Double-entry R8: money accounts only (cash, bank, wallet), so chart lines never change these figures.
+        $before = fn (string $op, string $date) => $this->moneyLines()->whereIn('le.branch_id', $ids)->whereDate('le.entry_date', $op, $date)
             ->groupBy('le.branch_id')->selectRaw("le.branch_id, SUM($dr - $cr) as cents")->pluck('cents', 'branch_id');
         $opening = $before('<', $p->from);
         $ledgerClosing = $before('<=', $p->to);
 
         // Effective side: a reversal entry is booked on the original entry's side, negated.
-        $moves = DB::table('ledger_entries as le')
+        $moves = $this->moneyLines()
             ->join('transactions as t', 't.id', '=', 'le.transaction_id')
             ->leftJoin('transactions as o', 'o.id', '=', 't.reversal_of_id')
             ->whereIn('le.branch_id', $ids)
@@ -440,7 +459,7 @@ class ReportService
 
     public function cashBook(ReportParams $p): array
     {
-        $accounts = Account::withoutGlobalScopes()->with('branch:id,code,name,is_main')
+        $accounts = Account::withoutGlobalScopes()->money()->with('branch:id,code,name,is_main')
             ->whereIn('branch_id', $p->branchIds())
             ->when($p->extra['accounts'] ?? [], fn ($q, $ids) => $q->whereIn('id', $ids))
             ->get()
@@ -505,7 +524,7 @@ class ReportService
 
     public function cashBookRows(ReportParams $p): int
     {
-        $ids = DB::table('accounts')->whereIn('branch_id', $p->branchIds())
+        $ids = DB::table('accounts')->whereIn('type', Account::MONEY_TYPES)->whereIn('branch_id', $p->branchIds())
             ->when($p->extra['accounts'] ?? [], fn ($q, $a) => $q->whereIn('id', $a))->pluck('id')->all();
 
         return $this->cashBookEntries($p, $ids)->count();
@@ -513,7 +532,7 @@ class ReportService
 
     private function cashBookEntries(ReportParams $p, array $accountIds): Builder
     {
-        return DB::table('ledger_entries as le')
+        return $this->moneyLines()
             ->join('transactions as t', 't.id', '=', 'le.transaction_id')
             ->leftJoin('transactions as o', 'o.id', '=', 't.reversal_of_id')
             ->whereIn('le.account_id', $accountIds)
@@ -536,7 +555,165 @@ class ReportService
         return $text;
     }
 
+    // ------------------------------------------------------------------ AG-089 Trial balance (double-entry S2)
+
+    /**
+     * By branch: one section per branch with every account that has a closing balance or a period movement.
+     * Consolidated: one row per consolidation line (money account, Owner's capital, category code, MAIN <-> branch pair)
+     * with each branch's closing balance (signed, debit positive), the eliminations and consolidated Dr / Cr.
+     * Opening = lines before From; period = lines From..To of transactions that are not void (gross); closing = lines up
+     * to To. Opening + period Dr - period Cr = closing holds because every line of a voided entry is dated its txn_date.
+     */
+    public function trialBalance(ReportParams $p): array
+    {
+        $ids = $p->branchIds();
+        $dr = $this->cents('le.debit');
+        $cr = $this->cents('le.credit');
+        $sums = DB::table('ledger_entries as le')->join('transactions as t', 't.id', '=', 'le.transaction_id')
+            ->whereIn('le.branch_id', $ids)->whereDate('le.entry_date', '<=', $p->to)
+            ->groupBy('le.account_id')
+            ->selectRaw("le.account_id,
+                SUM(CASE WHEN DATE(le.entry_date) < ? THEN $dr - $cr ELSE 0 END) as opening,
+                SUM(CASE WHEN DATE(le.entry_date) >= ? AND t.status <> 'void' THEN $dr ELSE 0 END) as pdr,
+                SUM(CASE WHEN DATE(le.entry_date) >= ? AND t.status <> 'void' THEN $cr ELSE 0 END) as pcr,
+                SUM($dr - $cr) as closing", [$p->from, $p->from, $p->from])
+            ->get()->keyBy('account_id');
+        $accounts = Account::withoutGlobalScopes()->with('branch:id,code,name,is_main,status')->whereIn('branch_id', $ids)->get();
+        $num = fn ($id) => ['opening' => (int) ($sums[$id]->opening ?? 0), 'pdr' => (int) ($sums[$id]->pdr ?? 0),
+            'pcr' => (int) ($sums[$id]->pcr ?? 0), 'closing' => (int) ($sums[$id]->closing ?? 0)];
+        $groupOrder = array_flip(array_keys(self::TB_GROUPS));
+
+        $out = $this->meta($p) + ['view' => $p->extra['view'], 'basis' => self::TB_BASIS];
+        if ($p->extra['view'] === 'consolidated') {
+            // The consolidated `subset` (a pair not eliminated) replaces the meta one.
+            return array_merge($out, $this->consolidatedTrialBalance($p, $accounts, $num, $groupOrder));
+        }
+
+        $sections = [];
+        $allBalanced = true;
+        foreach ($p->branches as $b) {
+            $rows = [];
+            $tot = array_fill_keys(['opening_dr', 'opening_cr', 'period_dr', 'period_cr', 'closing_dr', 'closing_cr'], 0);
+            $identity = true;
+            $list = $accounts->where('branch_id', $b->id)->sortBy(fn (Account $a) => [$groupOrder[$a->group()] ?? 9, (string) $a->code])->values();
+            foreach ($list as $a) {
+                $n = $num($a->id);
+                if ($n['closing'] === 0 && $n['pdr'] === 0 && $n['pcr'] === 0) {
+                    continue;
+                }
+                $identity = $identity && $n['closing'] === $n['opening'] + $n['pdr'] - $n['pcr'];
+                $c = ['opening_dr' => max($n['opening'], 0), 'opening_cr' => max(-$n['opening'], 0), 'period_dr' => $n['pdr'], 'period_cr' => $n['pcr'],
+                    'closing_dr' => max($n['closing'], 0), 'closing_cr' => max(-$n['closing'], 0)];
+                foreach ($c as $k => $v) {
+                    $tot[$k] += $v;
+                }
+                $rows[] = ['account' => ['id' => $a->id, 'code' => $a->code, 'name' => $a->name, 'class' => $a->class, 'type' => $a->type,
+                    'group' => $a->group(), 'status' => $a->status]] + array_map([Money::class, 'fromCents'], $c);
+            }
+            $balanced = $identity && $tot['opening_dr'] === $tot['opening_cr'] && $tot['period_dr'] === $tot['period_cr'] && $tot['closing_dr'] === $tot['closing_cr']
+                && $tot['opening_dr'] - $tot['opening_cr'] + $tot['period_dr'] - $tot['period_cr'] === $tot['closing_dr'] - $tot['closing_cr'];
+            $allBalanced = $allBalanced && $balanced;
+            if (! $balanced) {
+                Log::error('Trial balance out of balance', ['branch' => $b->code, 'from' => $p->from, 'to' => $p->to, 'totals' => $tot]);
+            }
+            $sections[] = ['branch' => ['id' => $b->id, 'code' => $b->code, 'name' => $b->name, 'status' => $b->status],
+                'rows' => $rows, 'totals' => array_map([Money::class, 'fromCents'], $tot), 'balanced' => $balanced,
+                'difference' => Money::fromCents(abs($tot['closing_dr'] - $tot['closing_cr']) ?: abs($tot['period_dr'] - $tot['period_cr']) ?: abs($tot['opening_dr'] - $tot['opening_cr']))];
+        }
+
+        return $out + ['sections' => $sections, 'balanced' => $allBalanced];
+    }
+
+    private function consolidatedTrialBalance(ReportParams $p, Collection $accounts, callable $num, array $groupOrder): array
+    {
+        $ids = $p->branchIds();
+        $main = Branch::where('is_main', true)->first();
+        $mainIn = $main && in_array($main->id, $ids, true);
+        $lines = [];
+        foreach ($accounts as $a) {
+            [$key, $label, $sort] = match (true) {
+                $a->isMoney() => ["acc:{$a->id}", "{$a->branch->code} · {$a->name}", [$a->branch->is_main ? 0 : 1, $a->branch->code, (string) $a->code]],
+                $a->type === 'owner_capital' => ['owner_capital', $a->name, [(string) $a->code]],
+                $a->type === 'category' => ["cat:{$a->code}", $a->name, [(string) $a->code]],
+                $a->type === 'head_office' => ["pair:{$a->branch_id}", ($main->code ?? 'MAIN')." ↔ {$a->branch->code}", [$a->branch->code]],
+                $a->type === 'branch_current' => ["pair:{$a->counterparty_branch_id}", "{$a->branch->code} ↔ ".(Branch::find($a->counterparty_branch_id)->code ?? ''), [Branch::find($a->counterparty_branch_id)->code ?? '']],
+                default => ["acc:{$a->id}", "{$a->branch->code} · {$a->name}", [(string) $a->code]],
+            };
+            $n = $num($a->id);
+            $lines[$key] ??= ['key' => $key, 'label' => $label, 'group' => $a->group(), 'sort' => [$groupOrder[$a->group()] ?? 9, ...$sort],
+                'by_branch' => array_fill_keys($ids, 0), 'opening' => 0, 'pdr' => 0, 'pcr' => 0, 'closing' => 0, 'pair_branch' => null];
+            $lines[$key]['by_branch'][$a->branch_id] += $n['closing'];
+            foreach (['opening', 'pdr', 'pcr', 'closing'] as $k) {
+                $lines[$key][$k] += $n[$k];
+            }
+            if (in_array($a->type, Account::INTERBRANCH_TYPES, true)) {
+                $lines[$key]['pair_branch'] = $a->type === 'head_office' ? $a->branch_id : $a->counterparty_branch_id;
+            }
+        }
+        uasort($lines, fn ($x, $y) => $x['sort'] <=> $y['sort']);
+
+        $rows = [];
+        $tot = ['by_branch' => array_fill_keys($ids, 0), 'elimination' => 0, 'dr' => 0, 'cr' => 0];
+        $identity = true;
+        $subset = false;
+        foreach ($lines as $l) {
+            // A pair row nets to 0.00 across branches but still shows its branch balances.
+            if (! array_filter($l['by_branch']) && $l['pdr'] === 0 && $l['pcr'] === 0) {
+                continue;
+            }
+            $identity = $identity && $l['closing'] === $l['opening'] + $l['pdr'] - $l['pcr'];
+            $elim = null;
+            if ($l['pair_branch'] !== null) {
+                if ($mainIn && in_array((int) $l['pair_branch'], $ids, true)) {
+                    $elim = -$l['closing'];
+                } else {
+                    $subset = true;
+                }
+            }
+            $net = $l['closing'] + ($elim ?? 0);
+            foreach ($l['by_branch'] as $id => $v) {
+                $tot['by_branch'][$id] += $v;
+            }
+            $tot['elimination'] += $elim ?? 0;
+            $tot['dr'] += max($net, 0);
+            $tot['cr'] += max(-$net, 0);
+            $rows[] = ['key' => $l['key'], 'label' => $l['label'], 'group' => $l['group'],
+                'by_branch' => array_map([Money::class, 'fromCents'], $l['by_branch']),
+                'elimination' => $elim === null ? null : Money::fromCents($elim),
+                'dr' => Money::fromCents(max($net, 0)), 'cr' => Money::fromCents(max(-$net, 0)),
+                'opening' => Money::fromCents($l['opening']), 'period_dr' => Money::fromCents($l['pdr']), 'period_cr' => Money::fromCents($l['pcr']),
+                'closing' => Money::fromCents($l['closing'])];
+        }
+        $balanced = $identity && ! array_filter($tot['by_branch']) && $tot['elimination'] === 0 && $tot['dr'] === $tot['cr'];
+        if (! $balanced) {
+            Log::error('Consolidated trial balance out of balance', ['from' => $p->from, 'to' => $p->to, 'totals' => $tot]);
+        }
+        $diff = abs($tot['dr'] - $tot['cr']) ?: (int) collect($tot['by_branch'])->map(fn ($v) => abs($v))->max();
+
+        return [
+            'branches' => $p->branches->map(fn (Branch $b) => ['id' => $b->id, 'code' => $b->code, 'name' => $b->name, 'status' => $b->status])->values()->all(),
+            'rows' => $rows,
+            'totals' => ['by_branch' => array_map([Money::class, 'fromCents'], $tot['by_branch']), 'elimination' => Money::fromCents($tot['elimination']),
+                'dr' => Money::fromCents($tot['dr']), 'cr' => Money::fromCents($tot['cr'])],
+            'balanced' => $balanced,
+            'difference' => Money::fromCents($diff),
+            'subset' => $subset,
+        ];
+    }
+
+    /** Detail rows of a trial-balance export (account rows, all sections). */
+    public function trialBalanceRows(array $r): int
+    {
+        return isset($r['sections']) ? (int) collect($r['sections'])->sum(fn ($s) => count($s['rows'])) : count($r['rows']);
+    }
+
     // ------------------------------------------------------------------ shared
+
+    /** Ledger lines on cash / bank / wallet accounts only (double-entry R8), as `le` joined to its account `la`. */
+    public function moneyLines(): Builder
+    {
+        return DB::table('ledger_entries as le')->join('accounts as la', 'la.id', '=', 'le.account_id')->whereIn('la.type', Account::MONEY_TYPES);
+    }
 
     /**
      * Transactions that count (R2) for the given original types: originals posted/reversed plus their posted reversals.
@@ -554,8 +731,6 @@ class ReportService
     /** SQL for a decimal(15,2) column as exact integer cents (works on MySQL and SQLite). */
     public function cents(string $column): string
     {
-        $int = DB::connection()->getDriverName() === 'mysql' ? 'SIGNED' : 'INTEGER';
-
-        return "CAST(ROUND($column * 100) AS $int)";
+        return Money::sqlCents($column);
     }
 }

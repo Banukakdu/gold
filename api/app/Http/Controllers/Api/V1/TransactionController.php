@@ -12,7 +12,9 @@ use App\Models\User;
 use App\Services\LedgerService;
 use App\Support\BranchContext;
 use App\Support\BusinessDate;
+use App\Support\Money;
 use Illuminate\Http\Request;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
@@ -80,15 +82,46 @@ class TransactionController extends Controller
         return $page;
     }
 
-    public function show(Transaction $transaction)
+    /**
+     * Double-entry R10 / finding 10: resolved without the branch scope, then allowed when the active branch is the
+     * entry's branch or the branch of any of its lines (All mode: any). Otherwise 404, as before.
+     */
+    public function show(int $transactionId)
     {
-        $transaction->load(['entries', 'branch', 'category.parent', 'account', 'fromAccount.branch', 'toAccount.branch', 'creator:id,name,status,is_super_admin']);
+        $ctx = app(BranchContext::class);
+        $transaction = Transaction::withoutGlobalScopes()->find($transactionId);
+        $allowed = $transaction && (! $ctx->isScoped() || (int) $transaction->branch_id === $ctx->branchId
+            || $transaction->entries()->where('branch_id', $ctx->branchId)->exists());
+        abort_unless($allowed, 404);
+
+        $transaction->load(['entries' => fn ($q) => $q->orderBy('id'), 'entries.account:id,code,name,class,type', 'entries.branch:id,code',
+            'branch', 'category.parent', 'account', 'fromAccount.branch', 'toAccount.branch', 'creator:id,name,status,is_super_admin']);
+        $dr = $cr = 0;
+        foreach ($transaction->entries as $e) {
+            $dr += Money::toCents($e->debit);
+            $cr += Money::toCents($e->credit);
+        }
+        $transaction->setAttribute('balanced', $transaction->entries->isNotEmpty() && $dr === $cr && $this->balancedPerBranch($transaction));
+        $transaction->setAttribute('totals', ['debit' => Money::fromCents($dr), 'credit' => Money::fromCents($cr)]);
+        // Edit, void, reverse and files follow transactions.branch_id (R10): a head-office reader only reads.
+        $transaction->setAttribute('in_active_branch', ! $ctx->isScoped() || (int) $transaction->branch_id === $ctx->branchId);
+        $transaction->setAttribute('backfilled_at', $transaction->entries->firstWhere('origin', 'backfill')?->created_at?->setTimezone('Asia/Colombo')->format('Y-m-d'));
         $transaction->setAttribute('entries_count', $transaction->entries->count());
         $transaction->loadCount(self::attachmentCounts());
         $this->tagAuthors(collect([$transaction]));
         $this->markLegacyVoids(collect([$transaction]));
 
         return $transaction;
+    }
+
+    private function balancedPerBranch(Transaction $t): bool
+    {
+        $net = [];
+        foreach ($t->entries as $e) {
+            $net[$e->branch_id] = ($net[$e->branch_id] ?? 0) + Money::toCents($e->debit) - Money::toCents($e->credit);
+        }
+
+        return ! array_filter($net);
     }
 
     /** AG-062: active attachments (R9) and removed ones (finding 6). */
@@ -146,12 +179,20 @@ class TransactionController extends Controller
         DB::transaction(function () use ($transaction, $data, $date) {
             // Re-check with a locking read inside the write (reviewer R5), like LedgerService::assertOpen.
             abort_if(PeriodLock::isLocked($transaction->branch_id, $date, share: true), 422, 'The period '.substr($date, 0, 7).' is locked.');
-            $old = $transaction->only(array_keys($data));
-            $transaction->update($data);
-            AuditLog::record('transaction.updated', $transaction, $old, $data);
+            $fields = Arr::except($data, ['category_id']);
+            if ($fields) {
+                $old = $transaction->only(array_keys($fields));
+                $transaction->update($fields);
+                AuditLog::record('transaction.updated', $transaction, $old, $fields);
+            }
+            // Double-entry R3 / finding 4: a category change is a reclassification posted by LedgerService
+            // (audit transaction.reclassified); the same category posts nothing.
+            if (array_key_exists('category_id', $data)) {
+                $this->ledger->reclassify($transaction, (int) $data['category_id']);
+            }
         });
 
-        return $transaction;
+        return $transaction->fresh();
     }
 
     public function void(Request $request, Transaction $transaction)

@@ -10,6 +10,7 @@ use App\Models\Transaction;
 use App\Models\User;
 use App\Support\BranchContext;
 use App\Support\BusinessDate;
+use App\Support\LedgerChecks;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
@@ -143,6 +144,11 @@ class PeriodLockController extends Controller
                 if ($later) {
                     abort(422, "{$label} is already closed {$scope} (locked through ".PeriodLock::label($later->period).').');
                 }
+
+                // Double-entry R9: no month closes while an entry dated in it (or earlier, locks are cumulative) is not balanced.
+                $through = CarbonImmutable::createFromFormat('!Y-m', $period)->endOfMonth()->format('Y-m-d');
+                $unbalanced = LedgerChecks::unbalanced($branchId, $through)->pluck('transaction_id')->unique()->count();
+                abort_if($unbalanced > 0, 422, "{$unbalanced} entries up to {$label} are not balanced. Run ledger:verify.");
 
                 $lock = PeriodLock::create(['branch_id' => $branchId, 'period' => $period, 'locked_by' => $request->user()->id]);
                 AuditLog::record('period.locked', $lock, null, ['period' => $period, 'branch_id' => $branchId], $branchId);

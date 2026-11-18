@@ -16,7 +16,7 @@ use Maatwebsite\Excel\Facades\Excel;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
- * Synchronous PDF / Excel export of the four reports (spec section 5, accounting review finding 4/5).
+ * Synchronous PDF / Excel export of the reports (spec section 5, accounting review finding 4/5).
  * The same numbers as the screen: every export is built from ReportService with all rows (not one screen page).
  */
 class ReportExporter
@@ -26,6 +26,7 @@ class ReportExporter
         'branch-comparison' => 'Branch Comparison',
         'transfers' => 'Transfers & Allocations',
         'cash-book' => 'Daily Cash Book',
+        'trial-balance' => 'Trial Balance',
     ];
 
     /** Rows per PDF page for lists that carry Brought forward / Carried forward (finding 5), by paper orientation. */
@@ -43,13 +44,18 @@ class ReportExporter
             'branch-comparison' => $p->branches->count(),
             'transfers' => $this->reports->transferRows($p),
             'cash-book' => $this->reports->cashBookRows($p),
+            'trial-balance' => $this->reports->trialBalanceRows($data ?? $this->reports->trialBalance($p)),
         };
     }
 
     public function download(string $name, ReportParams $p, string $format, User $user): Response
     {
         // Income & Expense counts lines from the built report: build it once and reuse it.
-        $data = $name === 'income-expense' ? $this->reports->incomeExpense($p) : null;
+        $data = match ($name) {
+            'income-expense' => $this->reports->incomeExpense($p),
+            'trial-balance' => $this->reports->trialBalance($p),
+            default => null,
+        };
         $rows = $this->countRows($name, $p, $data);
         $cap = $format === 'pdf' ? ReportService::PDF_EXPORT_CAP : ReportService::EXPORT_CAP;
         if ($rows > $cap) {
@@ -115,7 +121,7 @@ class ReportExporter
             'Branches: '.$p->branchLabel(),
             'Period: '.self::periodLabel($p->from, $p->to),
             'Amounts in LKR',
-            ReportService::BASIS,
+            ReportService::basis($name),
             $printed,
             $data['provisional'] ? 'PROVISIONAL - period not locked' : null,
         ]));
@@ -128,6 +134,7 @@ class ReportExporter
             'branches' => $p->branchLabel(),
             'period' => self::periodLabel($p->from, $p->to),
             'printed' => $printed,
+            'basis' => ReportService::basis($name),
             'provisional' => $data['provisional'],
             'lines' => $lines,
         ];
@@ -155,9 +162,10 @@ class ReportExporter
             'transfers' => ['reports.pdf.transfers', ['data' => $data, 'pages' => $this->carryPages(
                 array_map(fn ($m) => $m + ['cents' => ['amount' => Money::toCents($m['amount'])]], $data['movements']['data']), ['amount'], self::PDF_ROWS_LANDSCAPE)]],
             'cash-book' => ['reports.pdf.cash-book', ['data' => $data, 'books' => array_map(fn ($a) => $a + ['pages' => $this->carryPages($this->cashBookLines($a), ['receipt', 'payment'], self::PDF_ROWS_PORTRAIT)], $data['accounts'])]],
+            'trial-balance' => ['reports.pdf.trial-balance', ['data' => $data]],
         };
         $pdf = Pdf::loadView($view[0], $view[1] + ['head' => $head])
-            ->setPaper('a4', in_array($name, ['transfers', 'branch-comparison'], true) ? 'landscape' : 'portrait');
+            ->setPaper('a4', in_array($name, ['transfers', 'branch-comparison', 'trial-balance'], true) ? 'landscape' : 'portrait');
         $pdf->render();
         $dompdf = $pdf->getDomPDF();
         $canvas = $dompdf->getCanvas();
@@ -277,6 +285,8 @@ class ReportExporter
                 $this->matrixSheet($d, $row),
             ],
 
+            'trial-balance' => $this->trialBalanceSheets($d, $row),
+
             'cash-book' => array_map(function ($a) use ($row) {
                 $rows = [$row(['', 'Opening balance', '', '', '', '', $a['opening']], true)];
                 foreach ($a['days'] as $day) {
@@ -294,6 +304,51 @@ class ReportExporter
                 ];
             }, $d['accounts']),
         };
+    }
+
+    /** Trial balance sheets: one per branch section (by branch), or one consolidated sheet. */
+    private function trialBalanceSheets(array $d, callable $row): array
+    {
+        $groups = ReportService::TB_GROUPS;
+        if ($d['view'] === 'consolidated') {
+            $codes = array_column($d['branches'], 'code', 'id');
+            $rows = [];
+            foreach ($d['rows'] as $r) {
+                $rows[] = $row(array_merge([$groups[$r['group']], $r['label']], array_values($r['by_branch']), [$r['elimination'], $r['dr'], $r['cr']]));
+            }
+            $rows[] = $row(array_merge(['Total', ''], array_values($d['totals']['by_branch']), [$d['totals']['elimination'], $d['totals']['dr'], $d['totals']['cr']]), true);
+
+            return [[
+                'title' => 'Consolidated',
+                'columns' => array_merge([['Group', 'text'], ['Line', 'text']], array_map(fn ($c) => [$c, 'amount'], array_values($codes)),
+                    [['Eliminations', 'amount'], ['Consolidated Dr', 'amount'], ['Consolidated Cr', 'amount']]),
+                'rows' => $rows,
+                'notes' => array_filter([
+                    'Branch columns are closing balances, signed: debit positive, credit negative.',
+                    $d['subset'] ? 'Inter-branch balances with branches not selected are not eliminated.' : null,
+                    $d['balanced'] ? null : 'Out of balance by '.Money::format($d['difference']).'. Run ledger:verify.',
+                ]),
+            ]];
+        }
+
+        return array_map(function ($sec) use ($row, $groups) {
+            $rows = [];
+            foreach ($sec['rows'] as $r) {
+                $a = $r['account'];
+                $rows[] = $row([$a['code'], $a['name'].($a['status'] === 'active' ? '' : ' ('.ucfirst($a['status']).')'), $groups[$a['group']],
+                    $r['opening_dr'], $r['opening_cr'], $r['period_dr'], $r['period_cr'], $r['closing_dr'], $r['closing_cr']]);
+            }
+            $t = $sec['totals'];
+            $rows[] = $row(['', 'Total', '', $t['opening_dr'], $t['opening_cr'], $t['period_dr'], $t['period_cr'], $t['closing_dr'], $t['closing_cr']], true);
+
+            return [
+                'title' => $sec['branch']['code'].' '.$sec['branch']['name'],
+                'columns' => [['Code', 'text'], ['Account', 'text'], ['Class', 'text'], ['Opening Dr', 'amount'], ['Opening Cr', 'amount'],
+                    ['Period debits', 'amount'], ['Period credits', 'amount'], ['Closing Dr', 'amount'], ['Closing Cr', 'amount']],
+                'rows' => $rows,
+                'notes' => array_filter([$sec['balanced'] ? null : 'Out of balance by '.Money::format($sec['difference']).'. Run ledger:verify.']),
+            ];
+        }, $d['sections']);
     }
 
     private function matrixSheet(array $d, callable $row): array

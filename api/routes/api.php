@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\V1\AuditLogController;
 use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\BranchController;
 use App\Http\Controllers\Api\V1\CategoryController;
+use App\Http\Controllers\Api\V1\ChartOfAccountsController;
 use App\Http\Controllers\Api\V1\DashboardController;
 use App\Http\Controllers\Api\V1\PeriodLockController;
 use App\Http\Controllers\Api\V1\ReportController;
@@ -32,6 +33,7 @@ Route::prefix('v1')->group(function () {
             Route::get('reports/branch-comparison', [ReportController::class, 'branchComparison'])->middleware('perm:report.view');
             Route::get('reports/transfers', [ReportController::class, 'transfers'])->middleware('perm:report.view');
             Route::get('reports/cash-book', [ReportController::class, 'cashBook'])->middleware('perm:report.view');
+            Route::get('reports/trial-balance', [ReportController::class, 'trialBalance'])->middleware('perm:report.view');
             Route::post('reports/{name}/export', [ReportController::class, 'export'])->middleware('perm:report.view,report.export');
 
             Route::get('branches', [BranchController::class, 'index']);
@@ -43,6 +45,8 @@ Route::prefix('v1')->group(function () {
             Route::post('accounts', [AccountController::class, 'store'])->middleware('perm:account.manage');
             Route::put('accounts/{account}', [AccountController::class, 'update'])->middleware('perm:account.manage');
             Route::get('accounts/{account}/statement', [AccountController::class, 'statement'])->middleware('perm:account.view');
+            // Double-entry S1: the chart of accounts of one branch (structure only, no balances).
+            Route::get('chart-of-accounts', ChartOfAccountsController::class)->middleware('perm:account.view');
 
             Route::get('categories', [CategoryController::class, 'index']);
             Route::post('categories', [CategoryController::class, 'store'])->middleware('perm:category.manage');
@@ -50,7 +54,8 @@ Route::prefix('v1')->group(function () {
 
             Route::get('transactions', [TransactionController::class, 'index'])->middleware('perm:transaction.view');
             Route::get('transactions/creators', [TransactionController::class, 'creators'])->middleware('perm:transaction.view');
-            Route::get('transactions/{transaction}', [TransactionController::class, 'show'])->middleware('perm:transaction.view');
+            // Double-entry R10: the detail is resolved without the branch scope; the controller checks access by line branches.
+            Route::get('transactions/{transactionId}', [TransactionController::class, 'show'])->whereNumber('transactionId')->middleware('perm:transaction.view');
             Route::put('transactions/{transaction}', [TransactionController::class, 'update']);
             Route::post('transactions/{transaction}/void', [TransactionController::class, 'void']);
             Route::post('transactions/{transaction}/reverse', [TransferController::class, 'reverse'])->middleware('perm:transfer.reverse');
