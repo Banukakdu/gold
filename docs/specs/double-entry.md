@@ -399,3 +399,74 @@ Codes: MAIN Bank 11001, KDY Cash 11001, KDY Bank 11002, GAL Cash 11001. IB: MAIN
 - **Q8 Trial balance basis.** The period columns exclude voided entries (the reports basis) and show reversals gross. The closing includes everything (voids net to 0.00 on their own date). Assumed acceptable.
 - **Q9 Liabilities.** The class exists but has no accounts, because there are no manual journals, payables or loans. Assumed manual journals are a separate backlog item; confirm none are needed for go-live.
 - **Q10 Capital outside Main.** Today capital may go to an `is_main_account` in a non-main branch. Assumed Owner's capital is then created in that branch, so the branch balances on its own. Alternatively, capital should be restricted to the Main branch. Accountant to say which.
+
+## Accounting review (accountant, 2026-11-18, before development)
+
+Reviewed against `LedgerService.php`, the accounting/controls migrations, `ReportService`, `TransactionController::update`, `DashboardController`, `BranchController` and `AccountController`. Overall the design is sound: one chart per branch, every set balanced per branch, D1–D3 in the database, L1 in the service, `ledger:verify` V1–V6 and money-account reports left alone. The changes below are mostly a result of two decisions (Q2 and Q10).
+
+### Findings
+
+1. **MUST — Branch-to-branch transfers go through Head Office (Q2).** Each non-main branch has exactly **one** inter-branch account, "Head office current account" (IB(MAIN) in B). MAIN has one "Branch current account – <code>" (IB(B) in MAIN) per branch. There are no branch-to-branch (KDY↔GAL) accounts. Changes:
+   - **R1:** the 15xxx row becomes "one pair per non-main branch with MAIN, created with the branch". AC 19: MTR gets IB–MAIN only; MAIN gets IB–MTR; KDY and GAL get nothing.
+   - **R3, branch transfer B account Z -> G account Y (3 branches, 6 lines, all on `txn_date`):**
+     - B: Dr IB(MAIN) in B, Cr Z;
+     - MAIN: Dr IB(G) in MAIN, Cr IB(B) in MAIN;
+     - G: Dr Y, Cr IB(MAIN) in G.
+   - **R5:** for a branch transfer, the set's total debits = 3 × `amount` (allocation/return: 2 × `amount`).
+   - **R9:** a branch transfer, and its reversal, assert open for B, G **and** MAIN. If MAIN is the locked one, the message names MAIN: "The period YYYY-MM is locked for MAIN (head office side of this transfer)."
+   - **R6 back-fill:** a branch transfer and its reversal get 4 lines (sender IB, MAIN pair, receiver IB).
+   - **V4:** pairs are (MAIN, B) only.
+   - **ACs:** AC 7 = the 6 lines above. AC 10 = 6 mirrored lines, balanced in each of the 3 branches. AC 34 = with only KDY+GAL selected nothing is eliminated, IB–MAIN shows in both branches, the subset note is shown, and Dr = Cr still holds.
+   - **Corrected worked example.** E-5 / AC 25: 19 transactions get **33** lines (each of (7), (11) and the reversal of (11) gets 4), so there are **62** lines after the back-fill; the money balances are unchanged. E-6 closing at 2026-10-31:
+     - MAIN: Dr Bank 620,000.00, IB–KDY 270,000.00, IB–GAL 110,000.00 / Cr Owner's capital 1,000,000.00. Total 1,000,000.00.
+     - KDY: Dr Cash 254,300.00, Bank 40,000.00, Rent 30,000.00, Electricity 8,200.00 / Cr IB–MAIN 270,000.00, Retail 50,000.00, Service income 12,500.00. Total 332,500.00.
+     - GAL: Dr Cash 137,200.00, Water 1,800.00 / Cr IB–MAIN 110,000.00, Retail 29,000.00. Total 139,000.00.
+     - E-7: eliminations MAIN↔KDY 270,000.00 and MAIN↔GAL 110,000.00, with no KDY↔GAL. Consolidated Dr = Cr = 1,091,500.00, unchanged.
+     - KDY 10-01 opening is unchanged (IB–MAIN 200,000.00 Cr). The KDY October IB–MAIN period columns are debits 40,000.00 and credits 110,000.00.
+2. **MUST — Owner's capital exists only in MAIN (Q10).** R1's 31000 row is MAIN only. Capital into an `is_main_account` of a non-main branch B posts 4 lines (MAIN: Dr IB(B), Cr Owner's capital; B: Dr A, Cr IB(MAIN)) and asserts open for both branches. The back-fill treats existing non-main capital the same way. Delete "in any branch on its first capital posting" and the R6 "and in any branch that has capital transactions". Add an AC.
+3. **MUST — Void and reverse fixes (BA-identified) confirmed, with detail.** `void` locks **every** account on the transaction's lines (id order), posts one contra per non-contra line (posting, reclass, backfill) on that line's own account and branch, dated that line's `entry_date` (always `txn_date`, see 7). `reverse` mirrors every line, including back-filled lines. In both, the funds check applies only to a **money** account being credited, and it is run on the net credit per money account in the set. Add an AC: void an expense that has been reclassified twice. That gives 6 contras, and every account nets to 0.00 for the transaction.
+4. **MUST — `reclassify` rules.**
+   - It is allowed only for type income/expense with status `posted`. This matches `TransactionController::update` today: a reversed or void entry cannot be edited.
+   - It moves the amount from the **current** category to the new one: C→C2, then C2→C3 posts Dr C3 / Cr C2, never from the original C. It posts nothing when the category is unchanged.
+   - Inside the posting lock it re-validates the new category (active, same type, global or the entry's branch) and re-checks the period with the locking read.
+   - It updates `transactions.category_id` in the same DB transaction as the lines.
+   - It writes `transaction.reclassified` `{old_category_id, new_category_id, amount, line_ids}` in place of a bare `transaction.updated` for the category.
+5. **MUST — Back-fill idempotency and scope.**
+   - Skip a transaction only if it already balances per branch.
+   - If it has `origin = backfill` lines but does not balance, **stop** and name it. Never add a second back-fill set.
+   - Post to inactive category accounts and to inactive branches' accounts. These are history, and the active checks do not apply.
+   - Preflight also refuses to run if any income/expense has a null `category_id` or a category whose branch differs from the entry's branch, and lists them.
+   - Each run (first run or re-run) writes its own `ledger.double_entry_backfilled` row with that run's counts. AC 28's "equals a single clean run" is about lines and balances, not about the number of audit rows.
+6. **MUST — The lock exemption is confined to the back-fill.**
+   - It lives only inside the private back-fill path (no `$ignoreLocks` flag on any public `LedgerService` method).
+   - It may insert only `origin = backfill` lines, and never on a money account.
+   - `locked_periods` lists `{branch, period, lines}`.
+   - Add an AC: after the migration, a normal posting, reclass, void and reversal dated in a locked month are still refused.
+7. **MUST — Trial balance void exclusion must reconcile.** Excluding voided transactions from the period columns is safe only because every line of a voided transaction (posting, reclass, back-fill and contras) is dated its `txn_date` (controls R1). Required:
+   - Add to V2: "every line of a `void` transaction has `entry_date = txn_date`".
+   - Add an AC: for every row and for the totals, Opening + Period Dr − Period Cr = Closing (signed), by branch and consolidated.
+8. **SHOULD — Reconciliation AC between ledger and the Transfers report.** For each branch and period, the net movement on its inter-branch accounts (credits − debits for a non-main branch's IB–MAIN; debits − credits summed over MAIN's IB accounts) equals the Transfers report "Net" for that branch, excluding non-main capital (finding 2). E-dataset, October: KDY +70,000.00, GAL +10,000.00, MAIN −80,000.00 (as 80,000.00 Dr).
+9. **SHOULD — Presentation of the inter-branch accounts.** On S1 and S2, show them in their own group "Inter-branch (eliminated on consolidation)" after Equity, not under Assets: a branch's Head office current account normally has a credit balance and reads like the head office's investment in the branch. The names are "Head office current account" in a branch and "Branch current account – KDY" in MAIN. The 15 + 3-digit branch id code is fine; refuse to create a branch with id > 999.
+10. **SHOULD — Detail access for the head office side.** A user with access to MAIN can open `GET /transactions/{id}` for any transaction that has a line in MAIN (e.g. KDY→GAL, reached from the IB–KDY statement), with the same rule for any branch that has a line. Otherwise MAIN's own ledger statement links to a 403.
+11. **SHOULD — Year-end close (Q5).** AG-092 must ship before the first financial year end after go-live (31 March 2027 if the business keeps the Sri Lankan April–March year). Otherwise the trial balance's income and expense lines run across years. Reserve 32000 Retained earnings now (no postings).
+12. **SHOULD — Drawings and loans (Q9).** Until equity drawings and liabilities exist, tell users in the help text not to book owner drawings, loans received or loan repayments as income/expense. Add backlog items: "Owner's drawings" (equity, e.g. 33000), and "Manual journals + liabilities" (loans, payables, statutory dues).
+13. **SHOULD — Deploy in maintenance mode.** F7: `php artisan down` before step 3, and `up` only after step 4 passes. The accountant signs the step-2 dry-run output, and it is kept with the deploy record.
+14. **Fine as written (no change):**
+    - Chart structure and codes: 11xxx money, 31000 capital, 4PPSS/5PPSS with the same code in every branch for consolidation, codes never reused.
+    - Posting rules for income, expense, capital in MAIN, opening allocation, top-up, fund return, internal transfer, reclass and void.
+    - L1 (pre-check plus re-read per branch), L2, D1–D3, and the decision not to add a balance trigger.
+    - The R8 list is complete: the only reads of `ledger_entries` / `current_balance` outside `LedgerService` are `ReportService` (branch comparison, cash book list/opening/rows), `DashboardController` 62/66/68, `BranchController` 19 and `AccountController` 18/29/79. The statement filters by account, so it is already safe.
+    - The I&E report already uses the original's `category_id` for reversals, so V5 and AC 38 hold.
+    - The new period-lock refusal for unbalanced entries.
+
+### Answers to the open questions
+- **Q1 — Agreed: one net current account per counterparty.** This is the standard head-office / branch current account pair. One reciprocal balance per pair is what you reconcile and eliminate; separate Due-to/Due-from accounts would only need netting again. With Q2, a branch has exactly one such account (with MAIN).
+- **Q2 — Changed: route through Head Office** (finding 1). This is the textbook branch-accounting treatment, and it is what an owner-run multi-branch business expects. Each branch's books show one figure, "what head office has put into this branch". Head office sees every branch's net funding in one place, and reconciliation is a star (n−1 pairs) rather than a mesh (n(n−1)/2 pairs). KDY sending cash to GAL is in substance head office moving its own money: KDY's funding falls and GAL's rises. The MAIN period-lock dependency is accepted, because month-end locks are set by head office, normally for all branches together.
+- **Q3 — Agreed: the head office current account, not branch equity and never income.** The branches and head office are one legal entity, so a branch has no capital of its own. Opening allocations, top-ups and returns all move the same current account. Equity (Owner's capital) sits only in MAIN (finding 2).
+- **Q4 — Agreed.** There is one account per category node, the parent posting account matches the I&E "(no sub-category)" line, and the 5-digit codes are the same across branches, with 99/99 limits. Codes are not editable. Branch-only sub-categories with the same name in two branches get different codes and are not combined on consolidation; that is acceptable.
+- **Q5 — Agreed for now.** Cumulative income/expense is acceptable until AG-092, with the deadline in finding 11. The S2 basis line already discloses it.
+- **Q6 — Agreed: a recorded system exception, no unlock/re-lock.** Unlocking every month would create unlock history that looks like real reopening and would open a window for real postings. The back-fill changes no cash balance and no reported figure. One summary audit row plus `origin = backfill` on every line is enough, given findings 5, 6 and 13.
+- **Q7 — Agreed: the original date.** A category change corrects the analysis of the same event; it is not a new event. Because `update` is refused in a locked month, the rule "locked months cannot change" holds. Corrections to a locked month are made by reversal in an open month and re-entry.
+- **Q8 — Agreed**, on condition of finding 7. Excluding voided entries matches the reports basis. Reversals shown gross is the correct trial balance presentation.
+- **Q9 — Confirmed:** no liabilities or manual journals are needed for go-live. Journals and liabilities are a separate backlog item (finding 12).
+- **Q10 — Capital stays in MAIN's books only** (finding 2). Capital can still be received physically into a non-main account, but it is booked as owner's capital in MAIN and as head office funding in the branch. A single legal entity has one capital account, and consolidation then shows exactly one Owner's capital line.
