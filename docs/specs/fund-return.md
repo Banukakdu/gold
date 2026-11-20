@@ -101,3 +101,29 @@ Data: reports E-dataset branches MAIN, KDY, GAL; GAL Cash balance 40,000.00; MAI
 - **Q3 Separate "Return funds to Main" screen or menu?** *Assumption:* no; the existing Transfer money form with the type hint is the entry point (AG-042 is 2 points).
 - **Q4 Block or warn on insufficient balance?** *Assumption:* always block, as AG-050; the AG-040 setting is for allocations from Main only.
 - **Q5 Should a lock on MAIN block a fund return?** *Assumption:* yes (MAIN's Bank is debited in that month; double-entry sign-off already expects this). Only the message changes.
+
+## Accounting review (accountant, 2026-11-20, before development)
+Checked against `LedgerService::transfer/reverse/assertOpenFor/transferType`, `PostingRules::transfer`, `TransferController`, `ReportService` (Branch Comparison, consolidated trial balance).
+
+**Postings: fine.** R2 is correct double entry: GAL Dr HO current account / Cr Cash; MAIN Dr Bank / Cr BCA(GAL). Each branch balances on its own, the inter-branch pair offsets exactly and is eliminated on consolidation. Nothing goes to income or expense, so consolidated profit is unchanged. The reversal posts the 4 mirrored lines, dated on the reversal date in the current open period, and the original row is kept. Q5 is agreed: a lock on MAIN must block, because MAIN's Bank moves in that month. Year-end (R5) is fine: the inter-branch accounts are balance-sheet accounts.
+
+**Decisions**
+- **Q1 / G4: yes, block with 403, in this item.** Moving Main's money to a branch is an allocation. It is Super Admin only (controls finding 8; `SUPER_ADMIN_TYPES` already stops others reversing a `fund_allocation`). Today a MAIN user with `transfer.create` can create a `fund_allocation` through `/transfers` that they then cannot reverse. That is a gap in segregation of duties, and R9 / AC 17 close it.
+- **Over-return: limit it to the available balance of the from account, not to the funds allocated.** A branch legitimately sends its own takings to Main, so a return may exceed what Main gave it. In that case the branch's HO current account simply moves to a debit, which is offset by the branch result at the year-end close and eliminated on consolidation. Do not add an "allocated" cap. Always block at the from account's balance (R3, no warn mode, no overdraft). The check is per money account, not on the branch total.
+
+**Findings**
+1. **MUST: G4 guard on the server** (R9, AC 17). In `TransferController::transfer`, before posting: if the from branch `is_main` and the to branch is not MAIN and the user is not Super Admin, return 403 with the G4 message. Nothing is posted and no audit row is written. MAIN → MAIN internal transfers stay allowed. Hiding accounts in the web To list is only a convenience, not the control.
+2. **MUST: reversing a fund return is Super Admin only.** Add `Transaction::FUND_RETURN` to `TransferController::SUPER_ADMIN_TYPES`. Reasons: (a) the reversal credits MAIN's Bank, which takes Main's money back to the branch. That is the same movement as finding 1, and the branch does not control or reconcile MAIN's bank. (b) As written, AC 11 would show a branch user MAIN's bank balance ("available …"). Replace the following in the spec:
+   - §2 table: Branch Admin / Accountant "Reverse it" becomes **no (403 "Only a Super Admin can reverse this entry.")**. Super Admin (any mode): yes.
+   - R6: "Only the Super Admin with `transfer.reverse` (or `*`)…"
+   - AC 9, 11 and 12: the actor is the Super Admin.
+   - New AC 9a: GAL Accountant (has `transfer.reverse`) reverses the AC 1 fund return → 403, nothing posted, original still `posted`.
+   - AC 10 stands (MAIN Accountant → 404).
+   - F3: the branch asks the Super Admin to reverse.
+3. **MUST: the G2 message also covers the reversal.** `reverse()` passes `headOfficeSide` only for `branch_transfer`. It must also do so for `fund_return`, with the text "…of this fund return" (AC 6, 12). The GAL-lock path keeps the plain "The period YYYY-MM is locked." (AC 7). The closed-year check runs before both (AC 8).
+4. **SHOULD: Main must confirm it received the money.** Until AG-052 (receipt acknowledgement) is built, a branch can record a return that never reached Main's bank. That would cut its book cash to match a short till. Add to the release note: Main reconciles its bank to the Transfers report (type "Fund return") at least weekly. Raise AG-052 in priority after this item.
+5. **SHOULD: add consolidation to AC 13.** After AC 1, the consolidated trial balance shows GAL's HO current account and MAIN's BCA(GAL) eliminating to 0, `balanced = true`, and Branch Comparison totals still reconcile (opening + in − out = closing per branch; sum of branches = consolidated).
+6. **SHOULD: do not hard-code account codes in tests.** The inter-branch codes are `15` + the 3-digit branch id, so 15001/15003 in R2 hold only for MAIN id 1 and GAL id 3. Assert by account role or branch, not by literal code.
+7. **Fine as specified:** audit (R7; refusals write nothing), isolation (R8, AC 3), funds check under the row lock (R3), Super Admin "All branches" initiation (Q2), and no separate screen (Q3).
+
+**Verdict:** approved for development, subject to MUST 1–3.
