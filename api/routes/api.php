@@ -54,6 +54,7 @@ Route::prefix('v1')->group(function () {
             Route::get('reports/branch-comparison', [ReportController::class, 'branchComparison'])->middleware('perm:report.view');
             Route::get('reports/transfers', [ReportController::class, 'transfers'])->middleware('perm:report.view');
             Route::get('reports/cash-book', [ReportController::class, 'cashBook'])->middleware('perm:report.view');
+            Route::get('reports/cash-flow', [ReportController::class, 'cashFlow'])->middleware('perm:report.view'); // AG-086
             Route::get('reports/trial-balance', [ReportController::class, 'trialBalance'])->middleware('perm:report.view');
             Route::post('reports/{name}/export', [ReportController::class, 'export'])->middleware('perm:report.view,report.export');
 

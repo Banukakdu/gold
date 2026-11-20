@@ -249,6 +249,8 @@ export class ReportHeadComponent {
   title = input('');
   /** Basis line; the trial balance has its own (double-entry S2). */
   basis = input('');
+  /** Period label sent by the API (AG-086 R7: a range over two fiscal years names both); default periodLabel(). */
+  periodText = input('');
   /** Time of printing (QA bug 3): refreshed when the browser starts printing. */
   printedAt = signal(this.now());
 
@@ -259,7 +261,7 @@ export class ReportHeadComponent {
   private now() { return `${this.settings.dateTime(new Date().toISOString())} (Asia/Colombo)`; }
 
   branchLabel(m: ReportMeta) { return m.branches.map(b => `${b.code} ${b.name}`).join(', '); }
-  period(m: ReportMeta) { return periodLabel(m.from, m.to, this.settings); }
+  period(m: ReportMeta) { return this.periodText() || periodLabel(m.from, m.to, this.settings); }
 }
 
 /** Prepared / Checked / Approved lines for printed reports (finding 4). */

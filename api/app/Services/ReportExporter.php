@@ -27,6 +27,15 @@ class ReportExporter
         'transfers' => 'Transfers & Allocations',
         'cash-book' => 'Daily Cash Book',
         'trial-balance' => 'Trial Balance',
+        'cash-flow' => 'Cash Flow Summary',
+    ];
+
+    /** AG-086 columns after Month, in the spec's order (review finding 2), Eliminated last (finding 7). */
+    public const CASH_FLOW_COLUMNS = [
+        'opening' => 'Opening', 'income' => 'Income received', 'expenses' => 'Expenses paid', 'operating_net' => 'Operating net',
+        'capital' => 'Capital introduced', 'funds_received' => 'Funds received', 'transfers_in' => 'Transfers in', 'transfers_out' => 'Transfers out',
+        'funding_net' => 'Funding net', 'inflow' => 'Total inflow', 'outflow' => 'Total outflow', 'net' => 'Net change', 'closing' => 'Closing',
+        'eliminated' => 'Eliminated',
     ];
 
     /** Rows per PDF page for lists that carry Brought forward / Carried forward (finding 5), by paper orientation. */
@@ -45,6 +54,8 @@ class ReportExporter
             'transfers' => $this->reports->transferRows($p),
             'cash-book' => $this->reports->cashBookRows($p),
             'trial-balance' => $this->reports->trialBalanceRows($data ?? $this->reports->trialBalance($p)),
+            // AG-086: one row per month (at most 24, always under the caps).
+            'cash-flow' => count(ReportService::monthsBetween($p->from, $p->to)),
         };
     }
 
@@ -72,6 +83,7 @@ class ReportExporter
             'branch-comparison' => $this->reports->branchComparison($p),
             'transfers' => $this->reports->transfers($p, all: true),
             'cash-book' => $this->reports->cashBook($p),
+            'cash-flow' => $this->reports->cashFlow($p),
         };
         $head = $this->header($name, $p, $data, $user);
         $file = "{$name}_{$p->from}_{$p->to}.{$format}";
@@ -145,11 +157,13 @@ class ReportExporter
                 ? 'Receipt: '.TransferReceipts::IN_TRANSIT_LABEL.' ('.$settings->formatDate($p->to).'), any date up to it'
                 : 'Receipt: '.implode(', ', array_map([TransferReceipts::class, 'label'], $receipt));
         }
+        // AG-086 R7: the cash flow sends its own label (a range over two fiscal years names both).
+        $period = $data['period_label'] ?? self::periodLabel($p->from, $p->to);
         $lines = array_values(array_filter([
             $company,
             $title,
             'Branches: '.$p->branchLabel(),
-            'Period: '.self::periodLabel($p->from, $p->to),
+            'Period: '.$period,
             $currency,
             $basis,
             $printed,
@@ -163,7 +177,7 @@ class ReportExporter
             'logo' => preg_match('#^data:image/(png|jpeg);base64,[A-Za-z0-9+/=\s]+$#', $logo) ? $logo : null,
             'title' => $title,
             'branches' => $p->branchLabel(),
-            'period' => self::periodLabel($p->from, $p->to),
+            'period' => $period,
             'currency' => $currency,
             'printed' => $printed,
             'basis' => $basis,
@@ -204,9 +218,10 @@ class ReportExporter
                 array_map(fn ($m) => $m + ['cents' => ['amount' => Money::toCents($m['amount'])]], $data['movements']['data']), ['amount'], self::PDF_ROWS_LANDSCAPE)]],
             'cash-book' => ['reports.pdf.cash-book', ['data' => $data, 'books' => array_map(fn ($a) => $a + ['pages' => $this->carryPages($this->cashBookLines($a), ['receipt', 'payment'], self::PDF_ROWS_PORTRAIT)], $data['accounts'])]],
             'trial-balance' => ['reports.pdf.trial-balance', ['data' => $data]],
+            'cash-flow' => ['reports.pdf.cash-flow', ['data' => $data]],
         };
         $pdf = Pdf::loadView($view[0], $view[1] + ['head' => $head])
-            ->setPaper('a4', in_array($name, ['transfers', 'branch-comparison', 'trial-balance'], true) ? 'landscape' : 'portrait');
+            ->setPaper('a4', in_array($name, ['transfers', 'branch-comparison', 'trial-balance', 'cash-flow'], true) ? 'landscape' : 'portrait');
         $pdf->render();
         $dompdf = $pdf->getDomPDF();
         $canvas = $dompdf->getCanvas();
@@ -330,6 +345,17 @@ class ReportExporter
             ],
 
             'trial-balance' => $this->trialBalanceSheets($d, $row),
+
+            // AG-086: the screen columns (finding 2 order) plus Eliminated; Month is a date cell "mmm yyyy" (finding 7).
+            'cash-flow' => [[
+                'title' => 'Cash flow',
+                'columns' => array_merge([['Month', 'month']], array_map(fn ($c) => [$c, 'amount'], array_values(self::CASH_FLOW_COLUMNS))),
+                'rows' => array_merge(
+                    array_map(fn ($m) => $row(array_merge([$m['month']], array_map(fn ($k) => $m[$k], array_keys(self::CASH_FLOW_COLUMNS)))), $d['months']),
+                    [$row(array_merge(['Total'], array_map(fn ($k) => $d['total'][$k], array_keys(self::CASH_FLOW_COLUMNS))), true)],
+                ),
+                'notes' => array_merge($d['empty'] ? [ReportService::CASH_FLOW_EMPTY] : [], $d['notes']),
+            ]],
 
             'cash-book' => array_map(function ($a) use ($row) {
                 $rows = [$row(['', 'Opening balance', '', '', '', '', $a['opening']], true)];

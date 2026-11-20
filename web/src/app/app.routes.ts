@@ -42,6 +42,8 @@ export const routes: Routes = [
         loadComponent: () => import('./features/reports/transfers-report.component').then(m => m.TransfersReportComponent) },
       { path: 'reports/cash-book', canActivate: [permissionGuard('report.view')],
         loadComponent: () => import('./features/reports/cash-book.component').then(m => m.CashBookComponent) },
+      { path: 'reports/cash-flow', canActivate: [permissionGuard('report.view')],
+        loadComponent: () => import('./features/reports/cash-flow.component').then(m => m.CashFlowComponent) },
       { path: 'reports/trial-balance', canActivate: [permissionGuard('report.view')],
         loadComponent: () => import('./features/reports/trial-balance.component').then(m => m.TrialBalanceComponent) },
       { path: 'audit-log', canActivate: [permissionGuard('audit.view')],
