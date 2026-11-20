@@ -156,7 +156,8 @@ class ExpenseApprovals extends ApprovalRequests
         $x = Money::sqlCents('amount');
         $rows = $this->pendingOnAccountsQuery($accountIds)
             ->selectRaw("CASE WHEN type = ? THEN account_id ELSE from_account_id END as acc, COALESCE(SUM($x), 0) as c", [Transaction::EXPENSE])
-            ->groupByRaw('CASE WHEN type = ? THEN account_id ELSE from_account_id END', [Transaction::EXPENSE])->get();
+            // Group by the alias: MySQL's only_full_group_by cannot match two separately bound CASE expressions.
+            ->groupBy('acc')->get();
 
         return $rows->mapWithKeys(fn ($r) => [(int) $r->acc => (int) $r->c])->all();
     }
