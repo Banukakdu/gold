@@ -13,6 +13,7 @@ import {
 } from '../../core/attachments';
 import { LockBannerComponent } from '../period-locks/lock-banner.component';
 import { ReceiptDialogComponent, ReceiptResult, receiptLabel } from '../../core/receipts';
+import { ApprovalDialogComponent, approvalLabel } from '../../core/approvals';
 
 interface Detail {
   id: number; ref_no: string; type: string; status: string; txn_date: string; amount: string;
@@ -41,6 +42,17 @@ interface Detail {
   receipt_note_required?: boolean;
   /** The latest discrepancy report (kept visible after it was settled). */
   receipt_discrepancy?: { note: string | null; by: { id: number; name: string } | null; at: string | null } | null;
+  /** AG-051 S5. */
+  approval_status?: string | null;
+  requested_date?: string | null;
+  requested_on?: string | null;
+  approval_threshold?: string | null;
+  approval_note?: string | null;
+  decided_by?: { id: number; name: string } | null;
+  decided_at?: string | null;
+  expires_on?: string | null;
+  can_approve?: boolean;
+  can_cancel?: boolean;
 }
 
 interface LedgerLine {
@@ -59,12 +71,12 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
  */
 @Component({
   standalone: true,
-  imports: [FormsModule, MoneyPipe, AppDatePipe, RouterLink, LockBannerComponent, ReceiptDialogComponent],
+  imports: [FormsModule, MoneyPipe, AppDatePipe, RouterLink, LockBannerComponent, ReceiptDialogComponent, ApprovalDialogComponent],
   template: `
     <p class="att-back"><a routerLink="/transactions">Back to transactions</a></p>
     @if (msg()) { <div class="alert">{{ msg() }}</div> }
     @if (t(); as t) {
-      <h1><span class="att-ref">{{ t.ref_no }}</span> <span class="tag" [attr.data-s]="t.status">{{ t.status }}</span></h1>
+      <h1><span class="att-ref">{{ t.ref_no }}</span> <span class="tag" [attr.data-s]="t.status">{{ t.approval_status && t.status !== 'posted' && t.status !== 'reversed' ? approvalText(t.approval_status) : t.status }}</span></h1>
       <ag-lock-banner />
       @if (t.legacy_void_note) { <div class="alert" style="margin-bottom:12px">{{ t.legacy_void_note }}</div> }
       <div class="card section">
@@ -85,6 +97,38 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
           <dd>{{ t.creator?.name }} @if (t.creator_tag) { <span class="tag" data-s="inactive">{{ t.creator_tag }}</span> }</dd>
         </dl>
       </div>
+
+      <!-- AG-051 S5 -->
+      @if (t.approval_status) {
+        <div class="card section tr-panel">
+          <h2>Approval</h2>
+          @if (approvalOk()) { <div class="ok">{{ approvalOk() }}</div> }
+          <dl class="entry-detail">
+            <dt>Status</dt><dd><span class="tag" [attr.data-s]="t.approval_status === 'approved' ? null : 'reversed'">{{ approvalText(t.approval_status) }}</span></dd>
+            <dt>Requested on / by</dt><dd>{{ t.requested_on | appDate }} · {{ t.creator?.name }}</dd>
+            <dt>Requested for</dt><dd>{{ t.requested_date | appDate }}</dd>
+            <dt>Threshold at request</dt><dd>{{ t.approval_threshold | money }}</dd>
+            @if (t.approval_status === 'pending' && t.expires_on) { <dt>Expires on</dt><dd>{{ t.expires_on | appDate }}</dd> }
+            @if (t.decided_at) { <dt>Decided by / at</dt><dd>{{ t.decided_by?.name ?? 'System (expired)' }} · {{ settings.dateTime(t.decided_at) }}</dd> }
+            @if (t.approval_status === 'approved') { <dt>Posting date</dt><dd>{{ t.txn_date | appDate }}</dd> }
+            @if (t.approval_note) { <dt>Comment</dt><dd class="att-pre">{{ t.approval_note }}</dd> }
+          </dl>
+          @if (t.can_approve || t.can_cancel) {
+            <p>
+              @if (t.can_approve) {
+                <button type="button" (click)="approvalMode.set('approve')">Approve</button>
+                <button type="button" class="ghost" style="margin-left:8px" (click)="approvalMode.set('reject')">Reject</button>
+              }
+              @if (t.can_cancel) { <button type="button" class="ghost" (click)="cancelRequest(t)">Cancel request</button> }
+            </p>
+          }
+        </div>
+        @if (approvalMode(); as mode) {
+          <ag-approval-dialog [mode]="mode" (cancelled)="approvalMode.set(null)" (done)="approvalDone($event, mode)" (refused)="reload()"
+            [target]="{ id: t.id, ref_no: t.ref_no, amount: t.amount, requested_date: t.requested_date ?? null,
+              from: (t.from_account?.branch?.code ?? '') + ' · ' + (t.from_account?.name ?? ''), to: (t.to_account?.branch?.code ?? '') + ' · ' + (t.to_account?.name ?? '') }" />
+        }
+      }
 
       @if (t.receipt_status) {
         <div class="card section tr-panel">
@@ -261,6 +305,27 @@ export class TransactionDetailComponent implements OnInit {
   receiptOk = signal('');
 
   receiptText(s: string | null | undefined) { return receiptLabel(s); }
+
+  /** AG-051 S5: the open approve / reject dialog and the panel's success line. */
+  approvalMode = signal<'approve' | 'reject' | null>(null);
+  approvalOk = signal('');
+
+  approvalText(s: string | null | undefined) { return approvalLabel(s); }
+
+  approvalDone(r: { ref_no: string }, mode: 'approve' | 'reject') {
+    this.approvalMode.set(null);
+    this.approvalOk.set(mode === 'approve' ? `${r.ref_no} approved and posted.` : `${r.ref_no} rejected.`);
+    this.reload();
+  }
+
+  cancelRequest(t: Detail) {
+    const reason = prompt(`Cancel request ${t.ref_no}? Reason (optional):`);
+    if (reason === null) return;
+    this.http.post(`/api/v1/transfer-approvals/${t.id}/cancel`, reason.trim() ? { comment: reason.trim() } : {}).subscribe({
+      next: () => { this.approvalOk.set('Request cancelled.'); this.reload(); },
+      error: e => { this.msg.set(errorText(e)); this.reload(); },
+    });
+  }
 
   receiptDone(r: ReceiptResult, mode: 'received' | 'discrepancy') {
     this.receiptMode.set(null);

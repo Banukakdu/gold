@@ -144,6 +144,8 @@ class TransactionExporter
         ['Date', 'date'], ['Created at', 'text'], ['Ref no', 'text'], ['Branch', 'text'], ['Type', 'text'], ['Direction', 'text'],
         ['Category', 'text'], ['Sub-category', 'text'], ['Account', 'text'], ['From', 'text'], ['To', 'text'], ['Payee / payer', 'text'],
         ['Payment method', 'text'], ['Reference', 'text'], ['Description', 'text'], ['Amount', 'amount'], ['Status', 'text'],
+        // AG-051 S6
+        ['Approval', 'text'], ['Decided by', 'text'], ['Decided at', 'text'],
         ['Receipt', 'text'], ['Received on', 'date'], ['Receipt by', 'text'], ['Receipt note', 'text'],
         ['Reversal of', 'text'], ['Reversed by', 'text'], ['Voided on', 'date'], ['Voided by', 'text'], ['Void reason', 'text'],
         ['Created by', 'text'], ['Files', 'text'],
@@ -188,6 +190,9 @@ class TransactionExporter
                 $t->description,
                 $closing ? '—' : Money::fromCents(Money::toCents($t->amount)),
                 self::statusLabel($t),
+                $t->approval_status ? TransferApprovals::label($t->approval_status) : '',
+                $t->decidedBy?->name,
+                $t->decided_at ? $t->decided_at->copy()->setTimezone('Asia/Colombo')->format('Y-m-d H:i') : '',
                 $t->receipt_status ? TransferReceipts::label($t->receipt_status) : '',
                 $t->received_on?->format('Y-m-d'),
                 $t->receiptBy?->name,
@@ -211,6 +216,9 @@ class TransactionExporter
             $t->status === 'reversed' => trim('Reversed by '.($t->reversedBy?->ref_no ?? '')),
             $t->status === 'void' && $t->type === Transaction::YEAR_END_CLOSE => 'Void (year reopened)',
             $t->status === 'void' => 'Void',
+            // AG-051 R1: requests that never posted.
+            $t->status === 'pending' => 'Pending approval',
+            $t->status === 'rejected' => TransferApprovals::label($t->approval_status ?? TransferApprovals::REJECTED),
             default => 'Posted',
         };
     }

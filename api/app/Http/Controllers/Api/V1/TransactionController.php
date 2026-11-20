@@ -11,6 +11,7 @@ use App\Services\BackgroundExports;
 use App\Services\LedgerService;
 use App\Services\TransactionExporter;
 use App\Services\TransactionSearch;
+use App\Services\TransferApprovals;
 use App\Services\TransferReceipts;
 use App\Services\YearEnd;
 use App\Support\BranchContext;
@@ -28,7 +29,9 @@ class TransactionController extends Controller
         'account:id,name,branch_id', 'fromAccount:id,name,branch_id', 'fromAccount.branch:id,code', 'toAccount:id,name,branch_id',
         'toAccount.branch:id,code', 'creator:id,name,status,is_super_admin', 'reversalOf:id,ref_no', 'reversedBy:id,ref_no,reversal_of_id',
         // AG-052: serialises as receipt_by: {id, name}.
-        'receiptBy:id,name'];
+        'receiptBy:id,name',
+        // AG-051: serialises as decided_by: {id, name}.
+        'decidedBy:id,name'];
 
     public function __construct(private LedgerService $ledger, private TransactionSearch $search) {}
 
@@ -71,13 +74,17 @@ class TransactionController extends Controller
     {
         $ctx = app(BranchContext::class);
         $transaction = Transaction::withoutGlobalScopes()->find($transactionId);
+        $approvals = app(TransferApprovals::class);
+        // AG-051 R13: a request has no lines yet; the receiving branch and Main's approvers see it too.
         $allowed = $transaction && (! $ctx->isScoped() || (int) $transaction->branch_id === $ctx->branchId
-            || $transaction->entries()->where('branch_id', $ctx->branchId)->exists());
+            || $transaction->entries()->where('branch_id', $ctx->branchId)->exists()
+            || ($transaction->approval_status !== null && in_array($transaction->status, ['pending', 'rejected'], true)
+                && ((int) $transaction->related_branch_id === $ctx->branchId || $approvals->isApprover(request()->user(), $ctx))));
         abort_unless($allowed, 404);
 
         $transaction->load(['entries' => fn ($q) => $q->orderBy('id'), 'entries.account:id,code,name,class,type', 'entries.branch:id,code',
             'branch', 'category.parent', 'account', 'fromAccount.branch', 'toAccount.branch', 'creator:id,name,status,is_super_admin',
-            'receiptBy:id,name,is_super_admin']);
+            'receiptBy:id,name,is_super_admin', 'decidedBy:id,name']);
         $dr = $cr = 0;
         foreach ($transaction->entries as $e) {
             $dr += Money::toCents($e->debit);
@@ -94,6 +101,11 @@ class TransactionController extends Controller
         $transaction->setAttribute('can_acknowledge', $receipts->canAcknowledge($transaction, request()->user()));
         $transaction->setAttribute('receipt_note_required', $receipts->noteRequired($transaction));
         $transaction->setAttribute('receipt_discrepancy', $receipts->lastDiscrepancy($transaction));
+        // AG-051 S5: the Approval panel's buttons.
+        $transaction->setAttribute('can_approve', $approvals->canApprove($transaction, request()->user()));
+        $transaction->setAttribute('can_cancel', $approvals->canCancel($transaction, request()->user()));
+        $transaction->setAttribute('expires_on', $transaction->approval_status === TransferApprovals::PENDING
+            ? TransferApprovals::expiresOn($transaction->requested_on?->format('Y-m-d')) : null);
         $transaction->loadCount(self::attachmentCounts());
         $this->tagAuthors(collect([$transaction]));
         $this->markLegacyVoids(collect([$transaction]));

@@ -4,6 +4,7 @@ import { AppDatePipe } from '../../core/app-date.pipe';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
 import { TransferReceiptsComponent } from './transfer-receipts.component';
+import { TransferApprovalsComponent } from './transfer-approvals.component';
 
 interface Dash {
   scope: 'all' | 'branch';
@@ -17,7 +18,7 @@ interface Dash {
 
 @Component({
   standalone: true,
-  imports: [MoneyPipe, AppDatePipe, TransferReceiptsComponent],
+  imports: [MoneyPipe, AppDatePipe, TransferReceiptsComponent, TransferApprovalsComponent],
   template: `
     <h1>{{ auth.isAllBranches() ? 'All branches' : auth.activeBranch()?.name }} <small class="muted">this month</small></h1>
     @if (d(); as d) {
@@ -29,7 +30,7 @@ interface Dash {
       </section>
 
       <!-- AG-052 S2: needs transaction.view as well as report.dashboard. -->
-      @if (auth.can('transaction.view')) { <ag-transfer-receipts /> }
+      @if (auth.can('transaction.view')) { <ag-transfer-approvals /> <ag-transfer-receipts /> }
 
       <section class="grid2">
         <div class="card">

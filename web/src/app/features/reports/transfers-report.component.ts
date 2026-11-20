@@ -1,7 +1,7 @@
 import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
-import { ActivatedRoute, Router } from '@angular/router';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
 import { AppDatePipe } from '../../core/app-date.pipe';
 import { MoneyPipe } from '../../core/money.pipe';
@@ -24,6 +24,9 @@ interface Transfers extends ReportMeta {
   net_moved: string;
   receipt?: string[];
   in_transit?: { as_at: string; count: number; amount: string } | null;
+  /** AG-051 S7: requests pending now, dated <= To; not in the figures. */
+  pending_approval?: { data: { id: number; ref_no: string; type: string; requested_date: string; from: { branch_code: string; account: string };
+    to: { branch_code: string; account: string }; amount: string }[]; count: number; amount: string };
   matrix: { branches: MatrixBranch[]; cells: { from_id: number; to_id: number; amount: string }[];
     sent: Record<string, string>; received: Record<string, string>; net: Record<string, string> };
 }
@@ -41,7 +44,7 @@ export const MOVEMENT_TYPES: [string, string][] = [
 /** AG-084 */
 @Component({
   standalone: true,
-  imports: [FormsModule, MoneyPipe, AppDatePipe, BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent],
+  imports: [FormsModule, RouterLink, MoneyPipe, AppDatePipe, BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent],
   template: `
     <h1>Transfers &amp; Allocations</h1>
     <form class="filters" (ngSubmit)="load(1)">
@@ -104,6 +107,22 @@ export const MOVEMENT_TYPES: [string, string][] = [
             <button type="button" class="ghost" [disabled]="r.movements.current_page >= r.movements.last_page" (click)="load(r.movements.current_page + 1)">Next</button>
           </div>
         </div>
+
+        @if (r.pending_approval?.count) {
+          <div class="card section">
+            <h2>Pending approval now <small class="muted">not included above</small></h2>
+            <table class="list">
+              <thead><tr><th>Requested on</th><th>Ref</th><th>From</th><th>To</th><th class="num">Amount</th></tr></thead>
+              <tbody>
+                @for (m of r.pending_approval!.data; track m.id) {
+                  <tr><td>{{ m.requested_date | appDate }}</td><td class="mono"><a [routerLink]="['/transactions', m.id]">{{ m.ref_no }}</a></td>
+                    <td>{{ m.from.branch_code }} · {{ m.from.account }}</td><td>{{ m.to.branch_code }} · {{ m.to.account }}</td><td class="num">{{ m.amount | money }}</td></tr>
+                }
+              </tbody>
+            </table>
+            <p class="muted">{{ r.pending_approval!.count }} pending, {{ r.pending_approval!.amount | money }}</p>
+          </div>
+        }
 
         <div class="card section">
           <h2>Net position matrix <small class="muted">rows send, columns receive</small></h2>

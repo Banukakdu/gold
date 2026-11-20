@@ -7,6 +7,8 @@ import { MoneyPipe } from '../../core/money.pipe';
 import { errorText } from '../../core/api.interceptor';
 import { LockBannerComponent } from '../period-locks/lock-banner.component';
 import { colomboToday } from '../../core/dates';
+import { SettingsService } from '../../core/settings.service';
+import { toCents } from '../../core/approvals';
 
 /** Branch-to-branch, internal, or back-to-Main transfer. */
 @Component({
@@ -31,18 +33,42 @@ import { colomboToday } from '../../core/dates';
         </select>
       </label>
       @if (typeLabel(); as t) { <p class="muted wide">Type: {{ t }}</p> }
-      <label>Amount <input type="number" name="amount" [(ngModel)]="m.amount" min="0.01" step="0.01" required /></label>
+      <label>Amount <input type="number" name="amount" [(ngModel)]="m.amount" (ngModelChange)="amount.set($event)" min="0.01" step="0.01" required /></label>
+      @if (needsApproval()) {
+        <p class="alert info wide">Above {{ threshold() | money }}: this transfer needs Main's approval before it is posted.</p>
+      }
       <label>Date <input type="date" name="txn_date" [(ngModel)]="m.txn_date" [max]="today" required /></label>
       <label class="wide">Reason <input name="note" [(ngModel)]="m.note" required /></label>
       @if (error()) { <div class="alert wide">{{ error() }}</div> }
-      @if (saved()) { <div class="ok wide">{{ saved() }} posted.@if (mustConfirm()) { {{ toCode() || 'The receiving branch' }} must confirm receipt. }</div> }
-      <div class="wide actions"><button type="submit" [disabled]="busy()">Transfer</button></div>
+      @if (saved()) {
+        @if (pending()) { <div class="ok wide">{{ saved() }}</div> }
+        @else { <div class="ok wide">{{ saved() }} posted.@if (mustConfirm()) { {{ toCode() || 'The receiving branch' }} must confirm receipt. }</div> }
+      }
+      @if (warning()) { <div class="alert wide">{{ warning() }}</div> }
+      <div class="wide actions"><button type="submit" [disabled]="busy()">{{ needsApproval() ? 'Send for approval' : 'Transfer' }}</button></div>
     </form>
   `,
 })
 export class TransferFormComponent implements OnInit {
   private http = inject(HttpClient);
   private auth = inject(AuthService);
+  private settings = inject(SettingsService);
+  /** AG-051 S2: the typed amount, for the approval hint. */
+  amount = signal<string | number | null>(null);
+  pending = signal(false);
+  warning = signal('');
+  threshold = computed(() => this.settings.settings()?.transfer_approval_threshold ?? null);
+
+  /**
+   * AG-051 S2 (display only; the server decides, R2): threshold set, not Super Admin, a branch transfer or fund return,
+   * amount strictly above the threshold, compared in cents.
+   */
+  needsApproval = computed(() => {
+    const t = toCents(this.threshold());
+    const a = toCents(this.amount());
+    const type = this.typeLabel();
+    return t !== null && a !== null && !this.auth.isSuperAdmin() && (type === 'Branch transfer' || type === 'Fund return to Main') && a > t;
+  });
   mine = signal<Account[]>([]);
   destinations = signal<Account[]>([]);
   busy = signal(false);
@@ -112,8 +138,18 @@ export class TransferFormComponent implements OnInit {
     this.error.set('');
     // AG-052 F2: the receiving branch, named in the success text when it must confirm receipt.
     const toCode = this.destinations().find(a => a.id === Number(this.toId()))?.branch?.code ?? '';
-    this.http.post<{ ref_no: string; type: string; receipt_status?: string | null }>('/api/v1/transfers', { ...this.m, from_account_id: this.fromId(), to_account_id: this.toId() }).subscribe({
-      next: r => { this.mustConfirm.set(r.receipt_status === 'awaiting'); this.toCode.set(toCode); this.saved.set(`${r.type === 'fund_return' ? 'Fund return' : 'Transfer'} ${r.ref_no}`); this.m['amount'] = null; this.m['note'] = ''; this.busy.set(false); this.ngOnInit(); },
+    this.warning.set('');
+    this.http.post<{ ref_no: string; type: string; status?: string; warning?: string | null; receipt_status?: string | null }>('/api/v1/transfers', { ...this.m, from_account_id: this.fromId(), to_account_id: this.toId() }).subscribe({
+      next: r => {
+        this.mustConfirm.set(r.receipt_status === 'awaiting'); this.toCode.set(toCode);
+        // AG-051 S2: the response's status decides the toast; R17 warning (never a block).
+        this.pending.set(r.status === 'pending');
+        this.warning.set(r.warning ?? '');
+        this.saved.set(r.status === 'pending'
+          ? `${r.ref_no} sent for approval. Balances do not change until it is approved.`
+          : `${r.type === 'fund_return' ? 'Fund return' : 'Transfer'} ${r.ref_no}`);
+        this.m['amount'] = null; this.amount.set(null); this.m['note'] = ''; this.busy.set(false); this.ngOnInit();
+      },
       error: e => { this.error.set(errorText(e)); this.busy.set(false); },
     });
   }

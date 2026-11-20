@@ -21,8 +21,8 @@ class TransactionSearch
         Transaction::BRANCH_TRANSFER, Transaction::INTERNAL_TRANSFER, Transaction::INCOME, Transaction::EXPENSE, Transaction::REVERSAL,
         Transaction::YEAR_END_CLOSE];
 
-    /** R4: pending / rejected are reserved for AG-064 / AG-051. */
-    public const STATUSES = ['posted', 'void', 'reversed'];
+    /** R4. AG-051: pending = waiting for approval; rejected = rejected, cancelled or expired requests (never posted). */
+    public const STATUSES = ['posted', 'void', 'reversed', 'pending', 'rejected'];
 
     public const PER_PAGE = ['25', '50', '100', '200'];
 

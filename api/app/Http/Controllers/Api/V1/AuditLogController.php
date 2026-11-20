@@ -17,6 +17,7 @@ use App\Models\YearEndClose;
 use App\Services\ChartOfAccounts;
 use App\Services\ReportExporter;
 use App\Services\ReportService;
+use App\Services\TransferApprovals;
 use App\Support\BranchContext;
 use App\Support\Settings;
 use Carbon\CarbonImmutable;
@@ -51,7 +52,8 @@ class AuditLogController extends Controller
     /** Event groups of the filter: [prefixes, exact events]. */
     public const GROUPS = [
         // AG-052 R12: receipt events are in the Transactions group.
-        'transactions' => [['transaction.', 'transfer.receipt_'], []],
+        // AG-051 R12: approval events too.
+        'transactions' => [['transaction.', 'transfer.receipt_', 'transfer.approv'], ['transfer.rejected']],
         'voids' => [[], ['transaction.voided', 'transaction.reversed']],
         'users' => [['user.'], []],
         'roles' => [['role.'], []],
@@ -86,6 +88,11 @@ class AuditLogController extends Controller
         'transfer.receipt_received' => 'Receipt confirmed',
         'transfer.receipt_disputed' => 'Discrepancy reported',
         'transfer.receipt_cancelled' => 'Receipt cancelled (reversed)',
+        'transfer.approval_requested' => 'Transfer sent for approval',
+        'transfer.approved' => 'Transfer approved',
+        'transfer.rejected' => 'Transfer rejected',
+        'transfer.approval_cancelled' => 'Transfer request cancelled',
+        'transfer.approval_expired' => 'Transfer request expired',
         'period.locked' => 'Period locked',
         'period.unlocked' => 'Period unlocked',
         'report.exported' => 'Report exported',
@@ -218,6 +225,8 @@ class AuditLogController extends Controller
             'user_id' => 'nullable|integer',
             'self' => 'nullable|boolean',
             'ref_no' => 'nullable|string|max:40',
+            // AG-051 finding 6: Super Admin movements above the threshold that were not held.
+            'approval' => 'nullable|in:'.TransferApprovals::NOT_REQUIRED_SUPER_ADMIN,
             'branches' => 'nullable|array',
             'branches.*' => 'distinct',
             'page' => 'nullable|integer|min:1',
@@ -228,7 +237,7 @@ class AuditLogController extends Controller
             throw ValidationException::withMessages(['to' => 'The date range may not be longer than '.self::MAX_DAYS.' days.']);
         }
         $f['branches'] = array_map(fn ($b) => is_scalar($b) ? (string) $b : '', array_values($f['branches'] ?? []));
-        $f += ['event_group' => null, 'event' => null, 'user_id' => null, 'self' => null, 'ref_no' => null];
+        $f += ['event_group' => null, 'event' => null, 'user_id' => null, 'self' => null, 'ref_no' => null, 'approval' => null];
 
         $q = $this->branchScope(AuditLog::query(), $request, $f['branches']);
         foreach ($f['branches'] as $b) {
@@ -254,7 +263,8 @@ class AuditLogController extends Controller
         }
         $q->when($f['event'], fn ($q, $v) => $q->where('event', $v))
             ->when($f['user_id'], fn ($q, $v) => $q->where('user_id', $v))
-            ->when($request->boolean('self'), fn ($q) => $q->where('new_values->self', true));
+            ->when($request->boolean('self'), fn ($q) => $q->where('new_values->self', true))
+            ->when($f['approval'], fn ($q, $v) => $q->where('new_values->approval', $v));
         if ($f['ref_no']) {
             $ids = Transaction::withoutGlobalScopes()->where('ref_no', $f['ref_no'])->pluck('id');
             $q->where('auditable_type', Transaction::class)->whereIn('auditable_id', $ids);

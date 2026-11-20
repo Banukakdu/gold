@@ -38,7 +38,7 @@ class FiltersTest extends TransactionSearchTestCase
         $this->assertSame($this->ids('E4'), $this->rowIds($this->kdyList(['status' => 'void'])));
         $this->assertSame($this->ids('E6'), $this->rowIds($this->kdyList(['status' => 'reversed'])));
         $this->assertSame($this->ids('E7', 'E4', 'E3', 'E2', 'E1', 'E5', 'E9'), $this->rowIds($this->kdyList(['status' => 'posted,void'])));
-        $this->kdyList(['status' => 'pending'])->assertStatus(422)->assertJsonPath('errors.status.0', 'Unknown status: pending.');
+        $this->kdyList(['status' => 'held'])->assertStatus(422)->assertJsonPath('errors.status.0', 'Unknown status: held.');
     }
 
     public function test_ac6_account_matches_money_account_on_any_side(): void

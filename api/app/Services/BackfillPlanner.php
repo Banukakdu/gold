@@ -55,6 +55,11 @@ class BackfillPlanner
         $ref = $t->ref_no ?? "#{$t->id}";
 
         if ($lines->isEmpty()) {
+            // AG-051 R13: a transfer request that never posted has no lines by design (ledger:verify V9 asserts it).
+            if (in_array($t->status, ['pending', 'rejected'], true)) {
+                return ['status' => self::SKIP];
+            }
+
             return $t->status === 'void' ? ['status' => self::LEGACY_VOID]
                 : $this->error("Transaction {$ref} has no ledger lines and is not a legacy void.");
         }

@@ -112,6 +112,13 @@ class LedgerVerify extends Command
         $failed = $this->check('V6 back-fill complete (no income, expense, capital or cross-branch entry with only money lines)', $v6->count(),
             ['Ref', 'Date', 'Branch', 'Type'], $v6->map(fn ($r) => [$r->ref_no ?? "#{$r->transaction_id}", substr((string) $r->txn_date, 0, 10), $r->branch, $r->type])->all()) || $failed;
 
+        // AG-051 V9 (accounting review MUST 2): requests that never posted have no lines; status agrees.
+        if (Schema::hasColumn('transactions', 'approval_status')) {
+            $v9 = LedgerChecks::approvalRequests();
+            $failed = $this->check('V9 transfer requests: no lines unless approved, status agrees with approval status', $v9->count(),
+                ['Ref', 'Date', 'Branch', 'Problem'], $v9->map(fn ($r) => [$r->ref_no ?? "#{$r->transaction_id}", substr((string) $r->txn_date, 0, 10), $r->branch, $r->problem])->all()) || $failed;
+        }
+
         // AG-092 year-end close (docs/specs/settings.md R9).
         if (Schema::hasTable('year_end_closes')) {
             $v7 = LedgerChecks::yearEnd()->map(fn ($r) => [$r['check'], $r['branch'], $r['detail'], Money::format(Money::fromCents($r['diff']))]);

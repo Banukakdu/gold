@@ -93,6 +93,17 @@ final class Settings
         return $this->raw('transfer_receipt_required') === '1';
     }
 
+    /**
+     * AG-051 R2: transfers above this many cents need Main's approval. Null = never (default); 0 = every branch
+     * transfer and fund return. Stored as integer cents text; anything else reads as never.
+     */
+    public function transferApprovalThresholdCents(): ?int
+    {
+        $v = $this->raw('transfer_approval_threshold');
+
+        return $v !== null && ctype_digit($v) ? (int) $v : null;
+    }
+
     /** The stored logo metadata (R3) or null. A legacy data: URI is not a logo any more (the migration converted it). */
     public function logo(): ?array
     {

@@ -749,6 +749,10 @@ class ReportService
             'receipt' => $receipt,
             'in_transit' => $inTransit,
             'movements' => $movements,
+            // AG-051 S7 (accounting review finding 13): requests pending NOW, dated <= To; not in the figures above.
+            'pending_approval' => Schema::hasColumn('transactions', 'approval_status')
+                ? app(TransferApprovals::class)->pendingRows($p->to, $p->branchIds())
+                : ['data' => [], 'count' => 0, 'amount' => '0.00'],
             'net_moved' => Money::fromCents((int) $cells->sum(fn ($c) => (int) $c->cents)),
             'matrix' => [
                 'branches' => $branches->map(fn ($b) => ['id' => $b->id, 'code' => $b->code, 'name' => $b->name, 'status' => $b->status, 'in_scope' => in_array($b->id, $inScope, true)])->all(),

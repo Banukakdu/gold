@@ -10,6 +10,7 @@ use App\Models\Transaction;
 use App\Models\User;
 use App\Models\YearEndClose;
 use App\Services\Backups\BackupStatus;
+use App\Services\TransferApprovals;
 use App\Services\TransferReceipts;
 use App\Support\BranchContext;
 use App\Support\BusinessDate;
@@ -122,7 +123,9 @@ class PeriodLockController extends Controller
         ]
             // AG-052 R8 / R14: transfers in transit at the period end, sent or received by a branch this lock newly
             // closes. Information only: an open receipt never blocks a lock.
-            + app(TransferReceipts::class)->inTransitSummary($periodEnd, $open->keys()->map(fn ($id) => (int) $id)->all());
+            + app(TransferReceipts::class)->inTransitSummary($periodEnd, $open->keys()->map(fn ($id) => (int) $id)->all())
+            // AG-051 S8: requests dated in the month and still pending. Never blocking; they post on their approval date.
+            + app(TransferApprovals::class)->pendingSummary(substr($periodEnd, 0, 8).'01', $periodEnd, $branches->pluck('id')->map(fn ($id) => (int) $id)->all());
     }
 
     public function store(Request $request)
