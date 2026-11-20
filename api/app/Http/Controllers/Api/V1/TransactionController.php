@@ -5,10 +5,11 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Models\Account;
 use App\Models\AuditLog;
-use App\Models\Branch;
 use App\Models\Transaction;
 use App\Models\User;
 use App\Services\LedgerService;
+use App\Services\TransactionExporter;
+use App\Services\TransactionSearch;
 use App\Services\YearEnd;
 use App\Support\BranchContext;
 use App\Support\BusinessDate;
@@ -20,66 +21,39 @@ use Illuminate\Validation\Rule;
 
 class TransactionController extends Controller
 {
-    public function __construct(private LedgerService $ledger) {}
+    /** Eager loads of the list and the export (R13: no N+1). */
+    public const LIST_RELATIONS = ['branch:id,code,name', 'category:id,name,parent_id,is_active', 'category.parent:id,name,is_active',
+        'account:id,name,branch_id', 'fromAccount:id,name,branch_id', 'fromAccount.branch:id,code', 'toAccount:id,name,branch_id',
+        'toAccount.branch:id,code', 'creator:id,name,status,is_super_admin', 'reversalOf:id,ref_no', 'reversedBy:id,ref_no,reversal_of_id'];
 
-    /** AG-065: filterable, paginated list. */
+    public function __construct(private LedgerService $ledger, private TransactionSearch $search) {}
+
+    /** AG-065 (docs/specs/transaction-search.md): filterable, sortable, paginated list over the scope set (R10). */
     public function index(Request $request)
     {
-        $f = $request->validate([
-            'from' => 'nullable|date', 'to' => 'nullable|date',
-            'type' => 'nullable|string', 'status' => 'nullable|string',
-            'account_id' => 'nullable|integer', 'category_id' => 'nullable|integer',
-            'created_by' => 'nullable|integer', 'min' => 'nullable|numeric', 'max' => 'nullable|numeric',
-            'q' => 'nullable|string|max:100', 'per_page' => 'nullable|integer|max:200',
-            'branches' => 'nullable|array', 'branches.*' => 'integer|exists:branches,id', 'category_only' => 'nullable|boolean',
-            'files' => 'nullable|in:with,none,removed',
-        ]);
-        // Reports spec E1: branches[] narrows All mode; in branch mode it may only name the active branch.
-        $ctx = app(BranchContext::class);
-        $branches = array_map('intval', $f['branches'] ?? []);
-        if ($ctx->isScoped()) {
-            foreach ($branches as $id) {
-                if ($id !== $ctx->branchId) {
-                    abort(403, 'You do not have access to branch '.Branch::find($id)->code.'.');
-                }
-            }
+        $p = $this->search->params($request->all());
+        $page = $this->search->query($p)
+            ->with(self::LIST_RELATIONS)
+            ->withCount(self::attachmentCounts())->withCount('entries')
+            ->paginate($p->perPage, ['*'], 'page', $p->page);
+        $rows = $page->getCollection();
+        $this->tagAuthors($rows);
+        $this->markLegacyVoids($rows);
+        foreach ($rows as $t) {
+            // R10 / accounting review finding 5: incoming rows are read-only (actions follow transactions.branch_id).
+            $t->setAttribute('in_active_branch', $p->inActiveBranch($t));
+            $t->setAttribute('direction', $p->isIncoming($t) ? 'in' : null);
+            $t->setAttribute('reversal_of_ref', $t->reversalOf?->ref_no);
+            $t->setAttribute('reversed_by_ref', $t->reversedBy?->ref_no);
         }
-        $categoryOnly = (bool) ($f['category_only'] ?? false);
-
-        $q = Transaction::with(['branch:id,code,name', 'category:id,name,parent_id', 'category.parent:id,name',
-            'account:id,name', 'fromAccount:id,name,branch_id', 'toAccount:id,name,branch_id', 'creator:id,name,status,is_super_admin'])
-            ->latest('txn_date')->latest('id');
-
-        $q->when($f['from'] ?? null, fn ($q, $v) => $q->whereDate('txn_date', '>=', $v))
-            ->when($f['to'] ?? null, fn ($q, $v) => $q->whereDate('txn_date', '<=', $v))
-            ->when($f['type'] ?? null, fn ($q, $v) => $q->whereIn('type', explode(',', $v)))
-            ->when($f['status'] ?? null, fn ($q, $v) => $q->where('status', $v))
-            ->when($f['account_id'] ?? null, fn ($q, $v) => $q->where(fn ($w) => $w->where('account_id', $v)->orWhere('from_account_id', $v)->orWhere('to_account_id', $v)))
-            ->when($branches, fn ($q, $v) => $q->whereIn('transactions.branch_id', $v))
-            ->when($f['category_id'] ?? null, fn ($q, $v) => $categoryOnly
-                ? $q->where('category_id', $v)
-                : $q->where(fn ($w) => $w->where('category_id', $v)->orWhereIn('category_id', fn ($s) => $s->select('id')->from('categories')->where('parent_id', $v))))
-            ->when($f['created_by'] ?? null, fn ($q, $v) => $q->where('created_by', $v))
-            ->when($f['min'] ?? null, fn ($q, $v) => $q->where('amount', '>=', $v))
-            ->when($f['max'] ?? null, fn ($q, $v) => $q->where('amount', '<=', $v))
-            ->when($f['q'] ?? null, fn ($q, $v) => $q->where(fn ($w) => $w->where('ref_no', 'like', "%$v%")->orWhere('description', 'like', "%$v%")->orWhere('payee_payer', 'like', "%$v%")->orWhere('reference', 'like', "%$v%")));
-
-        // AG-062 finding 6: find entries without evidence, or with removed files. Only income/expense carry files.
-        if ($files = $f['files'] ?? null) {
-            $active = fn ($a) => $a->whereNull('removed_at');
-            $q->whereIn('type', AttachmentController::ENTRY_TYPES);
-            match ($files) {
-                'with' => $q->whereHas('attachments', $active),
-                'none' => $q->whereDoesntHave('attachments', $active),
-                'removed' => $q->whereHas('attachments', fn ($a) => $a->whereNotNull('removed_at')),
-            };
-        }
-
-        $page = $q->withCount(self::attachmentCounts())->withCount('entries')->paginate($f['per_page'] ?? 25);
-        $this->tagAuthors($page->getCollection());
-        $this->markLegacyVoids($page->getCollection());
 
         return $page;
+    }
+
+    /** AG-065 R14: the filtered list as xlsx (transaction.view + report.export), same filters, scope and sort. */
+    public function export(Request $request, TransactionExporter $exporter)
+    {
+        return $exporter->download($this->search->params($request->all(), export: true), $request->user());
     }
 
     /**
@@ -133,10 +107,14 @@ class TransactionController extends Controller
         ];
     }
 
-    /** Options for the "Created by" filter: everyone who created an entry here, former members included (finding 3). */
-    public function creators()
+    /**
+     * Options for the "Created by" filter: everyone who created an entry in the scope set (R7, R10, branches[] included),
+     * former members included (finding 3).
+     */
+    public function creators(Request $request)
     {
-        $rows = Transaction::query()->select('branch_id', 'created_by')->distinct()->get();
+        $p = $this->search->params($request->only('branches'));
+        $rows = $this->search->creatorRows($p);
         $ids = $rows->pluck('created_by')->unique()->values();
         $members = $this->memberships($ids->all());
         $users = User::whereIn('id', $ids)->orderBy('name')->get(['id', 'name', 'status', 'is_super_admin']);

@@ -72,6 +72,8 @@ Route::prefix('v1')->group(function () {
 
             Route::get('transactions', [TransactionController::class, 'index'])->middleware('perm:transaction.view');
             Route::get('transactions/creators', [TransactionController::class, 'creators'])->middleware('perm:transaction.view');
+            // AG-065 R14: the filtered list as xlsx; both permissions required, as for reports/{name}/export.
+            Route::post('transactions/export', [TransactionController::class, 'export'])->middleware('perm:transaction.view,report.export');
             // Double-entry R10: the detail is resolved without the branch scope; the controller checks access by line branches.
             Route::get('transactions/{transactionId}', [TransactionController::class, 'show'])->whereNumber('transactionId')->middleware('perm:transaction.view');
             Route::put('transactions/{transaction}', [TransactionController::class, 'update']);

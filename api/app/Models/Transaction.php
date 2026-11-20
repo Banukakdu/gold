@@ -6,6 +6,7 @@ use App\Models\Concerns\BranchScoped;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Transaction extends Model
 {
@@ -72,6 +73,20 @@ class Transaction extends Model
     public function attachments(): HasMany
     {
         return $this->hasMany(Attachment::class);
+    }
+
+    /**
+     * AG-065: the original of a reversal and the reversal of an original. Without the branch scope: the linked row
+     * shares branch_id and related_branch_id with a row already in scope, and only its ref is read.
+     */
+    public function reversalOf(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'reversal_of_id')->withoutGlobalScopes();
+    }
+
+    public function reversedBy(): HasOne
+    {
+        return $this->hasOne(self::class, 'reversal_of_id')->withoutGlobalScopes();
     }
 
     public function creator(): BelongsTo

@@ -70,7 +70,9 @@ class BackfillTest extends TestCase
         $this->artisan('migrate:fresh', ['--force' => true])->assertExitCode(0);
         app(PermissionRegistrar::class)->forgetCachedPermissions();
         $this->seed(DatabaseSeeder::class);
-        $this->artisan('migrate:rollback', ['--step' => 3, '--force' => true])->assertExitCode(0);
+        // Every migration from the double-entry schema on (later features add steps after it).
+        $steps = count(array_filter(glob(database_path('migrations/*.php')), fn ($f) => basename($f) >= '2026_11_22_000000'));
+        $this->artisan('migrate:rollback', ['--step' => $steps, '--force' => true])->assertExitCode(0);
         $this->assertFalse(Schema::hasColumn('ledger_entries', 'origin'));
         $this->admin = User::where('is_super_admin', true)->firstOrFail();
         $this->main = Branch::main();
