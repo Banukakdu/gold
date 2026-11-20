@@ -196,19 +196,26 @@ class BackgroundExports
             $ready = now();
             // Reviewer M2: only a row this job still owns becomes ready. If prune (or a timeout) failed it meanwhile,
             // that outcome stands: the file goes, and no export.ready, event or email follows the failure.
-            $owned = Export::whereKey($export->id)->where('status', Export::RUNNING)->update([
-                'status' => Export::READY, 'rows' => $counts['rows'], 'data_as_at' => $at, 'ready_at' => $ready,
-                'expires_at' => $ready->copy()->addHours((int) config('exports.ttl_hours', 24)), 'file_path' => $final,
-                'size_bytes' => $size, 'sha256' => $sha, 'error' => null, 'failure_code' => null, 'updated_at' => $ready,
-            ]);
+            // Accountant C2: the move to ready and export.ready commit together.
+            $owned = DB::transaction(function () use ($export, $counts, $at, $ready, $final, $size, $sha) {
+                if (! Export::whereKey($export->id)->where('status', Export::RUNNING)->update([
+                    'status' => Export::READY, 'rows' => $counts['rows'], 'data_as_at' => $at, 'ready_at' => $ready,
+                    'expires_at' => $ready->copy()->addHours((int) config('exports.ttl_hours', 24)), 'file_path' => $final,
+                    'size_bytes' => $size, 'sha256' => $sha, 'error' => null, 'failure_code' => null, 'updated_at' => $ready,
+                ])) {
+                    return false;
+                }
+                $export->refresh();
+                $this->systemAudit('export.ready', $export, $this->auditValues($export, ['size_bytes' => $size, 'sha256' => $sha, 'data_as_at' => self::iso($export->data_as_at)]));
+
+                return true;
+            });
             if (! $owned) {
                 $disk->delete($final);
                 Log::warning("Export {$export->id} finished after it was marked {$export->fresh()?->status}; the file was discarded.");
 
                 return;
             }
-            $export->refresh();
-            $this->systemAudit('export.ready', $export, $this->auditValues($export, ['size_bytes' => $size, 'sha256' => $sha, 'data_as_at' => self::iso($export->data_as_at)]));
             ExportFinished::dispatch($export);
         } catch (ExportFailure $f) {
             $this->fail($export, $f->failureCode, $f->getMessage());
@@ -262,23 +269,29 @@ class BackgroundExports
         // Reviewer M2: one conditional UPDATE decides. A system failure ends a queued or running export; a failure
         // found at download ends a ready one. Whoever loses the race (prune, the job, failed(), a second download)
         // writes nothing: no second audit row, event or email.
+        // Accountant C2: the status change and its audit row commit together, so no status lacks its explanation.
         $from = $bySystem ? Export::ACTIVE : [Export::READY];
-        $won = Export::whereKey($export->id)->whereIn('status', $from)
-            ->update(['status' => Export::FAILED, 'failure_code' => $code, 'error' => $message, 'updated_at' => now()]);
+        $won = DB::transaction(function () use ($export, $from, $code, $message, $bySystem, $old, $extra) {
+            if (! Export::whereKey($export->id)->whereIn('status', $from)
+                ->update(['status' => Export::FAILED, 'failure_code' => $code, 'error' => $message, 'updated_at' => now()])) {
+                return false;
+            }
+            $export->refresh();
+            $values = $this->auditValues($export, ['failure_code' => $code, 'attempts' => $export->attempts] + $extra);
+            $bySystem
+                ? $this->systemAudit('export.failed', $export, $values, $old)
+                : AuditLog::record('export.failed', null, $old, $values, $export->auditBranchId());
+
+            return true;
+        });
         $export->refresh();
-        if (! $won) {
-            return false;
-        }
+        // A losing failure (say `incomplete` after prune failed the row as stale) still removes its .part file.
         $this->deletePart($export);
-        $values = $this->auditValues($export, ['failure_code' => $code, 'attempts' => $export->attempts] + $extra);
-        if ($bySystem) {
-            $this->systemAudit('export.failed', $export, $values, $old);
+        if ($won && $bySystem) {
             ExportFinished::dispatch($export);
-        } else {
-            AuditLog::record('export.failed', null, $old, $values, $export->auditBranchId());
         }
 
-        return true;
+        return $won;
     }
 
     /**
@@ -446,16 +459,25 @@ class BackgroundExports
         Export::where('status', Export::READY)->where('expires_at', '<=', now())->orderBy('requested_at')->get()
             ->each(function (Export $e) use ($disk, &$out) {
                 // Conditional, like every status change (reviewer M2): a row a download just failed is left alone.
-                if (! Export::whereKey($e->id)->where('status', Export::READY)->update(['status' => Export::EXPIRED, 'file_path' => null, 'updated_at' => now()])) {
+                // Accountant C2: the status and export.expired commit together; the file goes after the commit.
+                $path = $e->file_path;
+                $won = DB::transaction(function () use ($e) {
+                    if (! Export::whereKey($e->id)->where('status', Export::READY)->update(['status' => Export::EXPIRED, 'file_path' => null, 'updated_at' => now()])) {
+                        return false;
+                    }
+                    $e->refresh();
+                    AuditLog::record('export.expired', null, null,
+                        $this->auditValues($e, ['by_system' => true, 'requested_by' => $e->user_id]), $e->auditBranchId(),
+                        ['user_id' => null, 'ip' => null, 'user_agent' => 'console']);
+
+                    return true;
+                });
+                if (! $won) {
                     return;
                 }
-                if ($e->file_path && $disk->exists($e->file_path)) {
-                    $disk->delete($e->file_path);
+                if ($path && $disk->exists($path)) {
+                    $disk->delete($path);
                 }
-                $e->refresh();
-                AuditLog::record('export.expired', null, null,
-                    $this->auditValues($e, ['by_system' => true, 'requested_by' => $e->user_id]), $e->auditBranchId(),
-                    ['user_id' => null, 'ip' => null, 'user_agent' => 'console']);
                 $out['expired']++;
             });
 

@@ -6,6 +6,7 @@ use App\Exceptions\ExportFailure;
 use App\Exports\XlsxStreamWriter;
 use App\Jobs\RunExport;
 use App\Models\AuditLog;
+use App\Models\Category;
 use App\Models\Export;
 use App\Models\Setting;
 use App\Models\Transaction;
@@ -15,6 +16,9 @@ use App\Notifications\ExportReadyNotification;
 use App\Services\BackgroundExports;
 use App\Services\LedgerService;
 use App\Services\ReportExporter;
+use App\Services\ReportService;
+use App\Support\BranchContext;
+use App\Support\Money;
 use App\Support\ReadSnapshot;
 use Illuminate\Database\QueryException;
 use Illuminate\Queue\TimeoutExceededException;
@@ -270,6 +274,18 @@ class JobTest extends ExportsTestCase
         Notification::assertSentToTimes($this->ak, ExportFailedNotification::class, 1);
     }
 
+    public function test_a_losing_failure_still_removes_its_part_file(): void
+    {
+        $this->requestEight()->assertStatus(202);
+        $e = $this->latest();
+        $svc = app(BackgroundExports::class);
+        $this->assertTrue($svc->fail($e, 'stale', BackgroundExports::STALE));
+        Storage::disk(Export::DISK)->put($e->partPath(), 'partial');
+        $this->assertFalse($svc->fail($e, 'incomplete', 'x'));
+        $this->assertFalse(Storage::disk(Export::DISK)->exists($e->partPath()));
+        $this->assertSame(['stale', 1], [$e->fresh()->failure_code, AuditLog::where('event', 'export.failed')->count()]);
+    }
+
     public function test_m2_a_stale_queued_export_is_not_built_when_the_worker_reaches_it(): void
     {
         $this->requestEight()->assertStatus(202);
@@ -323,6 +339,47 @@ class JobTest extends ExportsTestCase
         $this->assertSame(['income total'], $svc->unfooted('income-expense', $d));
         $this->assertSame(['detail rows built 7, counted 8'], BackgroundExports::incompleteness(['rows' => 8, 'built' => 7, 'sheets' => [], 'unfooted' => []]));
         $this->assertSame(['sheet 0: rows written 3, built 4'], BackgroundExports::incompleteness(['rows' => 8, 'built' => 8, 'sheets' => [['built' => 4, 'written' => 3]], 'unfooted' => []]));
+    }
+
+    /** Accountant sign-off C1: Income & Expense totals against the independent ungrouped SUM (reviewer m7). */
+    public function test_c1_income_expense_totals_match_an_independent_sum(): void
+    {
+        Auth::setUser($this->ak);
+        $ledger = app(LedgerService::class);
+        $ledger->incomeOrExpense(Transaction::EXPENSE, ['account_id' => $this->kdyCash->id, 'category_id' => Category::where('name', 'Office')->value('id'),
+            'txn_date' => '2026-10-12', 'amount' => '50.00', 'payee_payer' => 'Landlord']);
+        $ledger->void($this->incomes[0], 'Wrong customer');
+        $ledger->reverse($this->incomes[1], '2026-10-20', 'Refunded');
+        Auth::forgetUser();
+
+        // (a) The queued file is ready, and the independent SUM equals the printed totals in cents.
+        $this->exportReport($this->ak, $this->kdy->id, 'income-expense', $this->october + ['type' => 'all'])->assertStatus(202);
+        $this->work();
+        $this->assertSame(Export::READY, $this->latest()->status, (string) $this->latest()->error);
+
+        $ctx = app(BranchContext::class);
+        $ctx->set($this->kdy->id, false);
+        setPermissionsTeamId($this->kdy->id);
+        Auth::setUser($this->ak);
+        $reports = app(ReportService::class);
+        $p = $reports->params('income-expense', $this->october + ['type' => 'all']);
+        $d = $reports->incomeExpense($p);
+        $sums = $reports->incomeExpenseTotals($p);
+        $this->assertSame(['income' => 330000, 'expense' => 5000], ['income' => $sums['income'], 'expense' => $sums['expense']]);
+        $this->assertSame([330000, 5000], [Money::toCents($d['income']['total']), Money::toCents($d['expense']['total'])]);
+        $exporter = app(ReportExporter::class);
+        $this->assertSame([], $exporter->unconfirmed('income-expense', $p, $d));
+
+        // (b) A printed total one cent off is reported, and fails the export as incomplete.
+        $d['income']['total'] = Money::fromCents(330001);
+        $this->assertSame(['income total differs from the ledger sum'], $exporter->unconfirmed('income-expense', $p, $d));
+        Auth::forgetUser();
+        $this->partialMock(ReportService::class, fn ($m) => $m->shouldReceive('incomeExpenseTotals')->andReturn(['income' => 330001, 'expense' => 5000]));
+        $this->exportReport($this->ak, $this->kdy->id, 'income-expense', $this->october + ['type' => 'income'])->assertStatus(202);
+        $this->work()->assertFailed();
+        $e = $this->latest();
+        $this->assertSame([Export::FAILED, 'incomplete', null], [$e->status, $e->failure_code, $e->file_path]);
+        $this->assertSame([], array_values(array_filter(Storage::disk(Export::DISK)->allFiles(), fn ($f) => str_contains($f, $e->id))), 'no file and no .part');
     }
 
     public function test_ac33_files_are_private(): void
