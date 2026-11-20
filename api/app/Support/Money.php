@@ -24,6 +24,16 @@ final class Money
         return $sign.intdiv($c, 100).'.'.str_pad((string) ($c % 100), 2, '0', STR_PAD_LEFT);
     }
 
+    /** "-1234567.5" -> "-1,234,567.50" (display; exact, from cents). */
+    public static function format(string|int|float|null $v): string
+    {
+        $s = self::fromCents(self::toCents($v));
+        $neg = str_starts_with($s, '-');
+        [$int, $dec] = explode('.', ltrim($s, '-'));
+
+        return ($neg ? '-' : '').number_format((int) $int).'.'.$dec;
+    }
+
     public static function add(string|int|float|null ...$vals): string
     {
         return self::fromCents(array_sum(array_map([self::class, 'toCents'], $vals)));

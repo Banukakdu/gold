@@ -2,6 +2,7 @@ import { Component, OnInit, inject, signal } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { DatePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { ActivatedRoute } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
 import { Page, Transaction } from '../../core/models';
@@ -25,6 +26,10 @@ import { errorText } from '../../core/api.interceptor';
       </select>
       <input name="q" placeholder="Search ref, payee, note" [(ngModel)]="f.q" />
       <button type="submit">Filter</button>
+      @if (fromReport()) {
+        <span class="tag">From report: {{ categoryName || 'category ' + f.category_id }}{{ f.category_only ? ' (this line only)' : '' }}{{ branches.length ? ' · ' + branches.length + ' branch(es)' : '' }}</span>
+        <button type="button" class="link" (click)="clearReportFilter()">Clear</button>
+      }
     </form>
     @if (msg()) { <div class="alert">{{ msg() }}</div> }
     <div class="card">
@@ -71,10 +76,21 @@ export class TransactionListComponent implements OnInit {
   page = signal<Page<Transaction> | null>(null);
   msg = signal('');
   creators = signal<{ id: number; name: string; tag: string | null }[]>([]);
-  f = { from: '', to: '', type: '', created_by: '', q: '' };
+  f = { from: '', to: '', type: '', created_by: '', q: '', category_id: '', category_only: '' };
+  branches: string[] = [];
+  categoryName = ''; // label only, never sent to the API
+  fromReport = signal(false);
   types = Object.entries(TYPE_LABELS);
+  private route = inject(ActivatedRoute);
 
   ngOnInit() {
+    // Reports drill-down (spec E1): filters arrive as URL query params.
+    const q = this.route.snapshot.queryParamMap;
+    for (const k of ['from', 'to', 'type', 'category_id', 'category_only'] as const) this.f[k] = q.get(k) ?? '';
+    // branches[] is only valid in All mode; a stale value after a branch switch would give 403.
+    this.branches = this.auth.isAllBranches() ? q.getAll('branches') : [];
+    this.categoryName = q.get('category_name') ?? '';
+    this.fromReport.set(!!(this.f.category_id || this.branches.length));
     this.load(1);
     // "Created by" keeps former members (accounting review finding 3).
     this.http.get<{ id: number; name: string; tag: string | null }[]>('/api/v1/transactions/creators').subscribe({
@@ -84,10 +100,20 @@ export class TransactionListComponent implements OnInit {
   load(p: number) {
     let params = new HttpParams().set('page', p);
     for (const [k, v] of Object.entries(this.f)) if (v) params = params.set(k, v);
+    for (const b of this.branches) params = params.append('branches[]', b);
     this.http.get<Page<Transaction>>('/api/v1/transactions', { params }).subscribe({
       next: r => { this.page.set(r); this.msg.set(''); },
       error: e => this.msg.set(errorText(e)), // 401 is handled by the interceptor (back to login)
     });
+  }
+
+  clearReportFilter() {
+    this.f.category_id = '';
+    this.f.category_only = '';
+    this.branches = [];
+    this.categoryName = '';
+    this.fromReport.set(false);
+    this.load(1);
   }
 
   label(t: string) { return TYPE_LABELS[t] ?? t; }
