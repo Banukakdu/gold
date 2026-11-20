@@ -43,12 +43,12 @@ class RecheckAndIsolationTest extends TransferApprovalTestCase
         $t = $this->t1();
         DB::table('accounts')->where('id', $this->galCash->id)->update(['status' => 'inactive']);
         $before = $this->state();
-        $this->approve($t->id)->assertStatus(422)->assertJsonPath('message', 'Account Cash or its branch is inactive.');
+        $this->approve($t->id)->assertStatus(422)->assertJsonPath('message', 'Account GAL Cash or its branch is inactive.');
         $this->assertSame($before, $this->state());
 
         DB::table('accounts')->where('id', $this->galCash->id)->update(['status' => 'active']);
         DB::table('branches')->where('id', $this->kdy->id)->update(['status' => 'inactive']);
-        $this->approve($t->id)->assertStatus(422)->assertJsonPath('message', 'Account Cash or its branch is inactive.');
+        $this->approve($t->id)->assertStatus(422)->assertJsonPath('message', 'Account KDY Cash or its branch is inactive.');
         $this->assertSame(0, LedgerEntry::where('transaction_id', $t->id)->count());
         // R15: reject it (or let it expire).
         $this->reject($t->id)->assertOk()->assertJsonPath('approval_status', 'rejected');

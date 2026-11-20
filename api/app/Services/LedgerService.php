@@ -115,7 +115,7 @@ class LedgerService
 
             foreach ([$from, $to] as $a) {
                 if ($a->status !== 'active' || $a->branch->status !== 'active') {
-                    throw new LedgerException("Account {$a->name} or its branch is inactive.");
+                    throw new LedgerException('Account '.trim(($a->branch?->code ?? '').' '.$a->name).' or its branch is inactive.');
                 }
             }
             // MAIN is only the head-office side of a branch transfer or a fund return (fund return G2).
@@ -217,7 +217,7 @@ class LedgerService
             $to = $locked[$to->id];
             foreach ([$from, $to] as $a) {
                 if ($a->status !== 'active' || $a->branch->status !== 'active') {
-                    throw new LedgerException("Account {$a->name} or its branch is inactive.");
+                    throw new LedgerException('Account '.trim(($a->branch?->code ?? '').' '.$a->name).' or its branch is inactive.');
                 }
             }
             if ($this->transferType($from, $to) !== $t->type) {
