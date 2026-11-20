@@ -48,7 +48,14 @@ class ReadersTest extends ExpenseApprovalTestCase
             ->assertOk()->json();
         $this->assertSame(0, $before['pending_approval']['count'], 'requested date after To');
         $res = $this->as($this->acc, $this->kdy)->postJson('/api/v1/reports/income-expense/export', ['from' => '2026-11-01', 'to' => '2026-11-30', 'type' => 'all', 'format' => 'xlsx'])->assertOk();
-        $this->assertContains('Pending approval', IOFactory::createReader('Xlsx')->load($res->getFile()->getPathname())->getSheetNames());
+        $book = IOFactory::createReader('Xlsx')->load($res->getFile()->getPathname());
+        $this->assertContains('Pending approval', $book->getSheetNames());
+        // SHOULD 10: "Requested on" (sent) and "Requested for" (bill date) side by side.
+        $cells = $book->getSheetByName('Pending approval')->toArray(null, true, true, false);
+        $head = collect($cells)->first(fn ($r) => in_array('Requested for', $r, true));
+        $this->assertSame(['Requested on', 'Requested for', 'Ref no'], array_slice(array_values(array_filter($head, fn ($v) => $v !== null)), 0, 3));
+        $line = collect($cells)->first(fn ($r) => in_array($e1->ref_no, $r, true));
+        $this->assertSame(['20 Nov 2026', '18 Nov 2026', $e1->ref_no], array_slice(array_values(array_filter($line, fn ($v) => $v !== null)), 0, 3));
 
         // Dashboard figures and Recent exclude it.
         $d = $this->as($this->acc, $this->kdy)->getJson('/api/v1/dashboard')->assertOk()->json();

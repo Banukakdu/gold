@@ -16,6 +16,7 @@ use App\Support\Settings;
 use Carbon\CarbonImmutable;
 use DateTimeImmutable;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
@@ -111,12 +112,20 @@ class ExpenseApprovals extends ApprovalRequests
     {
         User::whereKey($user->id)->lockForUpdate()->value('id');
 
-        return (int) DB::table('transactions')->where('type', Transaction::EXPENSE)->where('status', 'posted')->whereNull('approval_status')
-            ->where('created_by', $user->id)->where('branch_id', $branchId)->where('category_id', $categoryId)
-            // Review 3: a sargable half-open range (not DATE()), so MySQL locks only this user's rows of that category
-            // and day through (created_by, category_id, txn_date). Portable: also matches "Y-m-d 00:00:00" in SQLite.
+        return (int) $this->sameDayQuery((int) $user->id, $branchId, $categoryId, $date)->value('c');
+    }
+
+    /**
+     * The R2b locking read itself (public so the MySQL plan test EXPLAINs exactly this query). Review 3: a sargable
+     * half-open range (not DATE()), so MySQL locks only this user's rows of that category and day through
+     * (created_by, category_id, txn_date). Portable: also matches "Y-m-d 00:00:00" in SQLite.
+     */
+    public function sameDayQuery(int $userId, int $branchId, int $categoryId, string $date): QueryBuilder
+    {
+        return DB::table('transactions')->where('type', Transaction::EXPENSE)->where('status', 'posted')->whereNull('approval_status')
+            ->where('created_by', $userId)->where('branch_id', $branchId)->where('category_id', $categoryId)
             ->where('txn_date', '>=', $date)->where('txn_date', '<', CarbonImmutable::parse($date)->addDay()->toDateString())
-            ->lockForUpdate()->selectRaw('COALESCE(SUM('.Money::sqlCents('amount').'), 0) as c')->value('c');
+            ->lockForUpdate()->selectRaw('COALESCE(SUM('.Money::sqlCents('amount').'), 0) as c');
     }
 
     /**
@@ -189,11 +198,12 @@ class ExpenseApprovals extends ApprovalRequests
 
     /**
      * R4b: the approver created, invited or assigned a role to the requester in the expense's branch within 90 days
-     * before the request's requested_on (Asia/Colombo days).
+     * before the request's requested_on (Asia/Colombo days). Never for a Super Admin approver (accountant sign-off MUST 6:
+     * the owner side approving a Branch Admin's request is the R4a control working, not a dependence).
      */
-    public function onboardedRequester(Transaction $t, int $approverId): bool
+    public function onboardedRequester(Transaction $t, User $approver): bool
     {
-        return $this->onboardedIn($t, $this->onboardings(collect([$t]), $approverId));
+        return $this->onboardedIn($t, $this->onboardings(collect([$t]), $approver));
     }
 
     /** [from, to) in UTC of the R4b window of a request made on $on (Colombo days). */
@@ -206,10 +216,11 @@ class ExpenseApprovals extends ApprovalRequests
     }
 
     /** Review 6: the approver's onboarding audit rows for the requesters of $rows, in one query. */
-    private function onboardings(Collection $rows, int $approverId): Collection
+    private function onboardings(Collection $rows, User $approver): Collection
     {
+        $approverId = (int) $approver->id;
         $rows = $rows->filter(fn ($t) => $t->created_by && $t->requested_on);
-        if ($rows->isEmpty()) {
+        if ($rows->isEmpty() || $approver->is_super_admin) {
             return collect();
         }
         $windows = $rows->map(fn ($t) => self::onboardWindow($t->requested_on->format('Y-m-d')));
@@ -262,7 +273,7 @@ class ExpenseApprovals extends ApprovalRequests
             $files = $this->filesCount($t->id);
             $comment = $this->comment($input, required: $files === 0, message: self::NO_RECEIPT);
             $paid = (bool) (validator($input, ['paid_before_approval' => ['nullable', 'boolean']])->validate()['paid_before_approval'] ?? false);
-            $flag = $this->onboardedRequester($t, (int) $user->id);
+            $flag = $this->onboardedRequester($t, $user);
 
             $t = app(LedgerService::class)->postApproved($t, $comment, [
                 'files_count' => $files, 'paid_before_approval' => $paid, 'approver_onboarded_requester' => $flag,
@@ -407,7 +418,7 @@ class ExpenseApprovals extends ApprovalRequests
         return [
             'managers' => $managers,
             'locked' => $locked,
-            'onboardings' => $approver ? $this->onboardings($rows, (int) $approver->id) : collect(),
+            'onboardings' => $approver ? $this->onboardings($rows, $approver) : collect(),
             'today' => $today,
             'pending' => $this->pendingByAccount($accounts),
             'below' => $this->belowThreshold($rows, $today),
@@ -526,6 +537,7 @@ class ExpenseApprovals extends ApprovalRequests
             'category_path' => self::categoryPath($t->category),
             'amount' => Money::fromCents(Money::toCents($t->amount)),
         ])->all();
+        // (S7 rows carry both dates: "Requested on" = requested_on, "Requested for" = requested_date, SHOULD 10.)
 
         return ['data' => $data, 'count' => count($data), 'amount' => Money::fromCents(array_sum(array_map(fn ($r) => Money::toCents($r['amount']), $data)))];
     }

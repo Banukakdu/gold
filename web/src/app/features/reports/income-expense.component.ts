@@ -78,10 +78,10 @@ interface IncomeExpense extends ReportMeta {
           <div class="card section">
             <h2>Expenses pending approval now (not included above)</h2>
             <table class="list">
-              <thead><tr><th>Requested on</th><th>Ref</th><th>Branch</th><th>Category > Sub-category</th><th class="num">Amount</th></tr></thead>
+              <thead><tr><th>Requested on</th><th>Requested for</th><th>Ref</th><th>Branch</th><th>Category > Sub-category</th><th class="num">Amount</th></tr></thead>
               <tbody>
                 @for (m of r.pending_approval!.data; track m.id) {
-                  <tr><td>{{ m.requested_on | appDate }}</td><td class="mono"><a [routerLink]="['/transactions', m.id]">{{ m.ref_no }}</a></td>
+                  <tr><td>{{ m.requested_on | appDate }}</td><td>{{ m.requested_date | appDate }}</td><td class="mono"><a [routerLink]="['/transactions', m.id]">{{ m.ref_no }}</a></td>
                     <td>{{ m.branch.code }}</td><td>{{ m.category_path }}</td><td class="num">{{ m.amount | money }}</td></tr>
                 }
               </tbody>

@@ -7,7 +7,9 @@ use App\Models\LedgerEntry;
 use App\Models\Setting;
 use App\Models\Transaction;
 use App\Models\User;
+use App\Notifications\InAppNotification;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Notifications\DatabaseNotification;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -248,6 +250,38 @@ class ApproveTest extends ExpenseApprovalTestCase
         $e3 = $this->e1('51000.00', '2026-11-20', $old);
         $this->approve($e3->id)->assertOk();
         $this->assertFalse($this->audits($e3, 'expense.approved')[0]->new_values['approver_onboarded_requester']);
+    }
+
+    /**
+     * AC 35b, accountant sign-off MUST 6: R4b never applies to a Super Admin approver, even one who invited the requester:
+     * no widget or detail flag, false in expense.approved, no flagged notification, no hit on the audit filter.
+     */
+    public function test_ac35b_a_super_admin_approver_is_never_flagged(): void
+    {
+        $sa2 = User::factory()->create(['is_super_admin' => true, 'status' => 'active']);
+        $u = $this->invited($this->admin, '2026-11-01 09:00:00');
+        $e = $this->e1('75000.00', '2026-11-20', $u);
+        foreach (['all', $this->kdy] as $mode) {
+            $row = collect($this->widget($this->admin, $mode)['to_approve']['data'])->firstWhere('id', $e->id);
+            $this->assertTrue($row['can_approve']);
+            $this->assertFalse($row['approver_onboarded_requester']);
+        }
+        $this->sa()->getJson("/api/v1/transactions/{$e->id}")->assertOk()->assertJsonPath('approver_onboarded_requester', false);
+
+        $this->approve($e->id, $this->admin, 'all')->assertOk();
+        $this->assertFalse($this->audits($e, 'expense.approved')[0]->new_values['approver_onboarded_requester']);
+        $this->assertSame(0, DatabaseNotification::where('type', InAppNotification::EXPENSE_APPROVAL_FLAGGED)->count());
+        $this->assertSame(0, $sa2->notifications()->where('type', InAppNotification::EXPENSE_APPROVAL_FLAGGED)->count());
+        $this->sa()->getJson('/api/v1/audit-logs?from=2026-11-20&to=2026-11-20&approval=approver_onboarded_requester')->assertOk()
+            ->assertJsonCount(0, 'data');
+
+        // The same invitation by a Branch Admin still flags (non-Super-Admin approvers unchanged).
+        $v = $this->invited($this->kdyBa, '2026-11-02 09:00:00');
+        $e2 = $this->e1('60000.00', '2026-11-20', $v);
+        $this->approve($e2->id)->assertOk();
+        $this->assertTrue($this->audits($e2, 'expense.approved')[0]->new_values['approver_onboarded_requester']);
+        $this->assertSame(collect([$sa2->id, $this->admin->id])->sort()->values()->all(), DatabaseNotification::where('type', InAppNotification::EXPENSE_APPROVAL_FLAGGED)
+            ->orderBy('notifiable_id')->pluck('notifiable_id')->map(fn ($v) => (int) $v)->sort()->values()->all());
     }
 
     /** A KDY Cashier invited by $by at $at (UTC) through the Users screen (audit user.invited, user_id = $by). */

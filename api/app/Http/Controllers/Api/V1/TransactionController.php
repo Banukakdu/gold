@@ -115,7 +115,7 @@ class TransactionController extends Controller
             $superOnly = $pending && $expenses->superAdminOnly($transaction);
             $transaction->setAttribute('super_admin_only', $superOnly);
             $transaction->setAttribute('approver_onboarded_requester', $pending && $transaction->getAttribute('can_approve')
-                && $expenses->onboardedRequester($transaction, (int) $user->id));
+                && $expenses->onboardedRequester($transaction, $user));
             $transaction->setAttribute('requested_period_locked', $pending && $expenses->requestedPeriodLocked($transaction));
             $transaction->setAttribute('changed_after_approval', AuditLog::where('auditable_type', Transaction::class)
                 ->where('auditable_id', $transaction->id)->whereIn('event', ['transaction.updated', 'transaction.reclassified'])
