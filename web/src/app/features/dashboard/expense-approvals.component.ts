@@ -6,6 +6,7 @@ import { AuthService } from '../../core/auth.service';
 import { MoneyPipe } from '../../core/money.pipe';
 import { errorText } from '../../core/api.interceptor';
 import { ApprovalDialogComponent, ApprovalTarget, toCents } from '../../core/approvals';
+import { TemplateFacts, TemplateLine, approvalTemplateLines } from '../../core/expense-templates';
 
 export interface ExpenseRow {
   id: number; ref_no: string; branch: { id: number; code: string | null }; requested_date: string | null; requested_on: string | null;
@@ -15,10 +16,12 @@ export interface ExpenseRow {
   requester_inactive: boolean; requester_left_branch: boolean; super_admin_only: boolean; approver_onboarded_requester: boolean;
   requested_period_locked: boolean; can_approve: boolean; can_cancel: boolean;
 }
+/** AG-066 R7a: the row carries the template facts of the request's audit row. */
+export type ExpenseRowWithTemplate = ExpenseRow & TemplateFacts;
 export interface ExpenseApprovals {
   threshold: string | null;
   negative_balance?: 'block' | 'warn';
-  to_approve: { data: ExpenseRow[]; total: number; amount: string };
+  to_approve: { data: ExpenseRowWithTemplate[]; total: number; amount: string };
   my_requests: { data: ExpenseRow[]; total: number };
 }
 
@@ -60,7 +63,8 @@ export function signedCents(v: string | null | undefined): number {
                       <td><a class="mono" [routerLink]="['/transactions', t.id]">{{ t.ref_no }}</a>
                         @if (t.super_admin_only) { <br /><span class="tag" data-s="pending">Super Admin approval</span> }
                         @if (t.approver_onboarded_requester) { <br /><span class="tag" data-s="pending" title="Super Admins will be told of your approval">You added this requester</span> }</td>
-                      <td>{{ t.account.name }}<br /><small class="ea-path" [title]="t.category_path">{{ t.category_path }}</small></td>
+                      <td>{{ t.account.name }}<br /><small class="ea-path" [title]="t.category_path">{{ t.category_path }}</small>
+                        @for (l of lines(t); track $index) { <br /><small class="tpl-fact" [class.tpl-warn]="l.warn">{{ l.text }}</small> }</td>
                       <td class="ta-note">{{ t.payee_payer }}</td>
                       <td class="num">{{ t.amount | money }}</td>
                       <td class="num">{{ t.account.available | money }} @if (short(t)) { <span class="tag" data-s="reversed">Short</span> }
@@ -89,6 +93,7 @@ export function signedCents(v: string | null | undefined): number {
                 <div class="ea-card">
                   <div class="ea-line"><a class="mono" [routerLink]="['/transactions', t.id]">{{ t.ref_no }}</a><b>{{ t.amount | money }}</b></div>
                   <div class="ea-line ea-sub"><span>{{ t.account.name }}</span><span class="ea-path">{{ t.category_path }}</span></div>
+                  @for (l of lines(t); track $index) { <div class="ea-line ea-sub tpl-fact" [class.tpl-warn]="l.warn">{{ l.text }}</div> }
                   <div class="ea-line ea-sub">
                     <span>{{ t.requested_on | appDate }}</span><span>{{ t.age_days }} day{{ t.age_days === 1 ? '' : 's' }}</span>
                     @if (auth.isAllBranches()) { <span>{{ t.branch.code }}</span> }
@@ -190,7 +195,10 @@ export class ExpenseApprovalsComponent implements OnInit {
 
   signed(v: string | null | undefined): number { return signedCents(v); }
 
-  open(t: ExpenseRow, mode: 'approve' | 'reject') {
+  /** AG-066 R7a: "From template ...", the changes with the template's values, changed since last use, confirmed duplicate. */
+  lines(t: ExpenseRowWithTemplate): TemplateLine[] { return approvalTemplateLines(t); }
+
+  open(t: ExpenseRowWithTemplate, mode: 'approve' | 'reject') {
     this.ok.set('');
     // S3: in warn mode a short account may still be approved; block mode refuses at approval with the funds message.
     const warn = this.r()?.negative_balance === 'warn';
@@ -199,6 +207,7 @@ export class ExpenseApprovalsComponent implements OnInit {
       from: `${t.branch.code} ${t.account.name}`, to: t.category_path, files_count: t.files_count,
       below_zero_line: warn && this.short(t) ? `This will take ${t.branch.code} ${t.account.name} below zero.` : null,
       approver_onboarded_requester: t.approver_onboarded_requester, requested_period_locked: t.requested_period_locked,
+      template_lines: this.lines(t),
     } });
   }
 

@@ -10,6 +10,7 @@ use App\Models\Backup;
 use App\Models\Branch;
 use App\Models\Category;
 use App\Models\PeriodLock;
+use App\Models\RecurringTemplate;
 use App\Models\Role;
 use App\Models\Transaction;
 use App\Models\User;
@@ -46,7 +47,9 @@ class AuditLogController extends Controller
     public const MASK = '••••';
 
     /** Values of the `approval` filter: an audit flag `approval = <value>`, or a boolean key `<value> = true`. */
-    public const APPROVAL_FILTERS = [TransferApprovals::NOT_REQUIRED_SUPER_ADMIN, 'approver_onboarded_requester', 'after_approval'];
+    public const APPROVAL_FILTERS = [TransferApprovals::NOT_REQUIRED_SUPER_ADMIN, 'approver_onboarded_requester', 'after_approval',
+        // AG-066 R6 / review SHOULD 5: "Duplicate template use confirmed" (transaction.expense and expense.approval_requested rows).
+        'duplicate_confirmed'];
 
     /** Keys that match the mask pattern but hold no secret (password reset spec R12: a flag and a count), shown only
      * when the value really is a bool or an int (reviewer N7). */
@@ -77,6 +80,8 @@ class AuditLogController extends Controller
         'backups' => [['backup.'], []],
         // AG-033 S5
         'bank_reconciliation' => [['reconciliation.'], []],
+        // AG-066 S4
+        'expense_templates' => [['expense_template.'], []],
     ];
 
     public const LABELS = [
@@ -150,6 +155,11 @@ class AuditLogController extends Controller
         'reconciliation.saved' => 'Bank lines reconciled',
         'reconciliation.completed' => 'Bank statement completed',
         'reconciliation.undone' => 'Bank statement undone',
+        // AG-066 S4
+        'expense_template.created' => 'Expense template created',
+        'expense_template.updated' => 'Expense template changed',
+        'expense_template.archived' => 'Expense template archived',
+        'expense_template.restored' => 'Expense template restored',
     ];
 
     public function index(Request $request)
@@ -396,6 +406,8 @@ class AuditLogController extends Controller
             'branch' => Branch::whereIn('id', $ids(Branch::class))->pluck('code', 'id'),
             'category' => Category::with('parent:id,name')->whereIn('id', $ids(Category::class))->get()->keyBy('id'),
             'lock' => PeriodLock::with('branch:id,code')->whereIn('id', $ids(PeriodLock::class))->get()->keyBy('id'),
+            // AG-066: the rows are already limited to the caller's branches (branchScope), so the names are read unscoped.
+            'template' => RecurringTemplate::withoutGlobalScopes()->whereIn('id', $ids(RecurringTemplate::class))->pluck('name', 'id'),
         ];
     }
 
@@ -417,6 +429,7 @@ class AuditLogController extends Controller
                 ? PeriodLock::label($s['lock'][$id]->period).' ('.($s['lock'][$id]->branch->code ?? 'all branches').')'
                 : "#{$id}",
             Backup::class => (string) ($a->new_values['filename'] ?? "#{$id}"),
+            RecurringTemplate::class => $s['template'][$id] ?? ($a->new_values['name'] ?? "#{$id}"),
             YearEndClose::class => app(Settings::class)->fiscalYearStarting((int) ($a->new_values['fiscal_year'] ?? $a->old_values['fiscal_year'] ?? YearEndClose::find($id)?->fiscal_year ?? 0))->label(),
             default => match ($a->event) {
                 // AG-065 R14: 'transactions' is not a ReportService name (that would open reports/transactions/export).

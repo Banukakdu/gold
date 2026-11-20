@@ -127,10 +127,12 @@ export class AuditLogComponent implements OnInit {
   groups: [string, string][] = [['', 'All events'], ['transactions', 'Transactions'], ['voids', 'Voids and reversals'], ['users', 'Users'],
     ['roles', 'Roles'], ['accounts', 'Accounts'], ['branches', 'Branches'], ['periods', 'Period locks'], ['reports', 'Reports'], ['logins', 'Logins'],
     ['attachments', 'Attachments'], ['settings', 'Settings'], ['year_end', 'Year-end'], ['categories', 'Categories'], ['backups', 'Backups'],
-    ['bank_reconciliation', 'Bank reconciliation']];
+    ['bank_reconciliation', 'Bank reconciliation'], ['expense_templates', 'Expense templates']];
   f = { from: colomboToday().slice(0, 8) + '01', to: colomboToday(), event_group: '', user_id: '', self: false, ref_no: '', approval: '' };
   approvals: [string, string][] = [['', 'Any approval'], ['not_required_super_admin', 'Super Admin, not held for approval'],
-    ['approver_onboarded_requester', 'Approved by the person who added the requester'], ['after_approval', 'Changed after approval']];
+    ['approver_onboarded_requester', 'Approved by the person who added the requester'], ['after_approval', 'Changed after approval'],
+    // AG-066 R6 / review SHOULD 5: month-end review of confirmed second uses of a template.
+    ['duplicate_confirmed', 'Duplicate template use confirmed']];
   branches: string[] = [];
   page = signal<AuditPage | null>(null);
   actors = signal<Actor[]>([]);

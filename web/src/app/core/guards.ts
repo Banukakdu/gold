@@ -21,6 +21,12 @@ export const permissionGuard = (permission: string): CanActivateFn => () => {
   return auth.can(permission) || inject(Router).parseUrl('/dashboard');
 };
 
+/** AG-066 S1: any one of the keys in the active branch (Super Admin always). */
+export const anyPermissionGuard = (...permissions: string[]): CanActivateFn => () => {
+  const auth = inject(AuthService);
+  return permissions.some(p => auth.can(p)) || inject(Router).parseUrl('/dashboard');
+};
+
 export const superAdminGuard: CanActivateFn = () =>
   inject(AuthService).isSuperAdmin() || inject(Router).parseUrl('/dashboard');
 

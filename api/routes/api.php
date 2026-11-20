@@ -11,6 +11,7 @@ use App\Http\Controllers\Api\V1\CategoryController;
 use App\Http\Controllers\Api\V1\ChartOfAccountsController;
 use App\Http\Controllers\Api\V1\DashboardController;
 use App\Http\Controllers\Api\V1\ExpenseApprovalController;
+use App\Http\Controllers\Api\V1\ExpenseTemplateController;
 use App\Http\Controllers\Api\V1\ExportController;
 use App\Http\Controllers\Api\V1\FiscalYearController;
 use App\Http\Controllers\Api\V1\NotificationController;
@@ -134,6 +135,16 @@ Route::prefix('v1')->group(function () {
             });
             Route::post('incomes', [TransactionController::class, 'storeIncome'])->middleware('perm:income.create');
             Route::post('expenses', [TransactionController::class, 'storeExpense'])->middleware('perm:expense.create');
+            // AG-066 expense templates (docs/specs/recurring-expenses.md): post nothing. Reading needs expense.create or
+            // expense.edit (controller check). Archive / restore are POST actions; there is deliberately no DELETE route.
+            Route::get('expense-templates', [ExpenseTemplateController::class, 'index']);
+            Route::get('expense-templates/{templateId}', [ExpenseTemplateController::class, 'show'])->whereNumber('templateId');
+            Route::middleware('perm:expense.edit')->group(function () {
+                Route::post('expense-templates', [ExpenseTemplateController::class, 'store']);
+                Route::put('expense-templates/{templateId}', [ExpenseTemplateController::class, 'update'])->whereNumber('templateId');
+                Route::post('expense-templates/{templateId}/archive', [ExpenseTemplateController::class, 'archive'])->whereNumber('templateId');
+                Route::post('expense-templates/{templateId}/restore', [ExpenseTemplateController::class, 'restore'])->whereNumber('templateId');
+            });
 
             Route::post('capital', [TransferController::class, 'capital'])->middleware('super');
             Route::post('allocations', [TransferController::class, 'allocate'])->middleware('super');

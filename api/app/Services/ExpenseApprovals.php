@@ -462,7 +462,8 @@ class ExpenseApprovals extends ApprovalRequests
             'requested_period_locked' => $page['locked'][$t->branch_id.':'.$t->requested_date?->format('Y-m')] ?? false,
             'can_approve' => $decides,
             'can_cancel' => $mine && $user->canDo('expense.create'),
-        ];
+            // AG-066 R7a (accounting review MUST 2): the template facts as recorded at request.
+        ] + ExpenseTemplates::facts($page['audits'][$t->id] ?? null);
     }
 
     /**
