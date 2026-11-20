@@ -135,9 +135,9 @@ return new class extends Migration
         if ($main === null) {
             return;
         }
-        // Keys added to the catalogue after this migration (AG-064 expense.approve) do not exist yet when both run in one
-        // deploy; requiring them would grant nothing.
-        $others = array_values(array_diff(PermissionSeeder::PERMISSIONS, [self::PERMISSION, 'expense.approve']));
+        // Keys added to the catalogue after this migration (AG-064 expense.approve, AG-033 account.reconcile) do not exist
+        // yet when they run in one deploy; requiring them would grant nothing.
+        $others = array_values(array_diff(PermissionSeeder::PERMISSIONS, [self::PERMISSION, 'expense.approve', 'account.reconcile']));
         $otherIds = DB::table('permissions')->where('guard_name', 'web')->whereIn('name', $others)->pluck('id');
         if ($otherIds->count() !== count($others)) {
             return; // catalogue incomplete: leave roles to the Super Admin

@@ -6,6 +6,7 @@ use App\Models\Account;
 use App\Models\Branch;
 use App\Models\Transaction;
 use App\Models\YearEndClose;
+use App\Services\BankReconciliation;
 use App\Services\ReportService;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -273,5 +274,71 @@ final class LedgerChecks
             ->groupBy('le.branch_id', 'b.code')->orderBy('b.code')
             ->selectRaw("b.code as branch, SUM($dr) as debit, SUM($cr) as credit")->get()
             ->mapWithKeys(fn ($r) => [(string) $r->branch => ['debit' => (int) $r->debit, 'credit' => (int) $r->credit]])->all();
+    }
+
+    /**
+     * V10 (AG-033 R11): every active mark is on a bank-account line of its own account and branch, its transaction is
+     * not void, at most one active mark per line, and every completed statement's stored reconciled figure equals
+     * reconciled(A, S) now, its statement balance, and book - uncleared receipts + uncleared payments + cleared booked
+     * later as stored. Offenders as [check, account, detail].
+     *
+     * @return Collection<int, array{check: string, account: string, detail: string}>
+     */
+    public static function bankReconciliation(): Collection
+    {
+        $out = collect();
+        $label = fn ($r) => trim(($r->branch ?? '').' '.($r->account ?? "#{$r->account_id}"));
+        $marks = DB::table('bank_reconciliation_marks as m')
+            ->leftJoin('ledger_entries as le', 'le.id', '=', 'm.ledger_entry_id')
+            ->leftJoin('accounts as a', 'a.id', '=', 'm.account_id')
+            ->leftJoin('accounts as la', 'la.id', '=', 'le.account_id')
+            ->leftJoin('transactions as t', 't.id', '=', 'le.transaction_id')
+            ->leftJoin('branches as b', 'b.id', '=', 'm.branch_id')
+            ->whereNull('m.unmarked_at')
+            ->where(fn ($w) => $w->whereNull('le.id')->orWhereColumn('le.account_id', '!=', 'm.account_id')->orWhereColumn('le.branch_id', '!=', 'm.branch_id')
+                ->orWhereColumn('a.branch_id', '!=', 'm.branch_id')->orWhere('la.type', '!=', 'bank')->orWhere('t.status', 'void'))
+            ->orderBy('m.id')
+            ->get(['m.id', 'm.account_id', 'm.ledger_entry_id', 'a.name as account', 'b.code as branch', 'la.type', 't.status', 't.ref_no',
+                'le.account_id as line_account', 'le.branch_id as line_branch', 'm.branch_id']);
+        foreach ($marks as $r) {
+            $problem = match (true) {
+                $r->line_account === null => 'line does not exist',
+                (int) $r->line_account !== (int) $r->account_id => 'line is on another account',
+                (int) $r->line_branch !== (int) $r->branch_id => 'line or account is in another branch',
+                $r->type !== 'bank' => 'line is not on a bank account',
+                $r->status === 'void' => 'transaction is void',
+                default => 'account is in another branch',
+            };
+            $out->push(['check' => 'active mark', 'account' => $label($r), 'detail' => "mark #{$r->id} on line #{$r->ledger_entry_id} ".($r->ref_no ?? '').": {$problem}"]);
+        }
+
+        $dupes = DB::table('bank_reconciliation_marks')->whereNull('unmarked_at')->groupBy('ledger_entry_id')
+            ->havingRaw('COUNT(*) > 1')->selectRaw('ledger_entry_id, COUNT(*) as n')->get();
+        foreach ($dupes as $d) {
+            $out->push(['check' => 'one active mark per line', 'account' => '', 'detail' => "line #{$d->ledger_entry_id}: {$d->n} active marks"]);
+        }
+
+        $recon = app(BankReconciliation::class);
+        $statements = DB::table('bank_statements as s')->join('accounts as a', 'a.id', '=', 's.account_id')->join('branches as b', 'b.id', '=', 's.branch_id')
+            ->where('s.status', 'completed')->orderBy('s.id')
+            ->get(['s.*', 'a.name as account', 'b.code as branch']);
+        foreach ($statements as $s) {
+            $date = substr((string) $s->statement_date, 0, 10);
+            $now = $recon->reconciledCents((int) $s->account_id, $date);
+            $stored = (int) $s->book_balance_cents - (int) $s->uncleared_receipts_cents + (int) $s->uncleared_payments_cents + (int) $s->cleared_booked_later_cents;
+            $f = fn (int $c) => Money::format(Money::fromCents($c));
+            foreach ([
+                'reconciled now' => $now,
+                'statement balance' => (int) $s->statement_balance_cents,
+                'book - uncleared receipts + uncleared payments + cleared booked later (stored)' => $stored,
+            ] as $what => $value) {
+                if ($value !== (int) $s->reconciled_cents) {
+                    $out->push(['check' => 'completed statement', 'account' => $label($s),
+                        'detail' => "statement #{$s->id} of {$date}: stored reconciled {$f((int) $s->reconciled_cents)} != {$what} {$f($value)}"]);
+                }
+            }
+        }
+
+        return $out->values();
     }
 }

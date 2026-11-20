@@ -1,7 +1,7 @@
 import { Component, OnInit, computed, inject, input, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
-import { Router, RouterLink } from '@angular/router';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { Account, Category } from '../../core/models';
 import { MoneyPipe } from '../../core/money.pipe';
 import { errorText } from '../../core/api.interceptor';
@@ -11,6 +11,7 @@ import { ATTACH_ACCEPT, fileSize, selectionProblem, uploadAttachment, uploadErro
 import { AuthService } from '../../core/auth.service';
 import { ToastService } from '../../core/toast.service';
 import { toCents } from '../../core/approvals';
+import { lateEntryWarning } from '../../core/reconciliation';
 
 interface UploadLine { name: string; size: number; pct: number; error?: string; done?: boolean }
 interface SaveResult {
@@ -35,6 +36,7 @@ interface BranchLimit { id: number; expense_approval_threshold?: string | null }
           @for (a of accounts(); track a.id) { <option [ngValue]="a.id">{{ a.name }} ({{ a.current_balance | money }})</option> }
         </select>
       </label>
+      @if (lateWarning(); as w) { <p class="warn wide">{{ w }}</p> }
       <label>Category
         <select name="parent" [(ngModel)]="parentId" (ngModelChange)="m.category_id = null" required>
           @for (c of categories(); track c.id) { <option [ngValue]="c.id">{{ c.name }}</option> }
@@ -120,6 +122,7 @@ export class EntryFormComponent implements OnInit {
     return t !== null && a !== null && a > t;
   });
   private router = inject(Router);
+  private route = inject(ActivatedRoute);
   today = colomboToday();
   accounts = signal<Account[]>([]);
   categories = signal<Category[]>([]);
@@ -143,8 +146,11 @@ export class EntryFormComponent implements OnInit {
       const active = Number(this.auth.activeBranchId());
       this.http.get<BranchLimit[]>('/api/v1/branches').subscribe(b => this.threshold.set(b.find(x => x.id === active)?.expense_approval_threshold ?? null));
     }
+    // AG-033 S1 "Record a bank entry": ?account_id= picks the account (when it is offered here).
+    const wanted = Number(this.route.snapshot.queryParamMap.get('account_id') ?? 0);
     this.http.get<Account[]>('/api/v1/accounts').subscribe(a => {
       this.accounts.set(a.filter(x => x.status !== 'closed'));
+      if (wanted && this.m['account_id'] == null && this.accounts().some(x => x.id === wanted)) this.m['account_id'] = wanted;
       this.m['account_id'] ??= a[0]?.id;
     });
     // Categories spec S2: only parents with at least one active sub-category visible in this branch.
@@ -153,6 +159,9 @@ export class EntryFormComponent implements OnInit {
   }
 
   size(n: number) { return fileSize(n); }
+
+  /** AG-033 review finding 10: non-blocking late-entry warning for a reconciled bank account. */
+  lateWarning() { return lateEntryWarning(this.accounts().find(a => a.id === this.m['account_id']), this.m['txn_date']); }
 
   pick(input: HTMLInputElement) {
     const added = Array.from(input.files ?? []);

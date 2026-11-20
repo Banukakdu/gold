@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Services\BackgroundExports;
+use App\Services\BankReconciliation;
 use App\Services\ReportExporter;
 use App\Services\ReportService;
 use Illuminate\Http\Request;
@@ -53,12 +54,20 @@ class ReportController extends Controller
         return $this->reports->cashFlow($this->reports->params('cash-flow', $request->all()));
     }
 
+    /** AG-033 S3 Unreconciled bank entries (docs/specs/bank-reconciliation.md). */
+    public function bankReconciliation(Request $request, BankReconciliation $recon)
+    {
+        return $recon->report($recon->reportParams($request->all()));
+    }
+
     /** AG-087 R1: validation first, then the count; a large Excel export is queued (202), anything else downloads. */
     public function export(Request $request, string $name, BackgroundExports $exports)
     {
         abort_unless(in_array($name, ReportService::NAMES, true), 404, 'Unknown report.');
         $format = $request->validate(['format' => 'required|in:pdf,xlsx'])['format'];
-        $params = $this->reports->params($name, $request->except('format'));
+        $params = $name === 'bank-reconciliation'
+            ? app(BankReconciliation::class)->reportParams($request->except('format'))
+            : $this->reports->params($name, $request->except('format'));
 
         return $this->exporter->download($name, $params, $format, $request->user(),
             fn (int $rows) => $exports->queueReport($request, $name, $params, $rows));

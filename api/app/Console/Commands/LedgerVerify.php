@@ -25,7 +25,7 @@ class LedgerVerify extends Command
 {
     protected $signature = 'ledger:verify';
 
-    protected $description = 'List legacy voids, check cached balances, the double-entry rules (V1-V6) and the year-end close (V7-V8)';
+    protected $description = 'List legacy voids, check cached balances, the double-entry rules (V1-V6), the year-end close (V7-V8) and bank reconciliations (V10)';
 
     public function handle(): int
     {
@@ -127,6 +127,13 @@ class LedgerVerify extends Command
             $v8 = LedgerChecks::closeLines()->map(fn ($r) => [$r['rule'], "line #{$r['id']}", $r['ref'], $r['date']]);
             $failed = $this->check('V8 closing lines only in closes, nothing added to a closed year, Retained earnings written only by the close',
                 $v8->count(), ['Rule', 'Line', 'Ref', 'Date'], $v8->all()) || $failed;
+        }
+
+        // AG-033 bank reconciliation (docs/specs/bank-reconciliation.md R11).
+        if (Schema::hasTable('bank_reconciliation_marks')) {
+            $v10 = LedgerChecks::bankReconciliation()->map(fn ($r) => [$r['check'], $r['account'], $r['detail']]);
+            $failed = $this->check('V10 bank reconciliation: active marks on bank lines of their account, not void, one per line; completed statements agree',
+                $v10->count(), ['Check', 'Account', 'Detail'], $v10->all()) || $failed;
         }
 
         if ($failed) {

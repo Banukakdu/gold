@@ -21,5 +21,6 @@ export class ReportsHubComponent {
     { link: '/reports/cash-book', title: 'Daily Cash Book', question: 'What came in and went out of each account, day by day?' },
     { link: '/reports/cash-flow', title: 'Cash Flow Summary', question: 'How much cash came in and went out each month?' },
     { link: '/reports/trial-balance', title: 'Trial Balance', question: 'Do debits equal credits, and what is the balance of every ledger account?' },
+    { link: '/reports/bank-reconciliation', title: 'Unreconciled bank entries', question: 'Which bank entries have not cleared yet?' },
   ];
 }

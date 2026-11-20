@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\V1\AttachmentController;
 use App\Http\Controllers\Api\V1\AuditLogController;
 use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\BackupController;
+use App\Http\Controllers\Api\V1\BankReconciliationController;
 use App\Http\Controllers\Api\V1\BranchController;
 use App\Http\Controllers\Api\V1\CategoryController;
 use App\Http\Controllers\Api\V1\ChartOfAccountsController;
@@ -78,6 +79,8 @@ Route::prefix('v1')->group(function () {
             Route::get('reports/cash-book', [ReportController::class, 'cashBook'])->middleware('perm:report.view');
             Route::get('reports/cash-flow', [ReportController::class, 'cashFlow'])->middleware('perm:report.view'); // AG-086
             Route::get('reports/trial-balance', [ReportController::class, 'trialBalance'])->middleware('perm:report.view');
+            // AG-033 S3 Unreconciled bank entries (export through reports/{name}/export).
+            Route::get('reports/bank-reconciliation', [ReportController::class, 'bankReconciliation'])->middleware('perm:report.view');
             Route::post('reports/{name}/export', [ReportController::class, 'export'])->middleware('perm:report.view,report.export');
 
             Route::get('branches', [BranchController::class, 'index']);
@@ -89,6 +92,15 @@ Route::prefix('v1')->group(function () {
             Route::post('accounts', [AccountController::class, 'store'])->middleware('perm:account.manage');
             Route::put('accounts/{account}', [AccountController::class, 'update'])->middleware('perm:account.manage');
             Route::get('accounts/{account}/statement', [AccountController::class, 'statement'])->middleware('perm:account.view');
+            // AG-033 bank reconciliation (docs/specs/bank-reconciliation.md): posts nothing. Undo is a POST action; there is
+            // deliberately no DELETE route. {statementId} must belong to {account} (404 otherwise).
+            Route::middleware('perm:account.reconcile')->group(function () {
+                Route::get('accounts/{account}/reconciliation', [BankReconciliationController::class, 'show']);
+                Route::post('accounts/{account}/reconciliation/marks', [BankReconciliationController::class, 'marks']);
+                Route::post('accounts/{account}/reconciliation/complete', [BankReconciliationController::class, 'complete']);
+                Route::post('accounts/{account}/reconciliation/statements/{statementId}/undo', [BankReconciliationController::class, 'undo'])
+                    ->whereNumber('statementId');
+            });
             // Double-entry S1: the chart of accounts of one branch (structure only, no balances).
             Route::get('chart-of-accounts', ChartOfAccountsController::class)->middleware('perm:account.view');
 

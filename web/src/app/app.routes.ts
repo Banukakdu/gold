@@ -25,6 +25,11 @@ export const routes: Routes = [
         loadComponent: () => import('./features/transfers/allocation-form.component').then(m => m.AllocationFormComponent) },
       { path: 'accounts', canActivate: [permissionGuard('account.view')],
         loadComponent: () => import('./features/accounts/account-list.component').then(m => m.AccountListComponent) },
+      // AG-033 S1 bank reconciliation: the picker, then one bank account. Leaving with unsaved ticks asks first.
+      { path: 'accounts/reconcile', canActivate: [permissionGuard('account.reconcile')],
+        loadComponent: () => import('./features/accounts/reconcile.component').then(m => m.ReconcileComponent) },
+      { path: 'accounts/:id/reconcile', canActivate: [permissionGuard('account.reconcile')], canDeactivate: [(c: { canLeave(): boolean }) => c.canLeave()],
+        loadComponent: () => import('./features/accounts/reconcile.component').then(m => m.ReconcileComponent) },
       { path: 'accounts/:id/statement', canActivate: [permissionGuard('account.view')],
         loadComponent: () => import('./features/accounts/statement.component').then(m => m.StatementComponent) },
       { path: 'chart-of-accounts', canActivate: [permissionGuard('account.view')],
@@ -44,6 +49,8 @@ export const routes: Routes = [
         loadComponent: () => import('./features/reports/cash-book.component').then(m => m.CashBookComponent) },
       { path: 'reports/cash-flow', canActivate: [permissionGuard('report.view')],
         loadComponent: () => import('./features/reports/cash-flow.component').then(m => m.CashFlowComponent) },
+      { path: 'reports/bank-reconciliation', canActivate: [permissionGuard('report.view')],
+        loadComponent: () => import('./features/reports/bank-reconciliation.component').then(m => m.BankReconciliationReportComponent) },
       { path: 'reports/trial-balance', canActivate: [permissionGuard('report.view')],
         loadComponent: () => import('./features/reports/trial-balance.component').then(m => m.TrialBalanceComponent) },
       // AG-087 S2: any signed-in user (their own background exports only).

@@ -25,6 +25,7 @@ import { NotificationBellComponent } from './notification-bell.component';
           @if (auth.can('transfer.create')) { <a routerLink="/transfers/new" routerLinkActive="on">Transfer money</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/allocations/new" routerLinkActive="on">Fund a branch</a> }
           @if (auth.can('account.view')) { <a routerLink="/accounts" routerLinkActive="on">Accounts</a> }
+          @if (auth.can('account.reconcile')) { <a routerLink="/accounts/reconcile" routerLinkActive="on" class="subnav">Bank reconciliation</a> }
           @if (auth.can('account.view')) { <a routerLink="/chart-of-accounts" routerLinkActive="on" class="subnav">Chart of accounts</a> }
           @if (auth.can('category.manage')) { <a routerLink="/categories" routerLinkActive="on" class="subnav">Categories</a> }
           @if (auth.can('report.view')) { <a routerLink="/reports" routerLinkActive="on">Reports</a> }
@@ -91,6 +92,9 @@ export class ShellComponent implements OnInit {
     this.auth.switchBranch(id);
     // Entry forms and statements need a single branch; send the user back to the dashboard.
     if (this.router.url.includes('/new/') || this.router.url.includes('/statement')) {
+      this.router.navigateByUrl('/dashboard');
+    } else if (/^\/accounts\/(\d+\/)?reconcile/.test(this.router.url) && !this.auth.can('account.reconcile')) {
+      // AG-033: account.reconcile is per branch; leave if the new branch does not grant it.
       this.router.navigateByUrl('/dashboard');
     } else if (this.router.url.startsWith('/audit-log') && !this.auth.can('audit.view')) {
       // audit.view is per branch: leave if the new branch does not grant it.

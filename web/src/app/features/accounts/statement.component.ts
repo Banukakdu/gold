@@ -9,7 +9,9 @@ import { errorText } from '../../core/api.interceptor';
 interface Statement {
   account: { name: string; code?: string | null; type: string; branch: { code: string; name: string } };
   opening_balance: string; closing_balance: string;
-  entries: { transaction_id: number; date: string; ref_no: string; type: string; status: string; contra: boolean; description: string; in: string; out: string; balance: string }[];
+  entries: { transaction_id: number; date: string; ref_no: string; type: string; status: string; contra: boolean; description: string; in: string; out: string; balance: string;
+    /** AG-033 S2: bank accounts only, the active mark's cleared date. */
+    cleared_date?: string | null }[];
 }
 
 @Component({
@@ -26,17 +28,18 @@ interface Statement {
     @if (s(); as s) {
       <div class="card">
         <table class="list">
-          <thead><tr><th>Date</th><th>Ref</th><th>Type</th><th>Description</th><th class="num">{{ isMoney(s) ? 'In' : 'Debit' }}</th><th class="num">{{ isMoney(s) ? 'Out' : 'Credit' }}</th><th class="num">Balance</th></tr></thead>
+          <thead><tr><th>Date</th><th>Ref</th><th>Type</th><th>Description</th><th class="num">{{ isMoney(s) ? 'In' : 'Debit' }}</th><th class="num">{{ isMoney(s) ? 'Out' : 'Credit' }}</th>@if (isBank(s)) { <th>Cleared</th> }<th class="num">Balance</th></tr></thead>
           <tbody>
-            <tr class="sub"><td colspan="6">Opening balance</td><td class="num">{{ bal(s, s.opening_balance) }}</td></tr>
+            <tr class="sub"><td [attr.colspan]="isBank(s) ? 7 : 6">Opening balance</td><td class="num">{{ bal(s, s.opening_balance) }}</td></tr>
             @for (e of s.entries; track $index) {
               <tr>
                 <td>{{ e.date | appDate }}</td><td class="mono"><a [routerLink]="['/transactions', e.transaction_id]">{{ e.ref_no }}</a></td><td>{{ label(e.type) }} @if (e.status === 'void') { <span class="tag" data-s="void">Void</span> }</td><td>{{ e.description }}</td>
                 <td class="num pos">{{ +e.in ? (e.in | money) : '' }}</td><td class="num neg">{{ +e.out ? (e.out | money) : '' }}</td>
+                @if (isBank(s)) { <td>{{ e.cleared_date ? (e.cleared_date | appDate) : '—' }}</td> }
                 <td class="num">{{ bal(s, e.balance) }}</td>
               </tr>
             }
-            <tr class="sub"><td colspan="6">Closing balance</td><td class="num"><b>{{ bal(s, s.closing_balance) }}</b></td></tr>
+            <tr class="sub"><td [attr.colspan]="isBank(s) ? 7 : 6">Closing balance</td><td class="num"><b>{{ bal(s, s.closing_balance) }}</b></td></tr>
           </tbody>
         </table>
       </div>
@@ -64,6 +67,8 @@ export class StatementComponent implements OnInit {
   label(t: string) { return TYPE_LABELS[t] ?? t; }
   /** Cash, bank and wallet keep In / Out; other ledger accounts (double entry) show Debit / Credit. */
   isMoney(s: Statement) { return ['cash', 'bank', 'wallet'].includes(s.account.type); }
+  /** AG-033 S2: the Cleared column, bank accounts only. */
+  isBank(s: Statement) { return s.account.type === 'bank'; }
   /** Review N9: a ledger account's balance reads "1,000.00 Cr", never a negative number; money accounts are unchanged. */
   bal(s: Statement, v: string): string {
     if (this.isMoney(s)) return this.money.transform(v);

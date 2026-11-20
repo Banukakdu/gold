@@ -33,7 +33,11 @@ class ReportExporter
         'cash-book' => 'Daily Cash Book',
         'trial-balance' => 'Trial Balance',
         'cash-flow' => 'Cash Flow Summary',
+        'bank-reconciliation' => 'Unreconciled bank entries',
     ];
+
+    /** AG-033 S3 opened with a statement_id: the printable bank reconciliation statement. */
+    public const STATEMENT_TITLE = 'Bank reconciliation statement';
 
     /** AG-086 columns after Month, in the spec's order (review finding 2), Eliminated last (finding 7). */
     public const CASH_FLOW_COLUMNS = [
@@ -76,6 +80,7 @@ class ReportExporter
             'trial-balance' => $this->reports->trialBalanceRows($data ?? $this->reports->trialBalance($p)),
             // AG-086: one row per month (at most 24, always under the caps).
             'cash-flow' => count(ReportService::monthsBetween($p->from, $p->to)),
+            'bank-reconciliation' => BankReconciliation::reportRows($data ?? $this->bankReconciliation($p)),
         };
     }
 
@@ -95,7 +100,12 @@ class ReportExporter
             $data = $this->prebuild($name, $p);
             $rows = $this->countRows($name, $p, $data);
             ReadSnapshot::hook('counted');
-            if ($format === 'xlsx' && $rows > BackgroundExports::syncRows() && $name !== 'cash-flow') {
+            // AG-033: the bank reconciliation report is never queued; it keeps the report caps (EXPORT_CAP / PDF_EXPORT_CAP).
+            if ($format === 'xlsx' && $name === 'bank-reconciliation' && $rows > ReportService::EXPORT_CAP) {
+                abort(response()->json(['message' => 'This export has '.number_format($rows).' rows; the limit is '
+                    .number_format(ReportService::EXPORT_CAP).'. Narrow the branches or accounts, or use Older than.'], 422));
+            }
+            if ($format === 'xlsx' && $rows > BackgroundExports::syncRows() && ! in_array($name, ['cash-flow', 'bank-reconciliation'], true)) {
                 if ($rows > BackgroundExports::maxRows() || ! $queue) {
                     $cap = $queue ? BackgroundExports::maxRows() : BackgroundExports::syncRows();
                     abort(response()->json(['message' => 'This export has '.number_format($rows).' rows; the limit is '.number_format($cap).'. Narrow the date range or branches.'], 422));
@@ -134,6 +144,10 @@ class ReportExporter
 
     public static function fileName(string $name, ReportParams $p, string $format = 'xlsx'): string
     {
+        if ($name === 'bank-reconciliation') {
+            return "{$name}_{$p->to}.{$format}"; // AG-033: bank-reconciliation_<as_at>.<ext>
+        }
+
         return "{$name}_{$p->from}_{$p->to}.{$format}";
     }
 
@@ -147,6 +161,7 @@ class ReportExporter
             'cash-book' => array_sum(array_map(fn ($a) => array_sum(array_map(fn ($day) => count($day['lines']), $a['days'])), $d['accounts'])),
             'trial-balance' => $this->reports->trialBalanceRows($d),
             'cash-flow' => count($d['months']),
+            'bank-reconciliation' => BankReconciliation::reportRows($d),
         };
     }
 
@@ -156,6 +171,7 @@ class ReportExporter
         return match ($name) {
             'income-expense' => $this->reports->incomeExpense($p),
             'trial-balance' => $this->reports->trialBalance($p),
+            'bank-reconciliation' => $this->bankReconciliation($p),
             default => null,
         };
     }
@@ -169,7 +185,13 @@ class ReportExporter
             'cash-flow' => $this->reports->cashFlow($p),
             'income-expense' => $this->reports->incomeExpense($p),
             'trial-balance' => $this->reports->trialBalance($p),
+            'bank-reconciliation' => $this->bankReconciliation($p),
         };
+    }
+
+    private function bankReconciliation(ReportParams $p): array
+    {
+        return app(BankReconciliation::class)->report($p);
     }
 
     /**
@@ -316,21 +338,40 @@ class ReportExporter
                 ? 'Receipt: '.TransferReceipts::IN_TRANSIT_LABEL.' ('.$settings->formatDate($p->to).'), any date up to it'
                 : 'Receipt: '.implode(', ', array_map([TransferReceipts::class, 'label'], $receipt));
         }
+        $periodWord = 'Period';
+        $banner = null;
+        if ($name === 'bank-reconciliation') {
+            // AG-033 S3: a status as at a date. An undone statement says so on every page (review finding 5).
+            $periodWord = 'As at';
+            $st = $data['statement'] ?? null;
+            if ($st) {
+                $title = self::STATEMENT_TITLE;
+                if ($st['undone']) {
+                    // Excel keeps the whole reason; the PDF page header has a fixed height, so it shortens a long one (the
+                    // full banner is printed again under the header on the first page).
+                    $banner = self::undoneBanner($st);
+                }
+            }
+        }
         // AG-086 R7: the cash flow sends its own label (a range over two fiscal years names both).
-        $period = $data['period_label'] ?? self::periodLabel($p->from, $p->to);
+        $period = $name === 'bank-reconciliation' ? $settings->formatDate($p->to) : ($data['period_label'] ?? self::periodLabel($p->from, $p->to));
         $lines = array_values(array_filter([
             $company,
             $title,
             'Branches: '.$p->branchLabel(),
-            'Period: '.$period,
+            $periodWord.': '.$period,
             $currency,
             $basis,
             $printed,
             // AG-087 R3 (finding 1): queued exports only, right after "Printed by".
             $extracted,
             ...$notes,
+            $banner,
             $data['provisional'] ? 'PROVISIONAL - period not locked' : null,
         ]));
+        if ($banner !== null) {
+            $notes[] = Str::limit($banner, 230);
+        }
 
         return [
             'company' => $company,
@@ -339,6 +380,7 @@ class ReportExporter
             'title' => $title,
             'branches' => $p->branchLabel(),
             'period' => $period,
+            'period_word' => $periodWord,
             'currency' => $currency,
             'printed' => $printed,
             'basis' => $basis,
@@ -346,6 +388,21 @@ class ReportExporter
             'provisional' => $data['provisional'],
             'lines' => $lines,
         ];
+    }
+
+    /** AG-033 review finding 5: "UNDONE on <date> by <name>: <reason>. This statement is superseded." */
+    public static function undoneBanner(array $statement): string
+    {
+        $u = $statement['undone'];
+        $date = app(Settings::class)->formatDate(CarbonImmutable::parse($u['at'])->setTimezone('Asia/Colombo')->format('Y-m-d'));
+
+        return "UNDONE on {$date} by ".($u['by']['name'] ?? 'unknown').": {$u['reason']}. This statement is superseded.";
+    }
+
+    /** AG-033 review finding 3: a negative statement balance reads "Overdrawn 2,500.00". */
+    public static function statementBalanceText(string $balance): string
+    {
+        return Money::cmp($balance, 0) < 0 ? 'Overdrawn '.Money::format(ltrim($balance, '-')) : Money::format($balance);
     }
 
     /**
@@ -380,6 +437,7 @@ class ReportExporter
             'cash-book' => ['reports.pdf.cash-book', ['data' => $data, 'books' => array_map(fn ($a) => $a + ['pages' => $this->carryPages($this->cashBookLines($a), ['receipt', 'payment'], self::PDF_ROWS_PORTRAIT)], $data['accounts'])]],
             'trial-balance' => ['reports.pdf.trial-balance', ['data' => $data]],
             'cash-flow' => ['reports.pdf.cash-flow', ['data' => $data, 'notes' => self::cashFlowNotes($data)]],
+            'bank-reconciliation' => ['reports.pdf.bank-reconciliation', ['data' => $data]],
         };
         $pdf = Pdf::loadView($view[0], $view[1] + ['head' => $head])
             ->setPaper('a4', in_array($name, ['transfers', 'branch-comparison', 'trial-balance', 'cash-flow'], true) ? 'landscape' : 'portrait');
@@ -528,6 +586,8 @@ class ReportExporter
 
             'trial-balance' => $this->trialBalanceSheets($d, $row),
 
+            'bank-reconciliation' => $this->bankReconciliationSheets($d, $row),
+
             // AG-086: the screen columns (finding 2 order) plus Eliminated; Month is a date cell "mmm yyyy" (finding 7).
             'cash-flow' => [[
                 'title' => 'Cash flow',
@@ -556,6 +616,71 @@ class ReportExporter
                 ];
             }, $d['accounts']),
         };
+    }
+
+    /**
+     * AG-033 S3: one sheet per bank account with the uncleared lines (Age, stale tag), the items cleared before they
+     * were booked, and the totals block; with a statement, the statement lines, the late entries and the preparer.
+     */
+    private function bankReconciliationSheets(array $d, callable $row): array
+    {
+        $settings = app(Settings::class);
+        $sheets = [];
+        $st = $d['statement'];
+        foreach ($d['accounts'] as $a) {
+            $acc = $a['account'];
+            $rows = [];
+            foreach ($a['rows'] as $r) {
+                $rows[] = $row([$r['date'], $r['ref_no'], ReportService::typeLabel($r['type']), $r['description'], $r['reference'] ?? '',
+                    Money::cmp($r['in'], 0) ? $r['in'] : null, Money::cmp($r['out'], 0) ? $r['out'] : null, $r['age_days'], $r['stale'] ? BankReconciliation::STALE_TAG : '']);
+            }
+            if (! $a['rows']) {
+                $rows[] = $row(['', 'All bank entries up to '.$settings->formatDate($d['as_at']).' are reconciled.', '', '', '', null, null, null, '']);
+            }
+            foreach ($a['cleared_booked_later_rows'] as $r) {
+                $rows[] = $row([$r['date'], $r['ref_no'], ReportService::typeLabel($r['type']), $r['description'].' (cleared '.$settings->formatDate($r['cleared_date']).')',
+                    $r['reference'] ?? '', Money::cmp($r['in'], 0) ? $r['in'] : null, Money::cmp($r['out'], 0) ? $r['out'] : null, null, 'Cleared by the bank, booked after']);
+            }
+            $total = fn (string $label, string $amount) => $row(['', $label, '', '', '', null, $amount, null, ''], true);
+            $rows[] = $total('Book balance at '.$settings->formatDate($d['as_at']), $a['book_balance']);
+            $rows[] = $total('less uncleared receipts', $a['uncleared_receipts']);
+            $rows[] = $total('add uncleared payments', $a['uncleared_payments']);
+            if ($a['cleared_booked_later_rows']) {
+                $rows[] = $total('add/less entries cleared by the bank on or before '.$settings->formatDate($d['as_at']).', booked after', $a['cleared_booked_later']);
+            }
+            $rows[] = $total('= Expected bank balance', $a['expected_bank_balance']);
+            if ($st) {
+                $rows[] = $total('Balance per bank statement', $st['statement_balance']);
+                $rows[] = $total('Difference', $st['difference']);
+            }
+            $last = $a['last_statement'];
+            $notes = [$acc['branch']['code'].' · '.$acc['name'].($acc['code'] ? " ({$acc['code']})" : '').' - '
+                .($last ? 'last reconciled to '.$settings->formatDate($last['statement_date']).' (statement balance '.self::statementBalanceText($last['statement_balance']).')' : 'never reconciled')];
+            if ($st) {
+                $notes[] = 'Statement balance: '.self::statementBalanceText($st['statement_balance']);
+                if ($st['changed_since_completion']) {
+                    $notes[] = 'Changed since completion';
+                }
+                foreach ($st['late_entries'] as $l) {
+                    $notes[] = "Late entry {$l['ref_no']} dated ".$settings->formatDate($l['date']).' '.Money::format($l['amount']).' '.$l['kind'].' by '.($l['by'] ?? '-')
+                        .' at '.CarbonImmutable::parse($l['at'])->setTimezone('Asia/Colombo')->format('Y-m-d H:i');
+                }
+                $notes[] = 'Prepared by '.($st['completed_by']['name'] ?? '-').' on '.CarbonImmutable::parse($st['completed_at'])->setTimezone('Asia/Colombo')->format('Y-m-d H:i');
+                $notes[] = "{$st['self_count']} of {$st['lines_count']} lines were recorded by the preparer";
+            }
+            $sheets[] = [
+                'title' => $acc['branch']['code'].' '.$acc['name'],
+                'columns' => [['Date', 'date'], ['Ref', 'text'], ['Type', 'text'], ['Description / payee', 'text'], ['Reference', 'text'],
+                    ['In', 'amount'], ['Out', 'amount'], ['Age (days)', 'text'], ['Note', 'text']],
+                'rows' => $rows,
+                'notes' => $notes,
+            ];
+        }
+        if (! $sheets) {
+            $sheets[] = ['title' => 'Bank accounts', 'columns' => [['Note', 'text']], 'rows' => [$row(['No bank accounts in scope.'])]];
+        }
+
+        return $sheets;
     }
 
     /** Trial balance sheets: one per branch section (by branch), or one consolidated sheet. */

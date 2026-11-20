@@ -51,7 +51,7 @@ class ReportService
         self::$receiptColumns = null;
     }
 
-    public const NAMES = ['income-expense', 'branch-comparison', 'transfers', 'cash-book', 'trial-balance', 'cash-flow'];
+    public const NAMES = ['income-expense', 'branch-comparison', 'transfers', 'cash-book', 'trial-balance', 'cash-flow', 'bank-reconciliation'];
 
     /** Excel export and cash book screen cap (detail rows). */
     public const EXPORT_CAP = 5000;
@@ -157,31 +157,8 @@ class ReportService
             }
         }
 
-        $requested = array_map('intval', $d['branches'] ?? []);
-        $found = Branch::whereIn('id', $requested)->get()->keyBy('id');
-        if ($found->count() !== count($requested)) {
-            throw ValidationException::withMessages(['branches' => 'Unknown branch.']);
-        }
-
         $ctx = app(BranchContext::class);
-        if ($ctx->isScoped()) {
-            foreach ($requested as $id) {
-                if ($id !== $ctx->branchId) {
-                    abort(403, "You do not have access to branch {$found[$id]->code}.");
-                }
-            }
-            $branches = Branch::whereKey($ctx->branchId)->get();
-            $all = false;
-            $subset = false;
-        } else {
-            if ($name === 'cash-book' && ! $requested) {
-                throw ValidationException::withMessages(['branches' => 'Select at least one branch']);
-            }
-            $branches = $requested ? $found->values() : Branch::all();
-            $all = ! $requested;
-            $subset = $requested && count($requested) < Branch::count();
-        }
-        $branches = $branches->sortBy(fn (Branch $b) => [$b->is_main ? 0 : 1, $b->code])->values();
+        [$branches, $all, $subset] = $this->branchScope(array_map('intval', $d['branches'] ?? []), $name === 'cash-book');
 
         $extra = match ($name) {
             'income-expense' => ['type' => $d['type'] ?? 'all'],
@@ -203,6 +180,42 @@ class ReportService
         }
 
         return new ReportParams($d['from'], $d['to'], $branches, $all, $subset, $extra);
+    }
+
+    /**
+     * R1: the branch set of a report. Branch mode: the active branch only (any other requested branch is 403). All
+     * branches mode: the requested branches, or every branch when none ($requireOne: 422 instead).
+     *
+     * @param  int[]  $requested
+     * @return array{0: Collection<int, Branch>, 1: bool, 2: bool} branches (Main first, then by code), all, subset
+     */
+    public function branchScope(array $requested, bool $requireOne = false): array
+    {
+        $found = Branch::whereIn('id', $requested)->get()->keyBy('id');
+        if ($found->count() !== count($requested)) {
+            throw ValidationException::withMessages(['branches' => 'Unknown branch.']);
+        }
+
+        $ctx = app(BranchContext::class);
+        if ($ctx->isScoped()) {
+            foreach ($requested as $id) {
+                if ($id !== $ctx->branchId) {
+                    abort(403, "You do not have access to branch {$found[$id]->code}.");
+                }
+            }
+            $branches = Branch::whereKey($ctx->branchId)->get();
+            $all = false;
+            $subset = false;
+        } else {
+            if ($requireOne && ! $requested) {
+                throw ValidationException::withMessages(['branches' => 'Select at least one branch']);
+            }
+            $branches = $requested ? $found->values() : Branch::all();
+            $all = ! $requested;
+            $subset = $requested && count($requested) < Branch::count();
+        }
+
+        return [$branches->sortBy(fn (Branch $b) => [$b->is_main ? 0 : 1, $b->code])->values(), $all, $subset];
     }
 
     /** Header data shared by every report (screen, PDF, Excel). */
