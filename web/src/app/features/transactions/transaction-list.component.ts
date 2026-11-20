@@ -622,10 +622,10 @@ export class TransactionListComponent implements OnInit {
   }
 
   isTransfer(t: string) { return ['opening_allocation', 'fund_allocation', 'fund_return', 'branch_transfer', 'internal_transfer'].includes(t); }
-  /** Controls review finding 8: opening balances and top-ups are reversed by a Super Admin only. */
+  /** Controls review finding 8 / fund return G5: opening balances, top-ups and fund returns are reversed by a Super Admin only. */
   canReverse(t: string) {
     if (!this.isTransfer(t) || !this.auth.can('transfer.reverse')) return false;
-    return !['opening_allocation', 'fund_allocation'].includes(t) || this.auth.isSuperAdmin();
+    return !['opening_allocation', 'fund_allocation', 'fund_return'].includes(t) || this.auth.isSuperAdmin();
   }
 
   void(t: Transaction) {

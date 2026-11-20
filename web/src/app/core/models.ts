@@ -23,7 +23,7 @@ export interface Account {
   current_balance: string;
   is_main_account?: boolean;
   status?: string;
-  branch?: { id: number; code: string; name: string };
+  branch?: { id: number; code: string; name: string; is_main?: boolean };
 }
 
 export interface Category {

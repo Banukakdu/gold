@@ -115,7 +115,12 @@ class LedgerService
                     throw new LedgerException("Account {$a->name} or its branch is inactive.");
                 }
             }
-            $this->assertOpenFor($lines, headOfficeSide: ! $from->branch->is_main && ! $to->branch->is_main);
+            // MAIN is only the head-office side of a branch transfer or a fund return (fund return G2).
+            $this->assertOpenFor($lines, headOfficeOf: match (true) {
+                $from->branch->is_main => null,
+                $to->branch->is_main => 'fund return',
+                default => 'transfer',
+            });
             $this->assertFunds($from, $amount);
 
             $type ??= $this->transferType($from, $to);
@@ -252,7 +257,11 @@ class LedgerService
             $accounts = $this->lock($entries->pluck('account_id')->unique()->all());
             $lines = $entries->map(fn (LedgerEntry $e) => $this->line($accounts[$e->account_id], Money::toCents($e->credit), Money::toCents($e->debit), $date))->all();
 
-            $this->assertOpenFor($lines, headOfficeSide: $original->type === Transaction::BRANCH_TRANSFER);
+            $this->assertOpenFor($lines, headOfficeOf: match ($original->type) {
+                Transaction::BRANCH_TRANSFER => 'transfer',
+                Transaction::FUND_RETURN => 'fund return',
+                default => null,
+            });
             // Reversing money that came IN must not push a money account negative (net credit per money account).
             $this->assertFundsForNetCredits($lines);
 
@@ -699,9 +708,10 @@ class LedgerService
 
     /**
      * R9: every (branch, line date) of the set must be open; branches with a money line first, then MAIN.
-     * $headOfficeSide: MAIN is only the head-office side of a branch transfer, and the message says so.
+     * $headOfficeOf: MAIN is only the head-office side of this kind of movement ("transfer", "fund return"), and the
+     * lock message says so. Null: MAIN gets the plain message. The closed-year check runs first for every branch.
      */
-    private function assertOpenFor(array $lines, bool $headOfficeSide = false): void
+    private function assertOpenFor(array $lines, ?string $headOfficeOf = null): void
     {
         $checks = [];
         foreach ($lines as $l) {
@@ -710,9 +720,9 @@ class LedgerService
         uasort($checks, fn ($a, $b) => [$a[0]->is_main, $a[1]] <=> [$b[0]->is_main, $b[1]]);
         foreach ($checks as [$branch, $date]) {
             $this->assertYearOpen($date);
-            if ($headOfficeSide && $branch->is_main) {
+            if ($headOfficeOf !== null && $branch->is_main) {
                 if (PeriodLock::isLocked($branch->id, $date, share: true)) {
-                    throw new LedgerException('The period '.substr($date, 0, 7)." is locked for {$branch->code} (head office side of this transfer).");
+                    throw new LedgerException('The period '.substr($date, 0, 7)." is locked for {$branch->code} (head office side of this {$headOfficeOf}).");
                 }
 
                 continue;
