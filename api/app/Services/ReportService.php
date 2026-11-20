@@ -235,9 +235,11 @@ class ReportService
         $parents = Category::whereIn('id', $cats->pluck('parent_id')->filter())->get()->keyBy('id');
 
         $out = $this->meta($p);
+        // Categories review finding 8: a "<code> only" tag on branch-only subs when more than one branch is selected.
+        $tagBranches = count($p->branchIds()) > 1 ? Branch::pluck('code', 'id') : null;
         foreach ([Transaction::INCOME, Transaction::EXPENSE] as $type) {
             $out[$type] = in_array($type, $types, true)
-                ? $this->categoryTree($rows->where('etype', $type), $cats, $parents)
+                ? $this->categoryTree($rows->where('etype', $type), $cats, $parents, $tagBranches)
                 : null;
         }
         $out['net'] = $p->extra['type'] === 'all'
@@ -253,7 +255,7 @@ class ReportService
         return collect([$r['income'], $r['expense']])->filter()->sum(fn ($s) => collect($s['categories'])->sum(fn ($c) => count($c['subs'])));
     }
 
-    private function categoryTree(Collection $rows, Collection $cats, Collection $parents): array
+    private function categoryTree(Collection $rows, Collection $cats, Collection $parents, ?Collection $tagBranches = null): array
     {
         $total = (int) $rows->sum(fn ($r) => (int) $r->cents);
         $groups = [];
@@ -267,11 +269,14 @@ class ReportService
         }
         $sort = fn (array $a, array $b) => [$b['cents'], $a['name']] <=> [$a['cents'], $b['name']];
 
-        $categories = array_map(function ($g) use ($sort) {
+        $categories = array_map(function ($g) use ($sort, $tagBranches) {
             $subs = array_map(fn ($s) => [
                 'id' => $s['cat']?->id,
                 'name' => $s['cat']?->name ?? '(no sub-category)',
                 'is_active' => $s['cat']?->is_active ?? $g['cat']->is_active,
+                // Categories review finding 8: the ledger code (and branch of a branch-only sub) beside the name.
+                'code' => $s['cat']?->ledger_code ?? $g['cat']->ledger_code,
+                'branch_only' => $tagBranches && $s['cat']?->branch_id ? ($tagBranches[$s['cat']->branch_id] ?? null) : null,
                 'cents' => $s['cents'],
             ], $g['subs']);
             usort($subs, $sort);
@@ -280,6 +285,7 @@ class ReportService
                 'id' => $g['cat']->id,
                 'name' => $g['cat']->name,
                 'is_active' => $g['cat']->is_active,
+                'code' => $g['cat']->ledger_code,
                 'cents' => $g['cents'],
                 'subs' => $subs,
             ];

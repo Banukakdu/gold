@@ -40,7 +40,8 @@ const MONEY = ['cash', 'bank', 'wallet'];
     <p class="muted">Cash, bank and wallet accounts are added under Accounts. Income and expense accounts follow Categories.
       Inter-branch and capital accounts are created by the system.
       At year end, each branch's result is moved to its Head office current account and to Retained earnings in MAIN.
-      @if (auth.can('account.manage') && !auth.isAllBranches()) { <a routerLink="/accounts">Add account</a> }</p>
+      @if (auth.can('account.manage') && !auth.isAllBranches()) { <a routerLink="/accounts">Add account</a> }
+      @if (auth.can('category.manage')) { <a routerLink="/categories">Manage categories</a> }</p>
     @if (msg()) { <div class="alert">{{ msg() }}</div> }
     @if (loading()) { <p class="muted">Loading...</p> }
     @if (!loading() && c(); as c) {

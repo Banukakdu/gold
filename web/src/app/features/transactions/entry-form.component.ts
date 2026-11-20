@@ -111,7 +111,9 @@ export class EntryFormComponent implements OnInit {
       this.accounts.set(a.filter(x => x.status !== 'closed'));
       this.m['account_id'] ??= a[0]?.id;
     });
-    this.http.get<Category[]>('/api/v1/categories', { params: { type: this.kind() } }).subscribe(c => this.categories.set(c));
+    // Categories spec S2: only parents with at least one active sub-category visible in this branch.
+    this.http.get<Category[]>('/api/v1/categories', { params: { type: this.kind() } })
+      .subscribe(c => this.categories.set(c.filter(p => (p.children ?? []).length > 0)));
   }
 
   size(n: number) { return fileSize(n); }
