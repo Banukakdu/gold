@@ -45,6 +45,9 @@ export function toHttpParams(p: ReportParams): HttpParams {
   return params;
 }
 
+/** Cash flow R6 / review finding 3: the API's message for a report that does not tie to the ledger (shown as is). */
+export const UNRECONCILED = 'This report could not be produced because its figures do not agree with the ledger. Nothing was changed. Please report this to your administrator.';
+
 /**
  * Error text for a report request. Server errors (500) and network failures get a friendly line:
  * raw PHP messages are never shown (fix round, QA bug 1).
@@ -214,8 +217,12 @@ export class ExportButtonsComponent {
       // Error bodies arrive as a Blob because of responseType: 'blob'.
       const err = e as HttpErrorResponse;
       let msg = reportError(e);
-      if (err?.status && err.status < 500 && err.error instanceof Blob) {
-        try { msg = JSON.parse(await err.error.text())?.message ?? msg; } catch { /* keep default */ }
+      if (err?.status && err.error instanceof Blob) {
+        try {
+          const body = JSON.parse(await err.error.text())?.message;
+          // A 500 keeps the generic text, except the reconciliation stop, whose message is meant for the user (m1).
+          if (body && (err.status < 500 || body === UNRECONCILED)) msg = body;
+        } catch { /* keep default */ }
       }
       this.error.set(msg);
     } finally {

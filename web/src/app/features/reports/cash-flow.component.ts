@@ -1,13 +1,14 @@
 import { Component, OnInit, inject, signal } from '@angular/core';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
+import { firstValueFrom } from 'rxjs';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe } from '../../core/money.pipe';
-import { SettingsService, colomboParts } from '../../core/settings.service';
+import { PublicSettings, SettingsService, colomboParts } from '../../core/settings.service';
 import { CashFlowChartComponent, CashFlowMonth, monthLabel } from './cash-flow-chart.component';
 import {
-  BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, ReportMeta, ReportParams,
+  BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, ReportMeta, ReportParams, UNRECONCILED,
   fieldErrors, isoDate, readQuery, reportError, toHttpParams, writeQuery,
 } from './report-common';
 
@@ -21,9 +22,6 @@ interface CashFlow extends ReportMeta {
   months: CashFlowMonth[];
   total: Figures;
 }
-
-/** R6 / review finding 3: the API's message for a report that does not tie to the ledger (shown as is). */
-export const UNRECONCILED = 'This report could not be produced because its figures do not agree with the ledger. Nothing was changed. Please report this to your administrator.';
 
 const MAX_MONTHS = 24;
 
@@ -56,7 +54,8 @@ function monthsBetween(from: string, to: string): number {
       <label>To <input type="month" name="to" [(ngModel)]="to" [max]="current" required /></label>
       <ag-branch-picker [(selected)]="branches" />
       <button type="submit">Show</button>
-      <ag-export-buttons name="cash-flow" [params]="applied()" />
+      <!-- QA low 1: no export while there are no figures on screen (e.g. the reconciliation stop). -->
+      @if (r()) { <ag-export-buttons name="cash-flow" [params]="applied()" /> }
     </form>
     @if (errLine(); as e) { <p class="field-error">{{ e }}</p> }
     @if (msg()) { <div class="alert">{{ msg() }}</div> }
@@ -65,31 +64,43 @@ function monthsBetween(from: string, to: string): number {
     @if (!loading() && r(); as r) {
       <ag-report-head [meta]="r" title="Cash Flow Summary" [basis]="r.basis" [periodText]="r.period_label" />
       @if (r.consolidated) { <p class="muted cf-scope">Consolidated - all branches</p> }
-      @if (r.empty) { <div class="ok">No cash movements in this period.</div> }
+      @if (r.empty) { <p class="muted cf-empty">No cash movements in this period.</p> }
       <div class="card section cf-card">
         <ag-cash-flow-chart [months]="r.months" />
       </div>
       <div class="card">
-        <table class="list cf-table">
-          <thead><tr><th>Month</th>@for (c of cols; track c[0]) { <th class="num">{{ c[1] }}</th> }</tr></thead>
+        <div class="cf-wrap"><table class="list cf-table">
+          <thead><tr><th class="cf-stick-l">Month</th>@for (c of cols; track c[0]) { <th class="num" [class]="stick(c[0])">{{ c[1] }}</th> }</tr></thead>
           <tbody>
             @for (m of r.months; track m.month) {
-              <tr><td class="cf-month">{{ label(m.month) }}</td>
-                @for (c of cols; track c[0]) { <td class="num" [class.neg]="+m[c[0]] < 0" [class.cf-key]="bold.includes(c[0])">{{ m[c[0]] | money }}</td> }</tr>
+              <tr><td class="cf-month cf-stick-l">{{ label(m.month) }}</td>
+                @for (c of cols; track c[0]) { <td class="num" [class]="stick(c[0])" [class.neg]="+m[c[0]] < 0" [class.cf-key]="bold.includes(c[0])">{{ m[c[0]] | money }}</td> }</tr>
             }
-            <tr class="sub"><td>Total</td>@for (c of cols; track c[0]) { <td class="num" [class.neg]="+r.total[c[0]] < 0">{{ r.total[c[0]] | money }}</td> }</tr>
+            <tr class="sub"><td class="cf-stick-l">Total</td>@for (c of cols; track c[0]) { <td class="num" [class]="stick(c[0])" [class.neg]="+r.total[c[0]] < 0">{{ r.total[c[0]] | money }}</td> }</tr>
           </tbody>
-        </table>
+        </table></div>
         @for (n of r.notes; track n) { <p class="muted">{{ n }}</p> }
       </div>
     }
   `,
   styles: [`
     .cf-card { overflow: hidden; }
-    .cf-table th { white-space: nowrap; }
+    .cf-wrap { overflow-x: auto; }
     .cf-month { white-space: nowrap; }
     .cf-key { font-weight: 600; }
-    .cf-scope { margin: -6px 0 10px; }
+    .cf-scope, .cf-empty { margin: -6px 0 10px; }
+    /* Tighter than the other reports: 14 columns. Headings wrap onto two lines. */
+    .cf-table th { white-space: normal; vertical-align: bottom; line-height: 1.25; }
+    .cf-table td, .cf-table th { padding: 6px 6px; }
+    .cf-table td { font-size: 13px; }
+    /* From tablet width, Month stays on the left and Net change + Closing on the right while the middle scrolls. */
+    @media (min-width: 761px) {
+      .cf-stick-l, .cf-stick-net, .cf-stick-close { position: sticky; z-index: 1; background: var(--card); }
+      tr.sub .cf-stick-l, tr.sub .cf-stick-net, tr.sub .cf-stick-close { background: #f6f1e4; }
+      .cf-stick-l { left: 0; }
+      .cf-stick-close { right: 0; min-width: 112px; width: 112px; }
+      .cf-stick-net { right: 112px; min-width: 104px; width: 104px; box-shadow: -1px 0 0 var(--line); }
+    }
   `],
 })
 export class CashFlowComponent implements OnInit {
@@ -103,7 +114,7 @@ export class CashFlowComponent implements OnInit {
   cols: [keyof Figures, string][] = [
     ['opening', 'Opening'], ['income', 'Income received'], ['expenses', 'Expenses paid'], ['operating_net', 'Operating net'],
     ['capital', 'Capital introduced'], ['funds_received', 'Funds received'], ['transfers_in', 'Transfers in'], ['transfers_out', 'Transfers out'],
-    ['funding_net', 'Funding net'], ['inflow', 'Total inflow'], ['outflow', 'Total outflow'], ['net', 'Net change'], ['closing', 'Closing'],
+    ['funding_net', 'Funding net'], ['inflow', 'Total inflow'], ['outflow', 'Total outflow'], ['net', 'Net change'], ['closing', 'Closing (cumulative)'],
   ];
   bold: (keyof Figures)[] = ['operating_net', 'funding_net', 'inflow', 'outflow', 'net', 'closing'];
 
@@ -119,19 +130,28 @@ export class CashFlowComponent implements OnInit {
   applied = signal<ReportParams>({});
 
   errLine() { return Object.values(this.errs()).join(' '); }
+  stick(k: keyof Figures) { return k === 'closing' ? 'num cf-stick-close' : k === 'net' ? 'num cf-stick-net' : 'num'; }
   label(ym: string) { return monthLabel(ym); }
 
-  ngOnInit() {
+  async ngOnInit() {
     const { q, branches } = readQuery(this.route, this.auth.isAllBranches());
+    this.branches.set(branches);
     const from = q.get('from') ?? '';
     const to = q.get('to') ?? '';
     if (/^\d{4}-\d{2}-01$/.test(from) && /^\d{4}-\d{2}-\d{2}$/.test(to)) {
       this.from = from.slice(0, 7);
       this.to = to.slice(0, 7);
     } else {
+      // QA bug 1 (AC 11): the default range needs the fiscal-year start. On a direct load the shell's settings request
+      // may still be running: fetch them first, so the wrong range is neither shown nor written to the URL.
+      if (!this.settings.settings()) {
+        this.loading.set(true);
+        try {
+          this.settings.apply(await firstValueFrom(this.http.get<PublicSettings>('/api/v1/settings/public')));
+        } catch { /* keep the default start month (April) */ }
+      }
       this.setPreset('this');
     }
-    this.branches.set(branches);
     this.load();
   }
 
@@ -164,6 +184,8 @@ export class CashFlowComponent implements OnInit {
     else if (this.to > this.current) errs['to'] = 'The report cannot cover future months.';
     else if (monthsBetween(this.from, this.to) > MAX_MONTHS) errs['to'] = 'The range may not be longer than 24 months.';
     if (Object.keys(errs).length) {
+      // QA low 2: no stale figures under inputs that now show another range.
+      this.r.set(null);
       this.errs.set(errs);
       this.msg.set('');
       return;

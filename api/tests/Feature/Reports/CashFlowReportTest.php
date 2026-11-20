@@ -331,4 +331,100 @@ class CashFlowReportTest extends CashFlowTestCase
         $this->cf('2026-10-01', '2026-10-31', ['KDY', 'GAL']);
         $this->assertSame($before, [DB::table('ledger_entries')->count(), DB::table('transactions')->count(), DB::table('accounts')->orderBy('id')->pluck('current_balance')->all()]);
     }
+
+    /**
+     * Review M1: a posting or a void that commits between the report's reads never fakes a reconciliation failure
+     * (cash flow and Branch Comparison). The posting is made from a query listener right after the k-th read of
+     * ledger_entries, i.e. while the request is running.
+     */
+    public function test_m1_posting_or_void_during_the_report_is_not_a_mismatch(): void
+    {
+        $this->actingAs($this->admin);
+        $ledger = app(LedgerService::class);
+        $expense = fn (string $date) => $ledger->incomeOrExpense(Transaction::EXPENSE, ['account_id' => $this->acc($this->gal, 'Cash')->id,
+            'category_id' => Category::where('name', 'Rent')->value('id'), 'txn_date' => $date, 'amount' => '100.00']);
+        $plan = null;
+        DB::listen(function ($q) use (&$plan) {
+            if ($plan === null || $plan['busy'] || $plan['done'] || ! str_contains($q->sql, 'ledger_entries')) {
+                return;
+            }
+            if (++$plan['seen'] === $plan['k']) {
+                $plan['busy'] = true;
+                ($plan['act'])();
+                $plan['busy'] = false;
+                $plan['done'] = true;
+            }
+        });
+
+        foreach (['cash-flow', 'branch-comparison'] as $name) {
+            foreach ([1, 2] as $k) {
+                foreach (['post', 'void'] as $what) {
+                    $victim = $what === 'void' ? $expense('2026-11-18') : null;
+                    $act = $what === 'void' ? fn () => $ledger->void($victim, 'Duplicate') : fn () => $expense('2026-11-19');
+                    $plan = ['k' => $k, 'seen' => 0, 'busy' => false, 'done' => false, 'act' => $act];
+                    $this->report($name, ['from' => '2026-09-01', 'to' => '2026-11-30'])->assertOk();
+                    $this->assertTrue($plan['done'], "$name $what after read $k");
+                    $plan = null;
+                }
+            }
+        }
+        // Afterwards the report still ties to the balances: 4 postings of 100.00 stand (the voids net to 0).
+        $this->assertSame('1047100.00', $this->cf('2026-09-01', '2026-11-30')['total']['closing']);
+    }
+
+    /** R6 (b) for a subset: a KDY -> GAL transfer with only the KDY money line stops KDY + GAL, not KDY alone. */
+    public function test_one_sided_elimination_in_a_subset(): void
+    {
+        $cash = $this->acc($this->kdy, 'Cash');
+        $ho = Account::withoutGlobalScopes()->where('branch_id', $this->kdy->id)->where('type', 'head_office')->firstOrFail();
+        $id = DB::table('transactions')->insertGetId(['branch_id' => $this->kdy->id, 'related_branch_id' => $this->gal->id, 'type' => Transaction::BRANCH_TRANSFER,
+            'txn_date' => '2026-11-05', 'amount' => '700.00', 'status' => 'posted', 'created_by' => $this->admin->id, 'created_at' => now(), 'updated_at' => now()]);
+        DB::table('ledger_entries')->insert([
+            ['transaction_id' => $id, 'account_id' => $cash->id, 'branch_id' => $this->kdy->id, 'entry_date' => '2026-11-05', 'debit' => '0.00', 'credit' => '700.00'],
+            ['transaction_id' => $id, 'account_id' => $ho->id, 'branch_id' => $this->kdy->id, 'entry_date' => '2026-11-05', 'debit' => '700.00', 'credit' => '0.00'],
+        ]);
+        Log::spy();
+        $ids = [$this->kdy->id, $this->gal->id];
+        $this->report('cash-flow', ['from' => '2026-11-01', 'to' => '2026-11-30', 'branches' => $ids])->assertStatus(500)
+            ->assertExactJson(['message' => ReportService::CASH_FLOW_UNRECONCILED]);
+        Log::shouldHaveReceived('error')->once()->withArgs(fn ($msg, $ctx) => $ctx['check'] === 'eliminated debits = eliminated credits'
+            && $ctx['branches'] === ['GAL', 'KDY'] && $ctx['month'] === '2026-11');
+        // MAIN + KDY: GAL is outside, so it is a plain Transfers out.
+        $this->assertSame('700.00', $this->cf('2026-11-01', '2026-11-30', ['MAIN', 'KDY'])['months'][0]['transfers_out']);
+    }
+
+    /** Review m4 + m5: movements that are all eliminated are "no movement"; a negative Eliminated alone is no screen note. */
+    public function test_m4_m5_eliminated_only_month(): void
+    {
+        $this->actingAs($this->admin);
+        $ledger = app(LedgerService::class);
+        $topUp = $ledger->transfer($this->mainAcc->id, $this->acc($this->kdy, 'Cash')->id, '5000.00', '2026-10-25', 'Top-up');
+        $ledger->reverse($topUp, '2026-11-10', null);
+
+        $r = $this->cf('2026-11-01', '2026-11-30', ['MAIN', 'KDY']);
+        $this->assertSame('-5000.00', $r['months'][0]['eliminated']);
+        $this->assertTrue($r['empty']);
+        $this->assertNotContains(ReportService::CASH_FLOW_NEGATIVE_NOTE, $r['notes']);
+        $this->assertContains('Inter-branch movements within the selection eliminated: -5,000.00', $r['notes']);
+        $this->assertSame(['-5000.00', '-5000.00'], [$this->cf('2026-11-01', '2026-11-30', ['KDY'])['months'][0]['funds_received'], $this->cf('2026-11-01', '2026-11-30', ['MAIN'])['months'][0]['transfers_out']]);
+
+        // The exports show Eliminated, so they carry the note.
+        $book = $this->xlsx($this->asAdmin()->postJson('/api/v1/reports/cash-flow/export', ['from' => '2026-11-01', 'to' => '2026-11-30',
+            'branches' => [$this->main->id, $this->kdy->id], 'format' => 'xlsx'])->assertOk());
+        $ws = $book->getSheet(0);
+        $texts = array_map(fn ($r) => (string) $ws->getCell([1, $r])->getValue(), range(1, $ws->getHighestRow()));
+        $this->assertContains(ReportService::CASH_FLOW_NEGATIVE_NOTE, $texts);
+        $this->assertContains(ReportService::CASH_FLOW_EMPTY, $texts);
+
+        // A month with no inter-branch movement in a multi-branch selection: no elimination note.
+        $this->assertSame(2, count($this->cf('2026-04-01', '2026-08-31')['notes']));
+    }
+
+    /** Review nit: a branch user is never "consolidated", even with one branch in the company scope. */
+    public function test_branch_user_is_not_consolidated(): void
+    {
+        $acct = $this->userIn($this->kdy, 'Accountant');
+        $this->assertFalse($this->actingAs($acct)->withHeader('X-Branch-Id', (string) $this->kdy->id)
+            ->getJson('/api/v1/reports/cash-flow?from=2026-10-01&to=2026-10-31')->assertOk()->json('consolidated'));
+    }
 }

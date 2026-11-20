@@ -34,9 +34,24 @@ class ReportExporter
     public const CASH_FLOW_COLUMNS = [
         'opening' => 'Opening', 'income' => 'Income received', 'expenses' => 'Expenses paid', 'operating_net' => 'Operating net',
         'capital' => 'Capital introduced', 'funds_received' => 'Funds received', 'transfers_in' => 'Transfers in', 'transfers_out' => 'Transfers out',
-        'funding_net' => 'Funding net', 'inflow' => 'Total inflow', 'outflow' => 'Total outflow', 'net' => 'Net change', 'closing' => 'Closing',
+        'funding_net' => 'Funding net', 'inflow' => 'Total inflow', 'outflow' => 'Total outflow', 'net' => 'Net change', 'closing' => 'Closing (cumulative)',
         'eliminated' => 'Eliminated',
     ];
+
+    /**
+     * The screen notes, plus the negative-amount note when only the Eliminated column (exports only) is negative:
+     * the screen shows the note only for figures it shows (review m5).
+     */
+    public static function cashFlowNotes(array $d): array
+    {
+        $notes = $d['notes'];
+        $negative = collect([...$d['months'], $d['total']])->contains(fn ($m) => Money::cmp($m['eliminated'], 0) < 0);
+        if ($negative && ! in_array(ReportService::CASH_FLOW_NEGATIVE_NOTE, $notes, true)) {
+            $notes[] = ReportService::CASH_FLOW_NEGATIVE_NOTE;
+        }
+
+        return $notes;
+    }
 
     /** Rows per PDF page for lists that carry Brought forward / Carried forward (finding 5), by paper orientation. */
     public const PDF_ROWS_PORTRAIT = 28;
@@ -218,7 +233,7 @@ class ReportExporter
                 array_map(fn ($m) => $m + ['cents' => ['amount' => Money::toCents($m['amount'])]], $data['movements']['data']), ['amount'], self::PDF_ROWS_LANDSCAPE)]],
             'cash-book' => ['reports.pdf.cash-book', ['data' => $data, 'books' => array_map(fn ($a) => $a + ['pages' => $this->carryPages($this->cashBookLines($a), ['receipt', 'payment'], self::PDF_ROWS_PORTRAIT)], $data['accounts'])]],
             'trial-balance' => ['reports.pdf.trial-balance', ['data' => $data]],
-            'cash-flow' => ['reports.pdf.cash-flow', ['data' => $data]],
+            'cash-flow' => ['reports.pdf.cash-flow', ['data' => $data, 'notes' => self::cashFlowNotes($data)]],
         };
         $pdf = Pdf::loadView($view[0], $view[1] + ['head' => $head])
             ->setPaper('a4', in_array($name, ['transfers', 'branch-comparison', 'trial-balance', 'cash-flow'], true) ? 'landscape' : 'portrait');
@@ -354,7 +369,7 @@ class ReportExporter
                     array_map(fn ($m) => $row(array_merge([$m['month']], array_map(fn ($k) => $m[$k], array_keys(self::CASH_FLOW_COLUMNS)))), $d['months']),
                     [$row(array_merge(['Total'], array_map(fn ($k) => $d['total'][$k], array_keys(self::CASH_FLOW_COLUMNS))), true)],
                 ),
-                'notes' => array_merge($d['empty'] ? [ReportService::CASH_FLOW_EMPTY] : [], $d['notes']),
+                'notes' => array_merge($d['empty'] ? [ReportService::CASH_FLOW_EMPTY] : [], self::cashFlowNotes($d)),
             ]],
 
             'cash-book' => array_map(function ($a) use ($row) {

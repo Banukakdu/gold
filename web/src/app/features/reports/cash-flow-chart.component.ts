@@ -23,29 +23,54 @@ function money(v: string): string {
 }
 
 /** Axis label: 1,250,000 -> "1.25M", 30,000 -> "30k". */
-function compact(n: number): string {
+function compact(n: number, step: number): string {
   const a = Math.abs(n);
-  const s = a >= 1e6 ? `${+(a / 1e6).toFixed(2)}M` : a >= 1e3 ? `${+(a / 1e3).toFixed(1)}k` : `${+a.toFixed(0)}`;
-  return (n < 0 ? '-' : '') + s;
+  // Review m2: below 1.00 per step (e.g. a few cents) show decimals, so ticks do not read "0, 0, 1".
+  const s = a >= 1e6 ? `${+(a / 1e6).toFixed(2)}M` : a >= 1e3 ? `${+(a / 1e3).toFixed(1)}k` : step < 1 ? a.toFixed(2) : `${+a.toFixed(0)}`;
+  return (n < 0 && a > 0 ? '-' : '') + s;
+}
+
+interface Scale { lo: number; hi: number; step: number; ticks: number[] }
+
+/** A round step giving about 4 intervals over `span`. */
+function niceStep(span: number): number {
+  const raw = span / 4;
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  return [1, 2, 2.5, 5, 10].map(f => f * mag).find(s => s >= raw) ?? 10 * mag;
+}
+
+function tickList(lo: number, hi: number, step: number): number[] {
+  const ticks: number[] = [];
+  for (let t = Math.ceil(lo / step - 1e-9) * step; t <= hi + 1e-9 * step; t += step) ticks.push(+t.toFixed(6));
+  return ticks;
 }
 
 /**
- * Scale domain and 3-5 round ticks covering [lo, hi] (always including 0). A small negative value (a reversal) gets a
- * little room below zero instead of a whole empty tick band.
+ * Bar panel: domain and 3-5 round ticks covering [lo, hi], always including 0 (bars start at zero). A small negative
+ * value (a reversal) gets a little room below zero instead of a whole empty tick band. All zero: the zero line only.
  */
-function scale(lo: number, hi: number): { lo: number; hi: number; ticks: number[] } {
+function barScale(lo: number, hi: number): Scale {
   lo = Math.min(0, lo);
   hi = Math.max(0, hi);
-  if (lo === hi) hi = 1;
-  const raw = (hi - lo) / 4;
-  const mag = 10 ** Math.floor(Math.log10(raw));
-  const step = [1, 2, 2.5, 5, 10].map(f => f * mag).find(s => s >= raw) ?? 10 * mag;
+  if (lo === hi) return { lo: -1, hi: 1, step: 1, ticks: [0] };
+  const step = niceStep(hi - lo);
   const top = Math.ceil(hi / step - 1e-9) * step;
   const floor = Math.floor(lo / step + 1e-9) * step;
   const bottom = lo < 0 ? Math.max(floor, lo - 0.08 * (top - lo)) : 0;
-  const ticks: number[] = [];
-  for (let t = Math.ceil(bottom / step - 1e-9) * step; t <= top + 1e-9 * step; t += step) ticks.push(+t.toFixed(6));
-  return { lo: bottom, hi: top, ticks };
+  return { lo: bottom, hi: top, step, ticks: tickList(bottom, top, step) };
+}
+
+/** Line panel (review m3): fitted to the closing balances with some padding; zero only when the data reach it. */
+function lineScale(lo: number, hi: number): Scale {
+  if (lo === 0 && hi === 0) return { lo: 0, hi: 1, step: 1, ticks: [0] }; // no balance yet: the zero line only
+  const pad = hi > lo ? (hi - lo) * 0.15 : Math.max(Math.abs(hi) * 0.05, 1);
+  let a = lo - pad, b = hi + pad;
+  if (lo >= 0 && a < 0) a = 0; // never invent a negative balance on the axis
+  if (hi <= 0 && b > 0) b = 0;
+  const step = niceStep(b - a);
+  a = Math.floor(a / step + 1e-9) * step;
+  b = Math.ceil(b / step - 1e-9) * step;
+  return { lo: a, hi: b, step, ticks: tickList(a, b, step) };
 }
 
 interface Bar { x: number; y: number; w: number; h: number; cls: string; title: string }
@@ -157,7 +182,7 @@ export class CashFlowChartComponent implements AfterViewInit, OnDestroy {
 
     // Top panel scale: bars and net markers.
     const vals = months.flatMap(m => [+m.inflow, +m.outflow, +m.net]);
-    const ts = scale(Math.min(...vals), Math.max(...vals));
+    const ts = barScale(Math.min(...vals), Math.max(...vals));
     const ty = (v: number) => top + topH - ((v - ts.lo) / (ts.hi - ts.lo)) * topH;
     const bw = Math.max(2, Math.min(18, (slot - 8) / 2));
     const bars: Bar[] = [];
@@ -166,16 +191,21 @@ export class CashFlowChartComponent implements AfterViewInit, OnDestroy {
       const name = monthLabel(m.month);
       const bar = (v: string, x: number, cls: string, series: string, note = '') => {
         const y0 = ty(0), y1 = ty(+v);
-        bars.push({ x, y: Math.min(y0, y1), w: bw, h: Math.max(Math.abs(y1 - y0), +v !== 0 ? 1 : 0), cls, title: `${name} - ${series} ${money(v)}${note}` });
+        // A non-zero amount is at least 2 px tall, on its own side of the zero line.
+        const hgt = +v !== 0 ? Math.max(Math.abs(y1 - y0), 2) : 0;
+        bars.push({ x, y: +v < 0 ? y0 : y0 - hgt, w: bw, h: hgt, cls, title: `${name} - ${series} ${money(v)}${note}` });
       };
       bar(m.inflow, cx(i) - bw - 1, 'cf-in', 'Inflow', +m.inflow < 0 ? ' (includes reversals)' : '');
       bar(m.outflow, cx(i) + 1, 'cf-out', 'Outflow', +m.outflow < 0 ? ' (includes reversals)' : '');
-      nets.push({ x: cx(i), y: ty(+m.net), title: `${name} - Net change ${money(m.net)}` });
+      // A tiny non-zero net (e.g. -4,000 on a 1M scale) sits visibly on its side of the zero line (min 7 px).
+      const n = +m.net, y0 = ty(0);
+      const ny = n === 0 ? y0 : n < 0 ? Math.max(ty(n), y0 + 7) : Math.min(ty(n), y0 - 7);
+      nets.push({ x: cx(i), y: ny, title: `${name} - Net change ${money(m.net)}` });
     });
 
     // Bottom panel scale: closing balance.
     const closes = months.map(m => +m.closing);
-    const bs = scale(Math.min(...closes), Math.max(...closes));
+    const bs = lineScale(Math.min(...closes), Math.max(...closes));
     const by = (v: number) => bottomTop + botH - ((v - bs.lo) / (bs.hi - bs.lo)) * botH;
     const points: Pt[] = months.map((m, i) => ({ x: cx(i), y: by(+m.closing), title: `${monthLabel(m.month)} - Closing balance ${money(m.closing)}` }));
 
@@ -186,8 +216,8 @@ export class CashFlowChartComponent implements AfterViewInit, OnDestroy {
 
     return {
       w, h, left, right, bottomTop, bars, nets, points, labels,
-      topTicks: ts.ticks.map(v => ({ v, y: ty(v), label: compact(v) })),
-      botTicks: bs.ticks.map(v => ({ v, y: by(v), label: compact(v) })),
+      topTicks: ts.ticks.map(v => ({ v, y: ty(v), label: compact(v, ts.step) })),
+      botTicks: bs.ticks.map(v => ({ v, y: by(v), label: compact(v, bs.step) })),
       line: points.map(p => `${p.x},${p.y}`).join(' '),
     };
   });

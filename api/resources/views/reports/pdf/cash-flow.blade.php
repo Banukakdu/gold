@@ -18,5 +18,5 @@
     <tr class="b"><td>Total</td>@foreach ($cols as $k => $label)<td class="num">{{ $m($data['total'][$k]) }}</td>@endforeach</tr>
     </tbody>
 </table>
-@foreach ($data['notes'] as $note)<p class="note">{{ $note }}</p>@endforeach
+@foreach ($notes as $note)<p class="note">{{ $note }}</p>@endforeach
 @endsection

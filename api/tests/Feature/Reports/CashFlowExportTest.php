@@ -123,7 +123,7 @@ class CashFlowExportTest extends CashFlowTestCase
         [$head, $labels, $rows] = $this->sheetRows($ws);
         $this->assertSame('Eliminated', end($labels));
         $this->assertSame(['300,000.00', '150,000.00', '0.00', '450,000.00'], array_column(array_values($rows), 'Eliminated'));
-        $this->assertSame(['970,000.00', '1,051,500.00', '1,047,500.00', '1,047,500.00'], array_column(array_values($rows), 'Closing'));
+        $this->assertSame(['970,000.00', '1,051,500.00', '1,047,500.00', '1,047,500.00'], array_column(array_values($rows), 'Closing (cumulative)'));
         $this->assertSame('-4,000.00', $rows['Nov 2026']['Income received']); // signed numeric
         // Month: a real date cell (1st of the month) formatted mmm yyyy; amounts numeric #,##0.00.
         $this->assertSame('n', $ws->getCell([1, $head + 1])->getDataType());
@@ -149,7 +149,7 @@ class CashFlowExportTest extends CashFlowTestCase
 
         $ws = $this->xlsx($this->export($q, 'xlsx', $gal, $this->gal->id)->assertOk())->getSheet(0);
         [$head, , $rows] = $this->sheetRows($ws);
-        $this->assertSame(['-4,000.00', '133,200.00'], [$rows['Nov 2026']['Income received'], $rows['Nov 2026']['Closing']]);
+        $this->assertSame(['-4,000.00', '133,200.00'], [$rows['Nov 2026']['Income received'], $rows['Nov 2026']['Closing (cumulative)']]);
         $this->assertContains(ReportService::CASH_FLOW_NEGATIVE_NOTE, $this->notesBelow($ws, $head + 2));
 
         $pdf = implode(' ', $this->pdfPages($this->export($q, 'pdf', $gal, $this->gal->id)->assertOk()->getContent()));
@@ -176,10 +176,20 @@ class CashFlowExportTest extends CashFlowTestCase
         $this->assertSame(['0.30', '294300.30'], [$screen['income'], $screen['closing']]);
 
         [, , $rows] = $this->sheetRows($this->xlsx($this->export($q, 'xlsx')->assertOk())->getSheet(0));
-        $this->assertSame(['0.30', '294,300.30'], [$rows['Nov 2026']['Income received'], $rows['Nov 2026']['Closing']]);
+        $this->assertSame(['0.30', '294,300.30'], [$rows['Nov 2026']['Income received'], $rows['Nov 2026']['Closing (cumulative)']]);
         $pdf = implode(' ', $this->pdfPages($this->export($q, 'pdf')->assertOk()->getContent()));
         $this->assertStringContainsString('294,300.30', $pdf);
         $this->assertMatchesRegularExpression('/(?<![\d,])0\.30/', $pdf);
+    }
+
+    /** Review m6: the 24-month maximum (15 columns) fits one landscape PDF page with every month and the total. */
+    public function test_pdf_at_24_months_is_one_page(): void
+    {
+        $pages = $this->pdfPages($this->export(['from' => '2024-12-01', 'to' => '2026-11-30'], 'pdf', $this->admin, 'all')->assertOk()->getContent());
+        $this->assertCount(1, $pages);
+        foreach (['Dec 2024', 'Nov 2026', 'Total', '1,047,500.00', '450,000.00', 'Page 1 of 1', 'Dec 2024 - Nov 2026 (FY 2024-25, FY 2025-26 and FY 2026-27 to date)'] as $text) {
+            $this->assertStringContainsString($text, $pages[0]);
+        }
     }
 
     /** Text cells of column A below a row (the sheet notes). */
