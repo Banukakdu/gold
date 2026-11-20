@@ -418,6 +418,7 @@ describe('AG-066 expense templates (web)', () => {
       template_reviewed_version: 1, template_reviewed_ref: 'KDY-EXP-2026-000509', template_changed_since_review: true,
       template_review_changes: ['account_id', 'payee_payer'], template_review_values: { account_id: 12, payee_payer: 'A. Silva' },
       template_review_labels: { account_id: 'Cash' }, template_changed_on: '2026-11-19', template_changed_by: 'KDY Accountant',
+      template_authors: [5, 3], template_author_names: ['KDY Branch Admin', 'KDY Accountant'],
       duplicate_confirmed: true, duplicate_of: ['KDY-EXP-2026-000510'], duplicate_period: 'November 2026',
       duplicate_entries: [{ id: 510, ref_no: 'KDY-EXP-2026-000510', date: '2026-11-20', status: 'pending' }],
     };
@@ -426,7 +427,7 @@ describe('AG-066 expense templates (web)', () => {
       expect(approvalTemplateLines(facts).map(l => l.text)).toEqual([
         'From template Rent - Kandy office',
         'Changed from template: Amount (template 150,000.00), Paid to (template S. Fernando (landlord))',
-        'Template changed since its last approved use (KDY-EXP-2026-000509, version 1 -> 2, last changed 2026-11-19 by KDY Accountant): '
+        'Template changed since its last approved use (KDY-EXP-2026-000509, version 1 -> 2, changed by KDY Branch Admin, KDY Accountant, last on 2026-11-19): '
           + 'Paid from (was Cash), Paid to (was A. Silva)',
         'Second use for November 2026, confirmed by the requester: KDY-EXP-2026-000510 (Pending approval, 2026-11-20)',
       ]);
@@ -463,11 +464,20 @@ describe('AG-066 expense templates (web)', () => {
         requested_by: { id: 9, name: 'KDY Cashier' }, requested_by_you: false, requester_inactive: false, requester_left_branch: false,
         super_admin_only: false, approver_onboarded_requester: false, requested_period_locked: false, can_approve: true, can_cancel: false, ...facts,
       } as ExpenseRowWithTemplate;
-      const w: ExpenseApprovals = { threshold: '50000.00', negative_balance: 'block', to_approve: { data: [row], total: 1, amount: '140000.00' },
+      const authored = { ...row, id: 512, ref_no: 'KDY-EXP-2026-000512', can_approve: false, template_author: true } as ExpenseRowWithTemplate;
+      const w: ExpenseApprovals = { threshold: '50000.00', negative_balance: 'block', to_approve: { data: [row, authored], total: 2, amount: '280000.00' },
         my_requests: { data: [], total: 0 } };
       http.expectOne('/api/v1/expense-approvals').flush(w);
       await settle(m.fixture);
       const table = el.querySelector('.ea-table')!;
+      // R7b: the author's row shows the tag and no buttons (table and card).
+      const authoredRow = Array.from(table.querySelectorAll('tbody tr')).find(r => r.textContent!.includes('KDY-EXP-2026-000512'))!;
+      expect(authoredRow.textContent).toContain('Another approver must decide');
+      expect(button(authoredRow, 'Approve')).toBeUndefined();
+      expect(button(authoredRow, 'Reject')).toBeUndefined();
+      const authoredCard = Array.from(el.querySelectorAll('.ea-cards .ea-card')).find(c => c.textContent!.includes('KDY-EXP-2026-000512'))!;
+      expect(authoredCard.textContent).toContain('Another approver must decide');
+      expect(button(authoredCard, 'Approve')).toBeUndefined();
       expect(table.textContent).toContain('From template Rent - Kandy office');
       expect(table.textContent).toContain('Second use for November 2026, confirmed by the requester');
       expect(el.querySelector('.ea-cards')!.textContent).toContain('Changed from template: Amount (template 150,000.00)');
@@ -475,7 +485,7 @@ describe('AG-066 expense templates (web)', () => {
       await settle(m.fixture);
       const dlg = el.querySelector<HTMLElement>('[role="dialog"]')!;
       expect(dlg.textContent).toContain('From template Rent - Kandy office');
-      expect(dlg.textContent).toContain('Template changed since its last approved use (KDY-EXP-2026-000509, version 1 -> 2');
+      expect(dlg.textContent).toContain('Template changed since its last approved use (KDY-EXP-2026-000509, version 1 -> 2, changed by KDY Branch Admin, KDY Accountant');
       const warns = Array.from(dlg.querySelectorAll('.tpl-facts li.warn')).map(li => li.textContent!);
       expect(warns.length).toBe(2);
       expect(warns[1]).toContain('Second use for November 2026');

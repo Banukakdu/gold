@@ -432,6 +432,7 @@ class ExpenseTemplates
             $out += ['template_first_review' => true, 'template_changed_since_review' => false,
                 'template_unreviewed_uses' => $tpl->uses->filter(fn (Transaction $t) => self::counts($t))->count()];
         }
+        $out += $this->authors($tpl, $reviewedVersion);
         $out += ['template_created_on' => $tpl->created_at?->copy()->setTimezone(BusinessDate::timezone())->format('Y-m-d'),
             'template_created_by' => $tpl->creator?->name];
         if ($version > 1 && ($last = $this->lastChanges([$tpl->id])[$tpl->id] ?? null)) {
@@ -442,6 +443,27 @@ class ExpenseTemplates
         }
 
         return $out;
+    }
+
+    /**
+     * R7b (accountant sign-off finding A): who set up or changed the template since its last approved use. With no
+     * approved use, the authors of every `expense_template.created` and `expense_template.updated` row; otherwise the
+     * authors of the `updated` rows above the reviewed version (none when unchanged). A non-Super-Admin among them may
+     * not approve or reject this use (ExpenseApprovals::templateAuthor). Names in the same order, for the R7a line.
+     *
+     * @return array{template_authors: list<int>, template_author_names: list<string>}
+     */
+    private function authors(RecurringTemplate $tpl, ?int $reviewedVersion): array
+    {
+        $rows = AuditLog::with('user:id,name')->whereIn('event', ['expense_template.created', 'expense_template.updated'])
+            ->where('auditable_type', RecurringTemplate::class)->where('auditable_id', $tpl->id)->whereNotNull('user_id')->orderBy('id')
+            ->get(['id', 'event', 'user_id', 'new_values'])
+            ->filter(fn (AuditLog $a) => $reviewedVersion === null
+                || ($a->event === 'expense_template.updated' && (int) ($a->new_values['version'] ?? 0) > $reviewedVersion))
+            ->unique('user_id')->values();
+
+        return ['template_authors' => $rows->map(fn (AuditLog $a) => (int) $a->user_id)->all(),
+            'template_author_names' => $rows->map(fn (AuditLog $a) => $a->user?->name ?? '#'.$a->user_id)->all()];
     }
 
     /**
@@ -699,6 +721,8 @@ class ExpenseTemplates
             'template_changed_on' => $a['template_changed_on'] ?? null,
             'template_changed_by' => $a['template_changed_by'] ?? null,
             'template_same_name_archived' => $a['template_same_name_archived'] ?? null,
+            'template_authors' => array_values(array_map('intval', (array) ($a['template_authors'] ?? []))),
+            'template_author_names' => array_values((array) ($a['template_author_names'] ?? [])),
             'duplicate_confirmed' => (bool) ($a['duplicate_confirmed'] ?? false),
             'duplicate_of' => array_values((array) ($a['duplicate_of'] ?? [])),
             'duplicate_period' => $a['duplicate_period'] ?? null,

@@ -59,6 +59,9 @@ export interface TemplateFacts {
   template_created_by?: string | null;
   template_changed_on?: string | null;
   template_changed_by?: string | null;
+  /** R7b: who set up or changed the template since its last approved use (ids and names, same order). */
+  template_authors?: number[];
+  template_author_names?: string[];
   template_same_name_archived?: { id: number; name: string; archived_on: string; archived_by: string | null; reason: string | null } | null;
   duplicate_confirmed?: boolean;
   duplicate_of?: string[];
@@ -117,7 +120,10 @@ export function approvalTemplateLines(f: TemplateFacts | null | undefined): Temp
   } else if (f.template_changed_since_review) {
     const version = f.template?.version;
     const versions = f.template_reviewed_version && version ? `version ${f.template_reviewed_version} -> ${version}` : '';
-    const detail = [f.template_reviewed_ref ?? '', versions, lastChange].filter(Boolean).join(', ');
+    // Sign-off finding B: everyone who changed it since then, and when it last changed.
+    const names = f.template_author_names?.length ? f.template_author_names : (f.template_changed_by ? [f.template_changed_by] : []);
+    const changed = names.length ? `changed by ${names.join(', ')}${f.template_changed_on ? `, last on ${f.template_changed_on}` : ''}` : lastChange;
+    const detail = [f.template_reviewed_ref ?? '', versions, changed].filter(Boolean).join(', ');
     const fields = reviewChangesText(f);
     lines.push({ text: `Template changed since its last approved use${detail ? ` (${detail})` : ''}${fields ? ': ' + fields : ''}`, warn: true });
   }

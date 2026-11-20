@@ -15,6 +15,8 @@ export interface ExpenseRow {
   below_threshold_7d: { count: number; amount: string }; requested_by: { id: number; name: string } | null; requested_by_you: boolean;
   requester_inactive: boolean; requester_left_branch: boolean; super_admin_only: boolean; approver_onboarded_requester: boolean;
   requested_period_locked: boolean; can_approve: boolean; can_cancel: boolean;
+  /** AG-066 R7b: you set up or changed its template since its last approved use. */
+  template_author?: boolean;
 }
 /** AG-066 R7a: the row carries the template facts of the request's audit row. */
 export type ExpenseRowWithTemplate = ExpenseRow & TemplateFacts;
@@ -62,7 +64,8 @@ export function signedCents(v: string | null | undefined): number {
                       <td>{{ t.requested_on | appDate }}<br /><small class="muted">{{ t.age_days }} day{{ t.age_days === 1 ? '' : 's' }}</small></td>
                       <td><a class="mono" [routerLink]="['/transactions', t.id]">{{ t.ref_no }}</a>
                         @if (t.super_admin_only) { <br /><span class="tag" data-s="pending">Super Admin approval</span> }
-                        @if (t.approver_onboarded_requester) { <br /><span class="tag" data-s="pending" title="Super Admins will be told of your approval">You added this requester</span> }</td>
+                        @if (t.approver_onboarded_requester) { <br /><span class="tag" data-s="pending" title="Super Admins will be told of your approval">You added this requester</span> }
+                        @if (t.template_author) { <br /><span class="tag" data-s="pending" title="You set up or changed this template since its last approved use">Another approver must decide</span> }</td>
                       <td>{{ t.account.name }}<br /><small class="ea-path" [title]="t.category_path">{{ t.category_path }}</small>
                         @for (l of lines(t); track $index) { <br /><small class="tpl-fact" [class.tpl-warn]="l.warn">{{ l.text }}</small> }</td>
                       <td class="ta-note">{{ t.payee_payer }}</td>
@@ -104,6 +107,7 @@ export function signedCents(v: string | null | undefined): number {
                     @if (!t.files_count) { <span class="tag" data-s="pending">No receipt</span> }
                     @if (t.super_admin_only) { <span class="tag" data-s="pending">Super Admin approval</span> }
                     @if (t.approver_onboarded_requester) { <span class="tag" data-s="pending">You added this requester</span> }
+                    @if (t.template_author) { <span class="tag" data-s="pending">Another approver must decide</span> }
                     @if (t.requester_inactive) { <span class="tag">Inactive</span> }
                     @if (t.requester_left_branch) { <span class="tag">No longer in this branch</span> }
                     @if (t.below_threshold_7d.count) { <span>Below the limit, 7 days: {{ t.below_threshold_7d.count }}, {{ t.below_threshold_7d.amount | money }}</span> }
