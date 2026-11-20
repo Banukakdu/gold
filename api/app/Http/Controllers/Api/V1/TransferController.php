@@ -47,14 +47,24 @@ class TransferController extends Controller
             'amount' => 'required|numeric|gt:0|decimal:0,2', 'txn_date' => 'required|date_format:Y-m-d|before_or_equal:'.BusinessDate::today(),
             'note' => 'required|string|max:500',
         ]);
-        Account::findOrFail($d['from_account_id']); // branch-scoped: must be own branch
-        Account::withoutGlobalScopes()->findOrFail($d['to_account_id']);
+        $from = Account::with('branch')->findOrFail($d['from_account_id']); // branch-scoped: must be own branch
+        $to = Account::withoutGlobalScopes()->with('branch')->findOrFail($d['to_account_id']);
+        // Fund return G4 / R9: Main -> branch is an allocation, Super Admin only. Checked before anything is posted.
+        if ($from->branch->is_main && ! $to->branch->is_main && ! $request->user()->is_super_admin) {
+            abort(403, self::MAIN_TO_BRANCH);
+        }
 
         return response()->json($this->ledger->transfer($d['from_account_id'], $d['to_account_id'], (string) $d['amount'], $d['txn_date'], $d['note']), 201);
     }
 
-    /** Types only a Super Admin may post, so only a Super Admin may reverse them (controls review finding 8). */
-    public const SUPER_ADMIN_TYPES = [Transaction::CAPITAL, Transaction::OPENING_ALLOCATION, Transaction::FUND_ALLOCATION];
+    public const MAIN_TO_BRANCH = 'Only a Super Admin can send funds from Main to a branch. Use "Fund a branch".';
+
+    /**
+     * Types only a Super Admin may reverse (controls review finding 8). Capital and allocations are Super Admin only to
+     * post; a fund return's reversal credits Main's money account, i.e. sends Main's money back to the branch
+     * (fund return G5, accounting review MUST 2).
+     */
+    public const SUPER_ADMIN_TYPES = [Transaction::CAPITAL, Transaction::OPENING_ALLOCATION, Transaction::FUND_ALLOCATION, Transaction::FUND_RETURN];
 
     /** AG-054 */
     public function reverse(Request $request, Transaction $transaction)

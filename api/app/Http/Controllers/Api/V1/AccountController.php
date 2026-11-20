@@ -29,7 +29,7 @@ class AccountController extends Controller
     /** Accounts of every branch, for picking a transfer destination (no balances exposed). */
     public function destinations()
     {
-        return Account::withoutGlobalScopes()->money()->with('branch:id,code,name')
+        return Account::withoutGlobalScopes()->money()->with('branch:id,code,name,is_main')
             ->where('status', 'active')->orderBy('branch_id')->get(['id', 'branch_id', 'name', 'type']);
     }
 
