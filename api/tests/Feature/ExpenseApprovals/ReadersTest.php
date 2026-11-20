@@ -87,6 +87,40 @@ class ReadersTest extends ExpenseApprovalTestCase
             ->expectsOutputToContain($inc['ref_no'])->assertExitCode(1);
     }
 
+    /** Review 1 (blocker): an approved expense voided through the normal void (R1) keeps verify green; a voided transfer would not. */
+    public function test_ac22_an_approved_expense_voided_later_passes_v9(): void
+    {
+        $e1 = $this->e1();
+        $this->approve($e1->id, body: ['comment' => 'Bill seen at the counter'])->assertOk();
+        $this->as($this->acc, $this->kdy)->postJson("/api/v1/transactions/{$e1->id}/void", ['reason' => 'Paid twice by mistake'])->assertOk();
+        $this->assertSame(['void', 'approved'], [$e1->fresh()->status, $e1->fresh()->approval_status]);
+        $this->assertVerifies();
+
+        DB::table('transactions')->where('id', $e1->id)->update(['type' => 'branch_transfer']);
+        $this->artisan('ledger:verify')->expectsOutputToContain('status void disagrees with approval_status approved')->assertExitCode(1);
+    }
+
+    /** Review 6: the widget's query count does not grow with its rows (no per-row R4a / R4b / lock queries). */
+    public function test_ac24_the_widget_has_no_per_row_queries(): void
+    {
+        $count = function (): int {
+            $this->widget($this->kdyBa, $this->kdy); // warm caches (permissions, settings)
+            DB::flushQueryLog();
+            DB::enableQueryLog();
+            $this->widget($this->kdyBa, $this->kdy);
+            DB::disableQueryLog();
+
+            return count(DB::getQueryLog());
+        };
+        $this->e1();
+        $one = $count();
+        foreach (['2026-11-10', '2026-11-01', '2026-11-19', '2026-11-12'] as $date) {
+            $this->e1('60000.00', $date);
+        }
+        $this->assertCount(5, $this->widget($this->kdyBa, $this->kdy)['to_approve']['data']);
+        $this->assertSame($one, $count()); // lock checks are per requested month, everything else per page
+    }
+
     public function test_ac23_lock_review_counts_pending_expenses_and_never_blocks(): void
     {
         $this->e1();

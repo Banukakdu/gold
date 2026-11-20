@@ -317,6 +317,8 @@ ag-notification-bell { position: relative; display: flex; margin-left: auto; }
 .nb-dot { display: inline-block; width: 8px; height: 8px; border-radius: 4px; background: var(--gold-2); margin: 0 6px 1px 0; }
 .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 30; max-width: calc(100vw - 32px); pointer-events: none;
   span { display: block; background: var(--ink); color: #fff; padding: 10px 14px; border-radius: 8px; box-shadow: 0 6px 18px rgba(0, 0, 0, .2); } }
+/* AG-064 S2: the R17 over-commitment warning follows the success toast in the warning colour. */
+.toast span.toast-warn { background: #fdf0d5; color: #8a5a00; border: 1px solid #f1d9a6; }
 
 /* AG-094 S2 Notifications page: a list laid out as columns, stacked cards at phone width (no table, no side scroll). */
 .nt-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; h1 { margin: 0; } }

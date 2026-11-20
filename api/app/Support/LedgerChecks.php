@@ -56,7 +56,7 @@ final class LedgerChecks
      * V9 (AG-051, accounting review MUST 2; AG-064 R13): a request that never posted has zero ledger lines, approval_status
      * appears only on a type that can be held, and status
      * agrees with approval_status (pending <-> pending; rejected / cancelled / expired <-> rejected; approved <->
-     * posted | reversed; status pending / rejected only with an approval_status). Offenders as [ref, date, branch, problem].
+     * posted | reversed, or void for an expense; status pending / rejected only with an approval_status). Offenders as [ref, date, branch, problem].
      */
     public static function approvalRequests(): Collection
     {
@@ -71,7 +71,9 @@ final class LedgerChecks
         $disagree = $base()->where(fn ($w) => $w
             ->where(fn ($x) => $x->where('t.approval_status', 'pending')->where('t.status', '!=', 'pending'))
             ->orWhere(fn ($x) => $x->whereIn('t.approval_status', $closed)->where('t.status', '!=', 'rejected'))
-            ->orWhere(fn ($x) => $x->where('t.approval_status', 'approved')->whereNotIn('t.status', ['posted', 'reversed']))
+            // An approved expense may later be voided through the normal void (AG-064 R1); transfers are reversed instead.
+            ->orWhere(fn ($x) => $x->where('t.approval_status', 'approved')->whereNotIn('t.status', ['posted', 'reversed'])
+                ->where(fn ($y) => $y->where('t.type', '!=', 'expense')->orWhere('t.status', '!=', 'void')))
             ->orWhere(fn ($x) => $x->whereIn('t.status', ['pending', 'rejected'])->whereNull('t.approval_status'))
             ->orWhere(fn ($x) => $x->whereNotNull('t.approval_status')->whereNotIn('t.approval_status', ['pending', 'approved', ...$closed]))
             // AG-064 R13: only branch transfers, fund returns and expenses are ever held.

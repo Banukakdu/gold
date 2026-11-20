@@ -185,6 +185,12 @@ class TransactionController extends Controller
         $txn->setAttribute('hold_reason', $txn->holdReason);
         $txn->setAttribute('same_day_total', $txn->sameDayTotal);
         $txn->setAttribute('warning', $txn->requestWarning);
+        // QA D3: every 201 carries the approval fields (null when the expense posted at once).
+        foreach (['approval_status', 'requested_date', 'requested_on'] as $key) {
+            if (! array_key_exists($key, $txn->getAttributes())) {
+                $txn->setAttribute($key, null);
+            }
+        }
 
         return response()->json($txn, 201);
     }

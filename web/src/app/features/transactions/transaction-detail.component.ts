@@ -331,7 +331,7 @@ export class TransactionDetailComponent implements OnInit {
     const base = { id: t.id, ref_no: t.ref_no, amount: t.amount, requested_date: t.requested_date ?? null, requester_inactive: !!t.requester_inactive };
     if (t.type === 'expense') {
       const c = t.category;
-      return { ...base, kind: 'expense', from: t.account?.name ?? '',
+      return { ...base, kind: 'expense', from: `${t.branch?.code ?? ''} ${t.account?.name ?? ''}`.trim(),
         to: c ? (c.parent ? c.parent.name + ' > ' : '') + c.name : '', files_count: t.attachments_count ?? 0,
         approver_onboarded_requester: !!t.approver_onboarded_requester, requested_period_locked: !!t.requested_period_locked };
     }

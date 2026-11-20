@@ -123,7 +123,7 @@ export class BranchListComponent implements OnInit {
       next: r => {
         this.busy.set(false);
         this.editing.set(null);
-        this.ok.set(`${b.code} saved.`);
+        this.ok.set('Branch saved.');
         this.limitWarning.set(r.expense_approval_warning ?? '');
         this.ngOnInit();
       },

@@ -112,7 +112,10 @@ class ExpenseApprovals extends ApprovalRequests
         User::whereKey($user->id)->lockForUpdate()->value('id');
 
         return (int) DB::table('transactions')->where('type', Transaction::EXPENSE)->where('status', 'posted')->whereNull('approval_status')
-            ->where('created_by', $user->id)->where('branch_id', $branchId)->where('category_id', $categoryId)->whereDate('txn_date', $date)
+            ->where('created_by', $user->id)->where('branch_id', $branchId)->where('category_id', $categoryId)
+            // Review 3: a sargable half-open range (not DATE()), so MySQL locks only this user's rows of that category
+            // and day through (created_by, category_id, txn_date). Portable: also matches "Y-m-d 00:00:00" in SQLite.
+            ->where('txn_date', '>=', $date)->where('txn_date', '<', CarbonImmutable::parse($date)->addDay()->toDateString())
             ->lockForUpdate()->selectRaw('COALESCE(SUM('.Money::sqlCents('amount').'), 0) as c')->value('c');
     }
 
@@ -168,11 +171,12 @@ class ExpenseApprovals extends ApprovalRequests
     }
 
     /** R4a: stored at request time in the audit row, or true now; either makes the request Super Admin only. */
-    public function superAdminOnly(Transaction $t, ?array $stored = null): bool
+    public function superAdminOnly(Transaction $t, ?array $stored = null, ?bool $managerNow = null): bool
     {
         $stored ??= $this->requestAudits([$t->id])[$t->id] ?? [];
 
-        return ($stored['super_admin_only'] ?? false) === true || $this->isBranchUserManager((int) $t->created_by, (int) $t->branch_id);
+        return ($stored['super_admin_only'] ?? false) === true
+            || ($managerNow ?? $this->isBranchUserManager((int) $t->created_by, (int) $t->branch_id));
     }
 
     /** @return array<int, array> the expense.approval_requested audit values by transaction id */
@@ -189,18 +193,43 @@ class ExpenseApprovals extends ApprovalRequests
      */
     public function onboardedRequester(Transaction $t, int $approverId): bool
     {
-        $on = $t->requested_on?->format('Y-m-d');
-        if (! $on || ! $t->created_by) {
-            return false;
-        }
+        return $this->onboardedIn($t, $this->onboardings(collect([$t]), $approverId));
+    }
+
+    /** [from, to) in UTC of the R4b window of a request made on $on (Colombo days). */
+    private static function onboardWindow(string $on): array
+    {
         $tz = BusinessDate::timezone();
-        $to = CarbonImmutable::createFromFormat('!Y-m-d', $on, $tz)->addDay()->setTimezone('UTC');
-        $from = CarbonImmutable::createFromFormat('!Y-m-d', $on, $tz)->subDays(self::ONBOARD_DAYS)->setTimezone('UTC');
+        $day = CarbonImmutable::createFromFormat('!Y-m-d', $on, $tz);
+
+        return [$day->subDays(self::ONBOARD_DAYS)->setTimezone('UTC')->format('Y-m-d H:i:s'), $day->addDay()->setTimezone('UTC')->format('Y-m-d H:i:s')];
+    }
+
+    /** Review 6: the approver's onboarding audit rows for the requesters of $rows, in one query. */
+    private function onboardings(Collection $rows, int $approverId): Collection
+    {
+        $rows = $rows->filter(fn ($t) => $t->created_by && $t->requested_on);
+        if ($rows->isEmpty()) {
+            return collect();
+        }
+        $windows = $rows->map(fn ($t) => self::onboardWindow($t->requested_on->format('Y-m-d')));
 
         return AuditLog::whereIn('event', self::ONBOARD_EVENTS)->where('auditable_type', User::class)
-            ->where('auditable_id', $t->created_by)->where('branch_id', $t->branch_id)->where('user_id', $approverId)
-            ->where('created_at', '>=', $from->format('Y-m-d H:i:s'))->where('created_at', '<', $to->format('Y-m-d H:i:s'))
-            ->exists();
+            ->whereIn('auditable_id', $rows->pluck('created_by')->unique()->values()->all())
+            ->whereIn('branch_id', $rows->pluck('branch_id')->unique()->values()->all())->where('user_id', $approverId)
+            ->where('created_at', '>=', $windows->min(fn ($w) => $w[0]))->where('created_at', '<', $windows->max(fn ($w) => $w[1]))
+            ->get(['auditable_id', 'branch_id', 'created_at']);
+    }
+
+    private function onboardedIn(Transaction $t, Collection $audits): bool
+    {
+        if (! $t->created_by || ! $t->requested_on) {
+            return false;
+        }
+        [$from, $to] = self::onboardWindow($t->requested_on->format('Y-m-d'));
+
+        return $audits->contains(fn ($a) => (int) $a->auditable_id === (int) $t->created_by && (int) $a->branch_id === (int) $t->branch_id
+            && ($at = substr((string) $a->getRawOriginal('created_at'), 0, 19)) >= $from && $at < $to);
     }
 
     /** R3: Super Admin (any mode), or `expense.approve` in the active branch (and, when given, that is the expense's). */
@@ -333,7 +362,7 @@ class ExpenseApprovals extends ApprovalRequests
             $toApprove['total'] = (clone $q)->count();
             $toApprove['amount'] = Money::fromCents((int) (clone $q)->toBase()->selectRaw('COALESCE(SUM('.Money::sqlCents('amount').'), 0) as c')->value('c'));
             $rows = $page($q);
-            $data = $this->pageData($rows, $today);
+            $data = $this->pageData($rows, $today, $user);
             $toApprove['data'] = $rows->map(fn (Transaction $t) => $this->row($t, $user, true, $data))->all();
         }
 
@@ -342,7 +371,7 @@ class ExpenseApprovals extends ApprovalRequests
             $q = $pending()->where('created_by', $user->id)->where('branch_id', $ctx->branchId);
             $mine['total'] = (clone $q)->count();
             $rows = $page($q);
-            $data = $this->pageData($rows, $today);
+            $data = $this->pageData($rows, $today, $approver ? $user : null);
             $mine['data'] = $rows->map(fn (Transaction $t) => $this->row($t, $user, $approver, $data))->all();
         }
 
@@ -357,12 +386,28 @@ class ExpenseApprovals extends ApprovalRequests
         ];
     }
 
-    /** The per-page figures (R14, R16, R4a, memberships), a few grouped queries in all. */
-    private function pageData(Collection $rows, string $today): array
+    /** The per-page figures (R14, R16, R4a, R4b, locks, memberships): a few grouped queries per page, none per row. */
+    private function pageData(Collection $rows, string $today, ?User $approver = null): array
     {
         $accounts = $rows->pluck('account_id')->map(fn ($v) => (int) $v)->unique()->values()->all();
+        $notifications = app(InAppNotifications::class);
+        $managers = [];
+        foreach ($rows->pluck('branch_id')->map(fn ($v) => (int) $v)->unique() as $branchId) {
+            $managers[$branchId] = array_flip($notifications->holderIdsOf(self::USER_MANAGER_KEYS, $branchId));
+        }
+        $locked = [];
+        foreach ($rows as $t) {
+            $d = $t->requested_date?->format('Y-m-d');
+            $key = $t->branch_id.':'.substr((string) $d, 0, 7); // locks are monthly and fiscal years start on a month
+            if ($d !== null && ! array_key_exists($key, $locked)) {
+                $locked[$key] = app(YearEnd::class)->closedOrLockedMessage((int) $t->branch_id, $d) !== null;
+            }
+        }
 
         return [
+            'managers' => $managers,
+            'locked' => $locked,
+            'onboardings' => $approver ? $this->onboardings($rows, (int) $approver->id) : collect(),
             'today' => $today,
             'pending' => $this->pendingByAccount($accounts),
             'below' => $this->belowThreshold($rows, $today),
@@ -377,7 +422,7 @@ class ExpenseApprovals extends ApprovalRequests
         $acc = (int) $t->account_id;
         $requestedOn = $t->requested_on?->format('Y-m-d');
         $mine = (int) $t->created_by === (int) $user->id;
-        $superOnly = $this->superAdminOnly($t, $page['audits'][$t->id] ?? []);
+        $superOnly = $this->superAdminOnly($t, $page['audits'][$t->id] ?? [], isset($page['managers'][(int) $t->branch_id][(int) $t->created_by]));
         $u = $t->creator;
         $decides = $approver && ! $mine && ($user->is_super_admin || ! $superOnly);
 
@@ -401,8 +446,8 @@ class ExpenseApprovals extends ApprovalRequests
             'requester_inactive' => $u !== null && $u->status !== 'active',
             'requester_left_branch' => $u !== null && ! $u->is_super_admin && ! isset($page['members'][$u->id.':'.$t->branch_id]),
             'super_admin_only' => $superOnly,
-            'approver_onboarded_requester' => $decides && $this->onboardedRequester($t, (int) $user->id),
-            'requested_period_locked' => $this->requestedPeriodLocked($t),
+            'approver_onboarded_requester' => $decides && $this->onboardedIn($t, $page['onboardings']),
+            'requested_period_locked' => $page['locked'][$t->branch_id.':'.$t->requested_date?->format('Y-m')] ?? false,
             'can_approve' => $decides,
             'can_cancel' => $mine && $user->canDo('expense.create'),
         ];

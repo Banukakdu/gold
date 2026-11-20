@@ -181,7 +181,11 @@ class ApproveTest extends ExpenseApprovalTestCase
             ->assertCreated()->assertJsonPath('status', 'pending')->json('id');
         $e1 = $this->e1();
         $this->approve($t1)->assertStatus(422)->assertJsonPath('message', 'This entry is not waiting for approval.');
-        $this->as($this->mainBa, $this->main)->postJson("/api/v1/transfer-approvals/{$e1->id}/approve", [])
+        // Review 7: Main's transfer approver gets 404 for another branch's expense (no existence leak) ...
+        $this->as($this->mainBa, $this->main)->postJson("/api/v1/transfer-approvals/{$e1->id}/approve", [])->assertNotFound();
+        $this->as($this->mainBa, $this->main)->postJson("/api/v1/transfer-approvals/{$e1->id}/reject", ['comment' => 'Not a transfer at all'])->assertNotFound();
+        // ... and 422 in the expense's own branch.
+        $this->as($this->kdyBa, $this->kdy)->postJson("/api/v1/transfer-approvals/{$e1->id}/approve", [])
             ->assertStatus(422)->assertJsonPath('message', 'This entry is not waiting for approval.');
         $this->as($this->acc, $this->kdy)->postJson("/api/v1/transfer-approvals/{$e1->id}/cancel", [])->assertStatus(422);
         // A posted expense without approval: not waiting either.

@@ -156,8 +156,10 @@ class TransferApprovals extends ApprovalRequests
             return $ctx->allBranches;
         }
 
+        // Main's approver sees other branches' transfer requests only; another kind of row of another branch is a 404
+        // (AG-064 review 7: no existence leak through the transfer routes).
         return (int) $t->branch_id === $ctx->branchId || (int) $t->related_branch_id === $ctx->branchId
-            || $this->isApprover($user, $ctx);
+            || (in_array($t->type, $this->types(), true) && $this->isApprover($user, $ctx));
     }
 
     // ------------------------------------------------------------------ R18 settings warning

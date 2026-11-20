@@ -58,7 +58,8 @@ export function signedCents(v: string | null | undefined): number {
                       @if (auth.isAllBranches()) { <td class="mono">{{ t.branch.code }}</td> }
                       <td>{{ t.requested_on | appDate }}<br /><small class="muted">{{ t.age_days }} day{{ t.age_days === 1 ? '' : 's' }}</small></td>
                       <td><a class="mono" [routerLink]="['/transactions', t.id]">{{ t.ref_no }}</a>
-                        @if (t.super_admin_only) { <br /><span class="tag" data-s="pending">Super Admin approval</span> }</td>
+                        @if (t.super_admin_only) { <br /><span class="tag" data-s="pending">Super Admin approval</span> }
+                        @if (t.approver_onboarded_requester) { <br /><span class="tag" data-s="pending" title="Super Admins will be told of your approval">You added this requester</span> }</td>
                       <td>{{ t.account.name }}<br /><small class="ea-path" [title]="t.category_path">{{ t.category_path }}</small></td>
                       <td class="ta-note">{{ t.payee_payer }}</td>
                       <td class="num">{{ t.amount | money }}</td>
@@ -97,6 +98,7 @@ export function signedCents(v: string | null | undefined): number {
                     @if (short(t)) { <span class="tag" data-s="reversed">Short</span> }
                     @if (!t.files_count) { <span class="tag" data-s="pending">No receipt</span> }
                     @if (t.super_admin_only) { <span class="tag" data-s="pending">Super Admin approval</span> }
+                    @if (t.approver_onboarded_requester) { <span class="tag" data-s="pending">You added this requester</span> }
                     @if (t.requester_inactive) { <span class="tag">Inactive</span> }
                     @if (t.requester_left_branch) { <span class="tag">No longer in this branch</span> }
                     @if (t.below_threshold_7d.count) { <span>Below the limit, 7 days: {{ t.below_threshold_7d.count }}, {{ t.below_threshold_7d.amount | money }}</span> }
@@ -180,7 +182,7 @@ export class ExpenseApprovalsComponent implements OnInit {
   load() {
     this.http.get<ExpenseApprovals>('/api/v1/expense-approvals').subscribe({
       next: r => { this.r.set(r); this.error.set(''); },
-      error: () => this.error.set('Could not load the expenses to approve.'),
+      error: e => this.error.set(errorText(e)),
     });
   }
 
@@ -194,8 +196,8 @@ export class ExpenseApprovalsComponent implements OnInit {
     const warn = this.r()?.negative_balance === 'warn';
     this.dialog.set({ mode, target: {
       kind: 'expense', id: t.id, ref_no: t.ref_no, amount: t.amount, requested_date: t.requested_date, requester_inactive: t.requester_inactive,
-      from: t.account.name ?? '', to: t.category_path, files_count: t.files_count,
-      below_zero_line: warn && this.short(t) ? `This will take ${t.account.name} below zero.` : null,
+      from: `${t.branch.code} ${t.account.name}`, to: t.category_path, files_count: t.files_count,
+      below_zero_line: warn && this.short(t) ? `This will take ${t.branch.code} ${t.account.name} below zero.` : null,
       approver_onboarded_requester: t.approver_onboarded_requester, requested_period_locked: t.requested_period_locked,
     } });
   }

@@ -32,7 +32,7 @@ function setup(branch = KDY_ADMIN, superAdmin = false) {
 function e1(over: Partial<ExpenseRow> = {}): ExpenseRow {
   return {
     id: 41, ref_no: 'KDY-EXP-2026-000456', branch: { id: 2, code: 'KDY' }, requested_date: '2026-11-18', requested_on: '2026-11-18',
-    age_days: 2, expires_on: '2026-12-18', account: { id: 5, name: 'KDY Cash', available: '200000.00' },
+    age_days: 2, expires_on: '2026-12-18', account: { id: 5, name: 'Cash', available: '200000.00' },
     category_path: 'Utilities > Electricity and other very long sub-category names that must wrap', payee_payer: 'CEB',
     amount: '75000.00', other_pending_from_account: '0.00', files_count: 1, below_threshold_7d: { count: 0, amount: '0.00' },
     requested_by: { id: 9, name: 'KDY Cashier' }, requested_by_you: false, requester_inactive: false, requester_left_branch: false,
@@ -103,6 +103,7 @@ describe('AG-064 expense approvals (web)', () => {
       await amount(f, '50000');
       expect(el.textContent).not.toContain('needs approval before it is posted');
       expect(button(el, 'Save expense')).toBeTruthy();
+      expect(el.textContent).toContain('Expenses above 50,000.00 need approval in this branch.'); // QA D7, read-only
       await amount(f, '50000.01');
       expect(button(el, 'Send for approval')).toBeTruthy();
     });
@@ -117,6 +118,22 @@ describe('AG-064 expense approvals (web)', () => {
       f = await form(false, null);
       await amount(f, '75000');
       expect(button(el, 'Save expense')).toBeTruthy();
+    });
+
+    it('S2 (QA D6): the success toast, then the R17 warning as a warning toast', async () => {
+      const f = await form();
+      await amount(f, '75000');
+      el.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit'));
+      f.detectChanges();
+      http.expectOne(r => r.method === 'POST' && r.url === '/api/v1/expenses').flush({ id: 41, ref_no: 'KDY-EXP-2026-000456', status: 'pending',
+        hold_reason: 'threshold', same_day_total: null, warning: 'Other requests on this account already wait for 225,000.00; together they exceed the balance.' });
+      const toast = TestBed.inject(ToastService);
+      expect(toast.text()).toBe('KDY-EXP-2026-000456 sent for approval. Balances do not change until it is approved.');
+      expect(toast.kind()).toBe('info');
+      http.match(() => true).forEach(r => r.flush([]));
+      await new Promise(r => setTimeout(r, 4100));
+      expect(toast.text()).toContain('together they exceed the balance');
+      expect(toast.kind()).toBe('warning');
     });
 
     it('AC 37: at 390px the hint wraps inside the form, no horizontal scroll', async () => {
@@ -199,6 +216,23 @@ describe('AG-064 expense approvals (web)', () => {
       http.match(() => true).forEach(r => r.flush(widget([])));
       await settle();
       expect(el.textContent).toContain('KDY-EXP-2026-000456 rejected.');
+    });
+
+    it('S3 (QA D2): an R4b row shows "You added this requester" in the table and on the card', () => {
+      start([e1({ approver_onboarded_requester: true })]);
+      expect(el.querySelector('.ea-table')!.textContent).toContain('You added this requester');
+      expect(el.querySelector('.ea-cards')!.textContent).toContain('You added this requester');
+    });
+
+    it('S3 (review 8): a failed load shows the API message', () => {
+      setup();
+      http = TestBed.inject(HttpTestingController);
+      const m = mount(ExpenseApprovalsComponent);
+      el = m.el;
+      m.fixture.detectChanges();
+      http.expectOne('/api/v1/expense-approvals').flush({ message: 'Account inactive.' }, { status: 403, statusText: 'Forbidden' });
+      m.fixture.detectChanges();
+      expect(el.textContent).toContain('Account inactive.');
     });
 
     it('S3: Super Admin only rows have the tag and no buttons; own rows say "Requested by you"', () => {
@@ -286,6 +320,7 @@ describe('AG-064 expense approvals (web)', () => {
       put.flush({ id: 2, expense_approval_threshold: '50000.00', expense_approval_warning: "Only the Super Admin can approve KDY's expenses above the limit." });
       http.expectOne('/api/v1/branches').flush([{ ...list[0], expense_approval_threshold: '50000.00' }]);
       await settle();
+      expect(el.textContent).toContain('Branch saved.');
       expect(el.querySelector('.warn')!.textContent).toContain("Only the Super Admin can approve KDY's expenses above the limit.");
       expect(el.querySelector('table')!.textContent).toContain('50,000.00');
     });

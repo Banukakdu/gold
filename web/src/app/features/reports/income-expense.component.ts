@@ -72,7 +72,9 @@ interface IncomeExpense extends ReportMeta {
         @if (r.net !== null) {
           <div class="card"><table><tr class="sub"><td>Net (income - expenses)</td><td class="num" [class.neg]="+r.net < 0">{{ r.net | money }}</td></tr></table></div>
         }
-        @if (r.pending_approval?.count) {
+      }
+      <!-- AG-064 S7 (QA D1): shown whenever requests wait, also when the period has no posted rows. -->
+      @if (r.pending_approval?.count) {
           <div class="card section">
             <h2>Expenses pending approval now (not included above)</h2>
             <table class="list">
@@ -86,7 +88,6 @@ interface IncomeExpense extends ReportMeta {
             </table>
             <p class="muted">{{ r.pending_approval!.count }} pending, {{ r.pending_approval!.amount | money }}</p>
           </div>
-        }
       }
     }
   `,

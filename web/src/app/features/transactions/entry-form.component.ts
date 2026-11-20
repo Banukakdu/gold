@@ -49,6 +49,9 @@ interface BranchLimit { id: number; expense_approval_threshold?: string | null }
       @if (needsApproval()) {
         <!-- AG-064 S2 (display only; the server decides, R2). -->
         <p class="alert info wide ap-hint">Above {{ threshold() | money }}: this expense needs approval before it is posted. Do not pay until it is approved.</p>
+      } @else if (showLimit()) {
+        <!-- AG-064 S1 (QA D7): the branch's limit, read-only, for users who cannot open the Branches screen. -->
+        <p class="muted wide ap-hint">Expenses above {{ threshold() | money }} need approval in this branch.</p>
       }
       <label>{{ kind() === 'income' ? 'Received from' : 'Paid to' }} <input name="payee_payer" [(ngModel)]="m.payee_payer" /></label>
       <label>Payment method
@@ -94,7 +97,6 @@ interface BranchLimit { id: number; expense_approval_threshold?: string | null }
         } @else {
           <div class="ok wide">Saved as <a [routerLink]="['/transactions', r.id]">{{ r.ref }}</a>.@if (r.total) { {{ r.attached }} of {{ r.total }} file{{ r.total === 1 ? '' : 's' }} attached.}</div>
         }
-        @if (r.warning) { <div class="alert wide ap-hint">{{ r.warning }}</div> }
       }
       <div class="wide actions"><button type="submit" [disabled]="busy() || !!fileError()">{{ needsApproval() ? 'Send for approval' : 'Save ' + kind() }}</button></div>
     </form>
@@ -108,6 +110,8 @@ export class EntryFormComponent implements OnInit {
   /** AG-064 S2: the active branch's expense approval limit (GET /branches) and the typed amount. */
   threshold = signal<string | null>(null);
   amount = signal<unknown>(null);
+  /** S1 (QA D7): the limit line for non-Super-Admin users recording an expense in a branch that has one. */
+  showLimit = computed(() => this.kind() === 'expense' && !this.auth.isSuperAdmin() && this.threshold() !== null);
   /** Display only (the server decides, R2): an expense, a limit, not Super Admin, amount strictly above, in cents. */
   needsApproval = computed(() => {
     if (this.kind() !== 'expense' || this.auth.isSuperAdmin()) return false;
@@ -171,7 +175,9 @@ export class EntryFormComponent implements OnInit {
       next: async r => {
         // AG-064 S2: the response's status picks the message; the R17 warning follows it (never a block).
         const pending = r.status === 'pending';
-        if (pending) this.toast.show(`${r.ref_no} sent for approval. Balances do not change until it is approved.`);
+        this.toast.show(pending ? `${r.ref_no} sent for approval. Balances do not change until it is approved.` : `Saved as ${r.ref_no}.`);
+        // R17 (QA D6): the over-commitment warning as a warning toast after the success toast; never a block.
+        if (r.warning) this.toast.then(r.warning, 'warning');
         // The entry is posted (or held); a file problem never rolls it back (F1). Files upload to a pending entry too.
         const res = await this.uploadAll(r.id);
         this.result.set({ id: r.id, ref: r.ref_no, ...res, pending, warning: r.warning ?? null,

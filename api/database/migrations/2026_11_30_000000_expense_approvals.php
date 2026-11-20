@@ -15,8 +15,10 @@ use Spatie\Permission\PermissionRegistrar;
  *  - branches.expense_approval_threshold_cents unsigned bigint null (integer cents; null = never, the default);
  *  - permission expense.approve where missing, given to the "*" templates as PermissionSeeder::run does for a key new
  *    to the catalogue (on a fresh install the permission tables are still empty and the seeder adds it);
- *  - every branch role that holds every other catalogue key (an unmodified Branch Admin copy) gets the key too, with a
- *    role.updated audit row each, as AG-051 did for MAIN. A copy the Super Admin narrowed is left as it is.
+ *  - every branch role that holds every other catalogue key except the MAIN-only ones (an unmodified Branch Admin copy:
+ *    a KDY copy made before AG-051 never got transfer.approve, which AG-051 gave to MAIN copies only) gets the key too,
+ *    with a role.updated audit row each. A copy the Super Admin narrowed is left as it is;
+ *  - index (created_by, category_id, txn_date) for the R2b same-day locking read (narrow next-key locks on MySQL).
  * The transactions approval columns and the (approval_status, branch_id) index exist since AG-051.
  */
 return new class extends Migration
@@ -27,10 +29,18 @@ return new class extends Migration
 
     public const SOURCE = 'migration expense_approvals (AG-064)';
 
+    /** Keys that only ever counted in MAIN and were granted to MAIN copies only (AG-051): not required of a full copy. */
+    public const MAIN_ONLY = ['transfer.approve'];
+
+    public const SAME_DAY_INDEX = 'transactions_created_by_category_txn_date_index';
+
     public function up(): void
     {
         if (! Schema::hasColumn('branches', self::COLUMN)) {
             Schema::table('branches', fn (Blueprint $t) => $t->unsignedBigInteger(self::COLUMN)->nullable());
+        }
+        if (! Schema::hasIndex('transactions', self::SAME_DAY_INDEX)) {
+            Schema::table('transactions', fn (Blueprint $t) => $t->index(['created_by', 'category_id', 'txn_date'], self::SAME_DAY_INDEX));
         }
         $this->addPermission();
     }
@@ -42,6 +52,14 @@ return new class extends Migration
             && DB::table('transactions')->where('type', 'expense')->whereNotNull('approval_status')->exists()) {
             throw new RuntimeException('Rollback stopped before any change: transactions hold expense approval requests, and rolling back '
                 .'would remove the limit and the permission that decided them. Restore a backup taken before this migration instead.');
+        }
+        // A limit set by a Super Admin is configuration that a rollback would silently drop (review 5).
+        if (Schema::hasColumn('branches', self::COLUMN) && DB::table('branches')->whereNotNull(self::COLUMN)->exists()) {
+            throw new RuntimeException('Rollback stopped before any change: branches have an expense approval limit. '
+                .'Clear the limits on the Branches screen first (each change is audited), then roll back.');
+        }
+        if (Schema::hasIndex('transactions', self::SAME_DAY_INDEX)) {
+            Schema::table('transactions', fn (Blueprint $t) => $t->dropIndex(self::SAME_DAY_INDEX));
         }
         if (Schema::hasColumn('branches', self::COLUMN)) {
             DB::statement('ALTER TABLE branches DROP COLUMN '.self::COLUMN);
@@ -70,7 +88,7 @@ return new class extends Migration
     /** Branch roles (any branch) holding every other catalogue key receive the new one (resumable: holders are skipped). */
     private function grantFullCopies(int $permissionId): void
     {
-        $others = array_values(array_diff(PermissionSeeder::PERMISSIONS, [self::PERMISSION]));
+        $others = array_values(array_diff(PermissionSeeder::PERMISSIONS, [self::PERMISSION, ...self::MAIN_ONLY]));
         $otherIds = DB::table('permissions')->where('guard_name', 'web')->whereIn('name', $others)->pluck('id');
         if ($otherIds->count() !== count($others)) {
             return; // catalogue incomplete: leave roles to the Super Admin
@@ -101,6 +119,18 @@ return new class extends Migration
         $ids = DB::table('permissions')->where('name', self::PERMISSION)->pluck('id');
         if ($ids->isEmpty()) {
             return;
+        }
+        // Review 5: every removed grant is audited, as each grant was.
+        $holders = DB::table('roles as r')->join('role_has_permissions as h', 'h.role_id', '=', 'r.id')
+            ->whereIn('h.permission_id', $ids)->orderBy('r.id')->get(['r.id', 'r.name', 'r.branch_id']);
+        foreach ($holders as $role) {
+            $old = DB::table('role_has_permissions as h')->join('permissions as p', 'p.id', '=', 'h.permission_id')
+                ->where('h.role_id', $role->id)->orderBy('p.name')->pluck('p.name')->all();
+            AuditLog::create(['user_id' => null, 'branch_id' => $role->branch_id, 'event' => 'role.updated', 'auditable_type' => Role::class,
+                'auditable_id' => $role->id, 'old_values' => ['name' => $role->name, 'permissions' => $old],
+                'new_values' => ['name' => $role->name, 'permissions' => array_values(array_diff($old, [self::PERMISSION])),
+                    'source' => 'rollback expense_approvals (AG-064)'],
+                'ip' => null, 'user_agent' => 'console']);
         }
         DB::table('role_has_permissions')->whereIn('permission_id', $ids)->delete();
         DB::table('model_has_permissions')->whereIn('permission_id', $ids)->delete();

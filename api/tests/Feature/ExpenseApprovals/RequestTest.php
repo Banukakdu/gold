@@ -45,8 +45,12 @@ class RequestTest extends ExpenseApprovalTestCase
 
     public function test_ac2_the_limit_itself_posts_and_one_cent_more_waits(): void
     {
-        $this->record('50000.00')->assertCreated()->assertJsonPath('status', 'posted')->assertJsonPath('approval_status', null)
-            ->assertJsonPath('hold_reason', null);
+        $posted = $this->record('50000.00')->assertCreated()->assertJsonPath('status', 'posted')->assertJsonPath('approval_status', null)
+            ->assertJsonPath('hold_reason', null)->json();
+        // QA D3: the keys are present (null) on an expense that posted at once.
+        foreach (['status', 'approval_status', 'requested_date', 'requested_on', 'hold_reason', 'same_day_total', 'warning'] as $key) {
+            $this->assertArrayHasKey($key, $posted, $key);
+        }
         $this->record('50000.01', '2026-11-19')->assertCreated()->assertJsonPath('status', 'pending');
         $this->assertSame('150000.00', $this->bal($this->kdyCash));
     }

@@ -39,6 +39,17 @@ class InAppNotifications
     }
 
     /**
+     * AG-064 (review 6): the ids of users holding any of $permissions through an active role of $branchId (any status).
+     *
+     * @param  string[]  $permissions
+     * @return int[]
+     */
+    public function holderIdsOf(array $permissions, int $branchId): array
+    {
+        return $this->holderIds($permissions, $branchId);
+    }
+
+    /**
      * AG-064: whether $userId holds any of $permissions through an active role of $branchId while a member of it.
      *
      * @param  string|string[]  $permissions
