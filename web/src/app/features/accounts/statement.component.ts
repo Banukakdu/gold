@@ -7,7 +7,7 @@ import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
 interface Statement {
   account: { name: string; branch: { code: string; name: string } };
   opening_balance: string; closing_balance: string;
-  entries: { date: string; ref_no: string; type: string; description: string; in: string; out: string; balance: string }[];
+  entries: { date: string; ref_no: string; type: string; status: string; contra: boolean; description: string; in: string; out: string; balance: string }[];
 }
 
 @Component({
@@ -17,6 +17,7 @@ interface Statement {
     @if (s(); as s) { <h1>{{ s.account.branch.code }} · {{ s.account.name }} <small class="muted">statement</small></h1> }
     <form class="filters" (ngSubmit)="load()">
       <input type="date" name="from" [(ngModel)]="from" /> <input type="date" name="to" [(ngModel)]="to" />
+      <label><input type="checkbox" name="include_voided" [(ngModel)]="showVoided" (ngModelChange)="load()" style="width:auto" /> Show voided</label>
       <button type="submit">Show</button> <button type="button" class="ghost" (click)="print()">Print</button>
     </form>
     @if (s(); as s) {
@@ -27,7 +28,7 @@ interface Statement {
             <tr class="sub"><td colspan="6">Opening balance</td><td class="num">{{ s.opening_balance | money }}</td></tr>
             @for (e of s.entries; track $index) {
               <tr>
-                <td>{{ e.date | date: 'd MMM y' }}</td><td class="mono">{{ e.ref_no }}</td><td>{{ label(e.type) }}</td><td>{{ e.description }}</td>
+                <td>{{ e.date | date: 'd MMM y' }}</td><td class="mono">{{ e.ref_no }}</td><td>{{ label(e.type) }} @if (e.status === 'void') { <span class="tag" data-s="void">Void</span> }</td><td>{{ e.description }}</td>
                 <td class="num pos">{{ +e.in ? (e.in | money) : '' }}</td><td class="num neg">{{ +e.out ? (e.out | money) : '' }}</td>
                 <td class="num">{{ e.balance | money }}</td>
               </tr>
@@ -45,10 +46,11 @@ export class StatementComponent implements OnInit {
   s = signal<Statement | null>(null);
   to = new Date().toISOString().slice(0, 10);
   from = this.to.slice(0, 8) + '01';
+  showVoided = false;
 
   ngOnInit() { this.load(); }
   load() {
-    this.http.get<Statement>(`/api/v1/accounts/${this.id()}/statement`, { params: { from: this.from, to: this.to } }).subscribe(s => this.s.set(s));
+    this.http.get<Statement>(`/api/v1/accounts/${this.id()}/statement`, { params: { from: this.from, to: this.to, include_voided: this.showVoided ? 1 : 0 } }).subscribe(s => this.s.set(s));
   }
   label(t: string) { return TYPE_LABELS[t] ?? t; }
   print() { window.print(); }

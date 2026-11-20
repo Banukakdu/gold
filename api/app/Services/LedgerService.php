@@ -10,6 +10,7 @@ use App\Models\LedgerEntry;
 use App\Models\PeriodLock;
 use App\Models\Setting;
 use App\Models\Transaction;
+use App\Support\BusinessDate;
 use App\Support\Money;
 use Illuminate\Support\Facades\DB;
 
@@ -25,6 +26,8 @@ class LedgerService
     /** Owner capital into a Main account (one-off opening equity). */
     public function capital(int $accountId, string $amount, string $date, ?string $note = null): Transaction
     {
+        $date = $this->date($date);
+
         return DB::transaction(function () use ($accountId, $amount, $date, $note) {
             $acc = $this->lock([$accountId])[$accountId];
             if (! $acc->is_main_account && ! $acc->branch->is_main) {
@@ -51,6 +54,8 @@ class LedgerService
         if ($fromId === $toId) {
             throw new LedgerException('Source and destination accounts must be different.');
         }
+
+        $date = $this->date($date);
 
         return DB::transaction(function () use ($fromId, $toId, $amount, $date, $note, $type) {
             $locked = $this->lock([$fromId, $toId]);
@@ -88,6 +93,8 @@ class LedgerService
             throw new LedgerException('Invalid type.');
         }
 
+        $data['txn_date'] = $this->date((string) ($data['txn_date'] ?? ''));
+
         return DB::transaction(function () use ($type, $data) {
             $acc = $this->lock([(int) $data['account_id']])[(int) $data['account_id']];
             if ($acc->status !== 'active') {
@@ -121,13 +128,25 @@ class LedgerService
         });
     }
 
-    /** Post an exact opposite of a transaction and mark the original as reversed. */
+    /**
+     * Post an exact opposite of a transaction and mark the original as reversed.
+     * The reversal date must be on or after the original's date and not in the future (controls finding 4),
+     * and open for every branch that has an entry.
+     */
     public function reverse(Transaction $original, string $date, ?string $reason = null): Transaction
     {
+        $date = $this->date($date);
+
         return DB::transaction(function () use ($original, $date, $reason) {
             $original = Transaction::withoutGlobalScopes()->lockForUpdate()->findOrFail($original->id);
             if ($original->status !== 'posted' || $original->type === Transaction::REVERSAL) {
                 throw new LedgerException('Only posted transactions can be reversed.');
+            }
+            if ($date < $original->txn_date->format('Y-m-d')) {
+                throw new LedgerException('The reversal date cannot be before the original entry date.');
+            }
+            if ($date > BusinessDate::today()) {
+                throw new LedgerException('The reversal date cannot be in the future.');
             }
             $entries = $original->entries()->get();
             $accounts = $this->lock($entries->pluck('account_id')->unique()->all());
@@ -135,7 +154,7 @@ class LedgerService
             foreach ($entries as $e) {
                 $this->assertOpen($e->branch_id, $date);
                 // Reversing money that came IN must not push the account negative.
-                if ((float) $e->debit > 0) {
+                if (Money::cmp($e->debit, 0) > 0) {
                     $this->assertFunds($accounts[$e->account_id], $e->debit);
                 }
             }
@@ -150,16 +169,20 @@ class LedgerService
                 'description' => $reason ?? "Reversal of {$original->ref_no}",
             ]);
             foreach ($entries as $e) {
-                $this->entry($txn, $accounts[$e->account_id], debit: $e->credit, credit: $e->debit);
+                $this->entry($txn, $accounts[$e->account_id], debit: (string) $e->credit, credit: (string) $e->debit);
             }
             $original->update(['status' => 'reversed']);
-            AuditLog::record('transaction.reversed', $original, ['status' => 'posted'], ['status' => 'reversed', 'reversal_id' => $txn->id, 'self' => (int) $original->created_by === (int) auth()->id()]);
+            AuditLog::record('transaction.reversed', $original, ['status' => 'posted'], ['status' => 'reversed', 'reversal_id' => $txn->id, 'reversal_date' => $date, 'reason' => $reason, 'self' => (int) $original->created_by === (int) auth()->id()]);
 
             return $this->finish($txn);
         });
     }
 
-    /** Void a posted income/expense entry: removes its effect but keeps the record. */
+    /**
+     * Void a posted income/expense entry (controls spec R1): the original entries are kept and a contra entry
+     * (debit and credit swapped, same account and date, contra_of_id = original) is posted for each.
+     * The transaction then has status `void` and nets to zero on every date.
+     */
     public function void(Transaction $txn, ?string $reason = null): Transaction
     {
         if (! in_array($txn->type, [Transaction::INCOME, Transaction::EXPENSE], true)) {
@@ -171,16 +194,30 @@ class LedgerService
             if ($txn->status !== 'posted') {
                 throw new LedgerException('Only posted entries can be voided.');
             }
-            $this->assertOpen($txn->branch_id, $txn->txn_date->format('Y-m-d'));
+            $date = $txn->txn_date->format('Y-m-d');
+            $this->assertOpen($txn->branch_id, $date);
             $acc = $this->lock([$txn->account_id])[$txn->account_id];
             if ($txn->type === Transaction::INCOME) {
                 $this->assertFunds($acc, $txn->amount);
             }
-            $txn->entries()->delete();
-            $acc->current_balance = $acc->ledgerBalance();
-            $acc->save();
+
+            $contraIds = [];
+            foreach ($txn->entries()->orderBy('id')->get() as $e) {
+                $contraIds[] = $this->entry($txn, $acc, debit: (string) $e->credit, credit: (string) $e->debit, contraOf: $e->id)->id;
+            }
             $txn->update(['status' => 'void', 'description' => trim(($txn->description ?? '')."\n[Void] ".($reason ?? ''))]);
-            AuditLog::record('transaction.voided', $txn, ['status' => 'posted'], ['status' => 'void', 'reason' => $reason, 'self' => (int) $txn->created_by === (int) auth()->id()]);
+            // Finding 5: the row describes what was voided without a join to ledger_entries.
+            AuditLog::record('transaction.voided', $txn, ['status' => 'posted'], [
+                'status' => 'void',
+                'reason' => $reason,
+                'ref_no' => $txn->ref_no,
+                'type' => $txn->type,
+                'amount' => Money::add($txn->amount),
+                'account_id' => $txn->account_id,
+                'txn_date' => $date,
+                'self' => (int) $txn->created_by === (int) auth()->id(),
+                'contra_entry_ids' => $contraIds,
+            ]);
 
             return $txn->fresh();
         });
@@ -200,9 +237,20 @@ class LedgerService
         return $rows->all();
     }
 
+    /** Accountant sign-off A: one strict YYYY-MM-DD date is both lock-checked and stored. */
+    private function date(string $date): string
+    {
+        try {
+            return BusinessDate::normalize($date);
+        } catch (\InvalidArgumentException) {
+            throw new LedgerException('The date must be in YYYY-MM-DD format.');
+        }
+    }
+
     private function assertOpen(int $branchId, string $date): void
     {
-        if (PeriodLock::isLocked($branchId, $date)) {
+        // Locking read: a concurrent period lock for this branch/month waits for this posting (reviewer R5).
+        if (PeriodLock::isLocked($branchId, $date, share: true)) {
             throw new LedgerException('The period '.substr($date, 0, 7).' is locked.');
         }
     }
@@ -245,18 +293,21 @@ class LedgerService
         ], $extra));
     }
 
-    private function entry(Transaction $txn, Account $acc, string|float $debit = 0, string|float $credit = 0): void
+    private function entry(Transaction $txn, Account $acc, string $debit = '0', string $credit = '0', ?int $contraOf = null): LedgerEntry
     {
-        LedgerEntry::create([
+        $entry = LedgerEntry::create([
             'transaction_id' => $txn->id,
+            'contra_of_id' => $contraOf,
             'account_id' => $acc->id,
             'branch_id' => $acc->branch_id,
             'entry_date' => $txn->txn_date,
-            'debit' => $debit,
-            'credit' => $credit,
+            'debit' => Money::add($debit),
+            'credit' => Money::add($credit),
         ]);
         $acc->current_balance = Money::fromCents(Money::toCents($acc->current_balance) - Money::toCents($credit) + Money::toCents($debit));
         $acc->save();
+
+        return $entry;
     }
 
     private function finish(Transaction $txn): Transaction

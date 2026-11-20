@@ -13,6 +13,7 @@ use App\Services\LedgerService;
 use App\Services\ReportExporter;
 use App\Services\ReportService;
 use Database\Seeders\ReportExampleSeeder;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 
 /** PDF / Excel export (spec section 5, accounting review findings 4, 5, 7). */
@@ -89,10 +90,11 @@ class ReportExportTest extends ReportTestCase
             }
         }
 
-        $logs = AuditLog::where('event', 'report.exported')->get();
+        $logs = AuditLog::where('event', 'report.exported')->orderBy('id')->get();
         $this->assertCount(8, $logs);
-        $this->assertSame(['name' => 'cash-book', 'format' => 'xlsx', 'rows' => 11],
-            array_intersect_key($logs->last()->new_values, array_flip(['name', 'format', 'rows'])));
+        // MySQL JSON columns do not keep key order, so compare key-sorted arrays.
+        $this->assertSame(['format' => 'xlsx', 'name' => 'cash-book', 'rows' => 11],
+            Arr::sortRecursive(array_intersect_key($logs->last()->new_values, array_flip(['name', 'format', 'rows']))));
         $this->assertSame('2026-10-01', $logs->last()->new_values['params']['from']);
         $this->assertSame($this->acct->id, $logs->last()->user_id);
         $this->assertSame($this->kdy->id, $logs->last()->branch_id);

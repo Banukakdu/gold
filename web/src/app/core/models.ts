@@ -49,6 +49,9 @@ export interface Transaction {
   to_account?: { name: string };
   creator?: { id: number; name: string };
   creator_tag?: string | null;
+  entries_count?: number;
+  /** Controls S4: a void from before contra entries existed (no ledger lines). */
+  legacy_void_note?: string;
 }
 
 export interface Page<T> {

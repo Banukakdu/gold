@@ -4,13 +4,16 @@ import { FormsModule } from '@angular/forms';
 import { Account } from '../../core/models';
 import { MoneyPipe } from '../../core/money.pipe';
 import { errorText } from '../../core/api.interceptor';
+import { LockBannerComponent } from '../period-locks/lock-banner.component';
+import { colomboToday } from '../../core/dates';
 
 /** Branch-to-branch, internal, or back-to-Main transfer. */
 @Component({
   standalone: true,
-  imports: [FormsModule, MoneyPipe],
+  imports: [FormsModule, MoneyPipe, LockBannerComponent],
   template: `
     <h1>Transfer money</h1>
+    <ag-lock-banner />
     <form class="card form" (ngSubmit)="save()">
       <label>From account
         <select name="from" [(ngModel)]="m.from_account_id" required>
@@ -25,7 +28,7 @@ import { errorText } from '../../core/api.interceptor';
         </select>
       </label>
       <label>Amount <input type="number" name="amount" [(ngModel)]="m.amount" min="0.01" step="0.01" required /></label>
-      <label>Date <input type="date" name="txn_date" [(ngModel)]="m.txn_date" required /></label>
+      <label>Date <input type="date" name="txn_date" [(ngModel)]="m.txn_date" [max]="today" required /></label>
       <label class="wide">Reason <input name="note" [(ngModel)]="m.note" required /></label>
       @if (error()) { <div class="alert wide">{{ error() }}</div> }
       @if (saved()) { <div class="ok wide">Transfer {{ saved() }} posted.</div> }
@@ -40,7 +43,8 @@ export class TransferFormComponent implements OnInit {
   busy = signal(false);
   error = signal('');
   saved = signal('');
-  m: any = { from_account_id: null, to_account_id: null, amount: null, txn_date: new Date().toISOString().slice(0, 10), note: '' };
+  today = colomboToday();
+  m: any = { from_account_id: null, to_account_id: null, amount: null, txn_date: this.today, note: '' };
 
   ngOnInit() {
     this.http.get<Account[]>('/api/v1/accounts').subscribe(a => {
