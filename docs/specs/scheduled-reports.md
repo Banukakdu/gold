@@ -452,3 +452,43 @@ Reviewed against CLAUDE.md, reports.md (incl. its Accounting review and sign-off
 
 ### Verdict
 Spec accepted for development once MUST findings A1-A3 are in the build (they are folded into the body above). No product-owner decision blocks the work.
+
+## Accountant sign-off
+2026-11-20. Build reviewed: `git diff feature/recurring-expenses...HEAD` (e02194b build, 0dbab2c review/QA fixes). Test results as reported by the team (not re-run here): SQLite 957 passed, MySQL 958 passed, pint, `ng build` and `ng test` green.
+
+### Findings A1-A7
+1. **A1 (MUST) DONE.** `ScheduledReports::period()` daily = D-1 in Asia/Colombo with no weekday logic; period taken from `planned_at`. Tests `test_ac39_daily_covers_every_calendar_day` (Sat/Sun/Mon runs cover Fri/Sat/Sun), `test_ac10_period_from_planned_time_not_pickup`.
+2. **A2 (MUST) DONE.** `ScheduledReportRuns::prepareSend()` skips with `email_changed` when the current email differs from `deliveries.email`; the mail is routed to `deliveries.email` only (`Notification::route('mail', $d->email)`); the address is frozen by the deliveries update trigger. Test `test_ac40_email_changed_after_build`.
+3. **A3 (MUST) DONE.** `failStaleRuns()` -> `failRun()` writes `run_failed` (code `stale`), skips queued deliveries (`run_failed`), `countFailure()` (R10), bell + email. `failStaleDeliveries()` writes `delivery_failed` + bell for `stale` and `unknown`. Every stale UPDATE repeats the age condition. Tests `test_ac24_ac41_stale_run_and_stale_delivery`, `test_ac41_stale_running_run_skips_its_queued_deliveries`, `test_s3_a_run_claimed_after_the_stale_select_is_not_failed`.
+4. **A4 (SHOULD) DONE.** `ReportExporter::controlTotals()` from the same snapshot data as the PDF, stored with `provisional` in `run_built`, also for link-only runs. Tests `test_ac8_ac9_ac42_build_and_send` (3,750.00 / 400.00 / 3,350.00), `test_ac17_ac42_too_many_rows_is_link_only` (closing = opening + receipts - payments per account).
+5. **A5 (SHOULD) DONE.** Config `late_minutes` daily 360 / weekly 1440; "Sent late" when `started_at` > `planned_at` + 60 min. Tests `test_ac38_weekly_late_window`, `test_ac38_weekly_gap_over_24_hours_is_missed`, `test_ac10_...` (90 min late).
+6. **A6 (SHOULD) DONE.** `test_ac43_weekly_all_branches_comparison_reconciles`: closing formula per row, branch rows = Total, Total (funds received + transfers in - transfers out) = 0, audit totals = report Total, scheduled PDF text identical to a synchronous All-mode export apart from the printed line.
+7. **A7 (SHOULD) DONE.** `ScheduledReportRuns::attachmentName()`: `income-expense_KDY_...`, `branch-comparison_ALL_...` (tests AC 9, AC 38).
+
+### Fixes with control impact
+- **Sent at most once (queued -> sending -> sent).** Accepted. The conditional claim stops a retry or second worker from re-sending; a delivery left `sending` > 60 min becomes `failed` / `unknown` with "may have been sent ... check with the recipient", is audited and belled, and is never resent (`test_s1_recording_sent_fails_after_the_email_went_out_no_resend_then_unknown`). For a confidential report, "possibly not delivered, ask a person" is the right failure direction; a duplicate or a resend to a stale address would be worse.
+- **Alerts when the owner lost Super Admin** go to the other active Super Admins (`alertOwner()`, `systemPause()`; `test_d7_...`). Correct: a demoted owner must not keep receiving schedule status.
+- **AC 19 message** stays "You do not have access to this branch."; `branchDenied()` only looks up codes among the user's own branches, so no code of an inaccessible branch is revealed (web spec "GA (no KDY access) ...", no report request sent). Correct.
+- **No figures in email bodies:** body asserts no amount pattern and no "as at" (AC 9); link email has text only. Correct.
+- **Access re-checked at build and at send** (`recipientProblem()` in `build()` and `prepareSend()`), plus schedule-active check at send. Correct.
+- **Nothing posts money:** no LedgerService, `current_balance`, transactions or ledger writes in the diff; AC 33 compares the books before and after. Correct.
+- **Audit on every change:** user actions (created/updated/paused/resumed/archived/restored/owner_changed) and system events (built/failed/missed/delivered/skipped/failed/files_removed), status + audit row in one transaction. Correct.
+- **No hard deletes:** BEFORE DELETE triggers on every table (MySQL + SQLite), frozen-column UPDATE triggers on runs/deliveries, no DELETE route (AC 6). Correct.
+
+### Release notes
+- Super Admins can schedule daily (previous calendar day, weekends included) or weekly (previous Monday-Sunday) PDF emails of Income & Expense, Branch Comparison, Transfers & Allocations and Daily Cash Book, sent at 07:00-style local times (Asia/Colombo).
+- Recipients are system users only; multi-branch reports go to Super Admins only; single-branch reports need View reports + Export in that branch. Access and email address are re-checked when the email is sent.
+- Emails contain no figures. Reports over 1,000 rows or 5 MB arrive as a sign-in link. Daily reports are normally marked PROVISIONAL (period not locked).
+- Each built report stores its control totals in the audit log (Reports group), so what was reported can be compared with later figures after the PDF is removed (7 days).
+- Failed, missed and stuck runs alert the owner (bell + email); 3 in a row pause the schedule. A delivery marked "may have been sent" must be checked with the recipient; it is never resent automatically.
+- Operations: run the exports worker and the normal queue worker; `reports:dispatch-scheduled` runs every minute from the scheduler.
+
+### Accepted risks
+1. **Delivery outcome "unknown".** If the worker dies mid-send or recording `sent` fails, the recipient may or may not have the email; a person must check. Accepted (preferred to a duplicate send).
+2. **Possible duplicate on an ambiguous SMTP error.** If the mail server accepted the message but the transport still threw, the claim is released and the retry sends again, to the same verified recipient and identical file. Low impact; accepted.
+3. **Mail-only failures do not count towards auto-pause.** A run that is built but whose every delivery fails (`mail_error`/`stale`/`unknown`) is not a "failed run" under R10; the owner gets bell rows per delivery. Recommended follow-up (SHOULD, next story): count a run with zero `sent` and at least one `failed` delivery as a failure for R10.
+4. **Provisional figures.** Daily/weekly emails report unlocked periods; later back-dated entries or voids change the figures. Mitigated by the PROVISIONAL marker, the extracted time and the A4 control totals. Month-end packs after period lock remain a follow-up.
+5. **Emailed PDFs leave the system.** Once delivered they cannot be recalled or re-checked; controlled by Super Admin-only scheduling, user-only recipients, access re-check at send and the "do not forward" line.
+
+### Verdict
+**SIGNED OFF.** A1-A3 (MUST) and A4-A7 (SHOULD) are implemented and tested; the review/QA fixes strengthen control. No blockers.
