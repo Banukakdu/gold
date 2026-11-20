@@ -4,14 +4,17 @@
 <meta charset="utf-8">
 <title>{{ $head['title'] }}</title>
 <style>
-    @page { margin: 150px 32px 48px 32px; }
+    @page { margin: 165px 32px 48px 32px; }
     body { font-family: Helvetica, Arial, sans-serif; font-size: 9px; color: #1f1d1a; }
-    header { position: fixed; top: -132px; left: 0; right: 0; height: 122px; border-bottom: 1px solid #999; }
+    header { position: fixed; top: -147px; left: 0; right: 0; height: 137px; border-bottom: 1px solid #999; }
     header .company { font-size: 14px; font-weight: bold; }
     header .title { font-size: 12px; font-weight: bold; margin: 2px 0 4px; }
     header .line { margin: 1px 0; }
     header .provisional { color: #b3362c; font-weight: bold; font-size: 11px; margin-top: 3px; }
-    header img { position: absolute; right: 0; top: 0; max-height: 48px; }
+    /* AG-092 R3: the logo at the top left of every page, max 48 px high, aspect kept. */
+    header table.hd { width: auto; border-collapse: collapse; }
+    header table.hd td { border: 0; padding: 0 10px 0 0; vertical-align: top; }
+    header img.logo { max-height: 48px; }
     table { width: 100%; border-collapse: collapse; }
     th, td { padding: 3px 4px; border-bottom: 1px solid #ddd; text-align: left; vertical-align: top; }
     th { background: #f1ead8; font-size: 8px; text-transform: uppercase; }
@@ -35,14 +38,18 @@
 </head>
 <body>
 <header>
-    @if ($head['logo'])<img src="{{ $head['logo'] }}" alt="">@endif
+    <table class="hd"><tr>
+    @if ($head['logo'])<td><img class="logo" src="{{ $head['logo'] }}" alt=""></td>@endif
+    <td>
     <div class="company">{{ $head['company'] }}</div>
     <div class="title">{{ $head['title'] }}</div>
     <div class="line">Branches: {{ $head['branches'] }}</div>
     <div class="line">Period: {{ $head['period'] }}</div>
-    <div class="line">Amounts in LKR &middot; {{ $head['basis'] ?? \App\Services\ReportService::BASIS }}</div>
+    <div class="line">{{ $head['currency'] ?? 'Amounts in LKR' }} &middot; {{ $head['basis'] ?? \App\Services\ReportService::BASIS }}</div>
     <div class="line">{{ $head['printed'] }}</div>
+    @foreach ($head['notes'] ?? [] as $note)<div class="line"><b>{{ $note }}</b></div>@endforeach
     @if ($head['provisional'])<div class="provisional">PROVISIONAL - period not locked</div>@endif
+    </td></tr></table>
 </header>
 @yield('body')
 </body>

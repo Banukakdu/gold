@@ -58,6 +58,17 @@ return [
             'report' => false,
         ],
 
+        // AG-092 company logo (docs/specs/settings.md R3): private, served only by GET /settings/logo to signed-in
+        // users, and embedded in PDFs by the server. Configured like `attachments`; include it in the backup set (AG-093).
+        'branding' => [
+            'driver' => 'local',
+            'root' => storage_path('app/branding'),
+            'visibility' => 'private',
+            'serve' => false,
+            'throw' => true,
+            'report' => false,
+        ],
+
         's3' => [
             'driver' => 's3',
             'key' => env('AWS_ACCESS_KEY_ID'),

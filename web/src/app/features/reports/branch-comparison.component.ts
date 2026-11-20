@@ -5,7 +5,7 @@ import { ActivatedRoute, Router } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe } from '../../core/money.pipe';
 import {
-  BranchPickerComponent, ExportButtonsComponent, ReportBranch, ReportHeadComponent, ReportMeta, ReportParams, SignaturesComponent,
+  BranchPickerComponent, ExportButtonsComponent, FiscalPresetsComponent, ReportBranch, ReportHeadComponent, ReportMeta, ReportParams, SignaturesComponent,
   fieldErrors, isoDate, periodRange, toHttpParams,
   readQuery, reportError, writeQuery,
 } from './report-common';
@@ -16,7 +16,7 @@ interface Comparison extends ReportMeta { rows: (Figures & { branch: ReportBranc
 /** AG-083 */
 @Component({
   standalone: true,
-  imports: [FormsModule, MoneyPipe, BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, SignaturesComponent],
+  imports: [FormsModule, MoneyPipe, FiscalPresetsComponent, BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, SignaturesComponent],
   template: `
     <h1>Branch Comparison</h1>
     <form class="filters" (ngSubmit)="load()">
@@ -36,6 +36,7 @@ interface Comparison extends ReportMeta { rows: (Figures & { branch: ReportBranc
         }
       }
       <ag-branch-picker [(selected)]="branches" />
+      <ag-fy-presets (pick)="preset($event)" />
       <button type="submit">Show</button>
       <ag-export-buttons name="branch-comparison" [params]="applied()" />
     </form>
@@ -99,6 +100,13 @@ export class BranchComparisonComponent implements OnInit {
       this.p = { month: from.slice(0, 7), quarter: Math.floor((m - 1) / 3) + 1, year: Number(from.slice(0, 4)), from, to };
     }
     this.branches.set(branches);
+    this.load();
+  }
+
+  /** S6 fiscal-year presets: a custom range of that year. */
+  preset(r: { from: string; to: string }) {
+    this.ptype = 'custom';
+    this.p = { ...this.p, ...r };
     this.load();
   }
 

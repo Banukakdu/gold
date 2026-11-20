@@ -1,6 +1,6 @@
 import { Component, OnInit, inject, signal } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
-import { DatePipe } from '@angular/common';
+import { AppDatePipe } from '../../core/app-date.pipe';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
@@ -11,7 +11,7 @@ import { LockBannerComponent } from '../period-locks/lock-banner.component';
 
 @Component({
   standalone: true,
-  imports: [FormsModule, MoneyPipe, DatePipe, LockBannerComponent, RouterLink],
+  imports: [FormsModule, MoneyPipe, AppDatePipe, LockBannerComponent, RouterLink],
   template: `
     <h1>Transactions</h1>
     <ag-lock-banner />
@@ -46,14 +46,14 @@ import { LockBannerComponent } from '../period-locks/lock-banner.component';
         <tbody>
           @for (t of page()?.data; track t.id) {
             <tr [class.struck]="t.status === 'void'">
-              <td>{{ t.txn_date | date: 'd MMM y' }}</td>
+              <td>{{ t.txn_date | appDate }}</td>
               <td class="mono"><a [routerLink]="['/transactions', t.id]">{{ t.ref_no }}</a></td>
               <td>{{ t.branch?.code }}</td>
               <td>{{ label(t.type) }}</td>
               <td>{{ t.category ? (t.category.parent?.name ? t.category.parent?.name + ' › ' : '') + t.category.name : '' }}</td>
               <td>{{ t.account?.name ?? ((t.from_account?.name ?? '') + ' → ' + (t.to_account?.name ?? '')) }}</td>
               <td>{{ t.payee_payer || t.description }}</td>
-              <td class="num" [class.neg]="t.type === 'expense'">{{ t.amount | money }}</td>
+              <td class="num" [class.neg]="t.type === 'expense'">{{ t.type === 'year_end_close' ? '—' : (t.amount | money) }}</td>
               <td><span class="tag" [attr.data-s]="t.status">{{ t.status }}</span>
                 @if (t.legacy_void_note) { <br /><small class="muted">{{ t.legacy_void_note }}</small> }</td>
               <td>{{ t.creator?.name }} @if (t.creator_tag) { <span class="tag" data-s="inactive">{{ t.creator_tag }}</span> }</td>

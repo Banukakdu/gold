@@ -3,6 +3,7 @@ import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
+import { AppDatePipe } from '../../core/app-date.pipe';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
 import { Account } from '../../core/models';
 import {
@@ -24,7 +25,7 @@ interface CashBook extends ReportMeta { accounts: Book[] }
 /** AG-085 */
 @Component({
   standalone: true,
-  imports: [FormsModule, MoneyPipe, BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, SignaturesComponent],
+  imports: [FormsModule, MoneyPipe, AppDatePipe, BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, SignaturesComponent],
   template: `
     <h1 class="no-print">Daily Cash Book</h1>
     <form class="filters" (ngSubmit)="load()">
@@ -62,7 +63,7 @@ interface CashBook extends ReportMeta { accounts: Book[] }
               <thead><tr><th>Date</th><th class="num">Opening</th><th class="num">Receipts</th><th class="num">Payments</th><th class="num">Closing</th></tr></thead>
               <tbody>
                 @for (d of b.days; track d.date) {
-                  <tr class="sub"><td>{{ d.date }}</td><td class="num">{{ d.opening | money }}</td><td class="num">{{ d.receipts | money }}</td>
+                  <tr class="sub"><td>{{ d.date | appDate }}</td><td class="num">{{ d.opening | money }}</td><td class="num">{{ d.receipts | money }}</td>
                     <td class="num">{{ d.payments | money }}</td><td class="num">{{ d.closing | money }}</td></tr>
                   <tr><td colspan="5" class="lines">
                     <table>

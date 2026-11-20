@@ -1,13 +1,13 @@
 import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
-import { DatePipe } from '@angular/common';
+import { AppDatePipe } from '../../core/app-date.pipe';
+import { SettingsService } from '../../core/settings.service';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
 import { errorText } from '../../core/api.interceptor';
-import { colomboDateTime } from '../../core/dates';
 import {
   ATTACH_ACCEPT, AttachmentList, AttachmentRow, blobErrorText, fileSize, selectionProblem, uploadAttachment, uploadErrorText,
 } from '../../core/attachments';
@@ -48,7 +48,7 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
  */
 @Component({
   standalone: true,
-  imports: [FormsModule, MoneyPipe, DatePipe, RouterLink, LockBannerComponent],
+  imports: [FormsModule, MoneyPipe, AppDatePipe, RouterLink, LockBannerComponent],
   template: `
     <p class="att-back"><a routerLink="/transactions">Back to transactions</a></p>
     @if (msg()) { <div class="alert">{{ msg() }}</div> }
@@ -59,14 +59,14 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
       <div class="card section">
         <dl class="entry-detail">
           <dt>Type</dt><dd>{{ label(t.type) }}</dd>
-          <dt>Date</dt><dd>{{ t.txn_date | date: 'd MMM y' }}</dd>
+          <dt>Date</dt><dd>{{ t.txn_date | appDate }}</dd>
           <dt>Branch</dt><dd>{{ t.branch?.code }} {{ t.branch?.name }}</dd>
           <dt>Account</dt>
           <dd>{{ t.account?.name ?? ((t.from_account?.name ?? '') + ' → ' + (t.to_account?.name ?? '')) }}</dd>
           @if (t.category) {
             <dt>Category</dt><dd>{{ t.category.parent?.name ? t.category.parent?.name + ' › ' : '' }}{{ t.category.name }}</dd>
           }
-          <dt>Amount</dt><dd [class.neg]="t.type === 'expense'">{{ t.amount | money }}</dd>
+          <dt>Amount</dt><dd [class.neg]="t.type === 'expense'">{{ t.type === 'year_end_close' ? '— (not money moved; see the ledger lines)' : (t.amount | money) }}</dd>
           @if (t.payee_payer) { <dt>{{ t.type === 'income' ? 'Received from' : 'Paid to' }}</dt><dd>{{ t.payee_payer }}</dd> }
           @if (t.reference) { <dt>Reference</dt><dd>{{ t.reference }}</dd> }
           @if (t.description) { <dt>Description</dt><dd class="att-pre">{{ t.description }}</dd> }
@@ -86,7 +86,7 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
             <tbody>
               @for (e of t.entries; track e.id) {
                 <tr>
-                  <td>{{ e.entry_date | date: 'd MMM y' }}</td>
+                  <td>{{ e.entry_date | appDate }}</td>
                   <td>{{ e.branch?.code }}</td>
                   <td class="mono">{{ e.account?.code }}</td>
                   <td>{{ e.account?.name }}</td>
@@ -142,7 +142,7 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
                     @if (a.added_after) { <span class="tag att-late">{{ afterLabel(a) }}</span> }
                     @if (a.also_on.length) { <div class="att-also">This file is also attached to {{ a.also_on.join(', ') }}.</div> }
                     @if (a.removed_at) {
-                      <div class="att-why">Removed by {{ a.removed_by?.name }} on {{ when(a.removed_at).slice(0, 10) }}: {{ a.removal_reason }}</div>
+                      <div class="att-why">Removed by {{ a.removed_by?.name }} on {{ a.removed_at | appDate }}: {{ a.removal_reason }}</div>
                     }
                   </div>
                   <div class="att-meta">
@@ -193,6 +193,7 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
 })
 export class TransactionDetailComponent implements OnInit {
   auth = inject(AuthService);
+  private settings = inject(SettingsService);
   private http = inject(HttpClient);
   private route = inject(ActivatedRoute);
   t = signal<Detail | null>(null);
@@ -224,6 +225,11 @@ export class TransactionDetailComponent implements OnInit {
 
   /** Double-entry S3 note column: lines are numbered 1.. in id order. */
   lineNote(t: Detail, e: LedgerLine): string {
+    if (t.type === 'year_end_close') {
+      // Settings spec S7: the closing lines, and their contras after a reopen.
+      const fy = this.settings.fiscalYearOf(t.txn_date).label;
+      return e.contra_of_id ? `Cancelled by reopening ${fy}` : `Year-end close ${fy}`;
+    }
     if (e.contra_of_id) {
       const n = (t.entries ?? []).findIndex(x => x.id === e.contra_of_id) + 1;
       return n ? `Void contra of line ${n}` : 'Void contra';
@@ -233,7 +239,7 @@ export class TransactionDetailComponent implements OnInit {
     return '';
   }
   size(n: number) { return fileSize(n); }
-  when(iso: string | null) { return colomboDateTime(iso); }
+  when(iso: string | null) { return this.settings.dateTime(iso); }
   afterLabel(a: AttachmentRow) { return { close: 'Added after close', void: 'Added after void', reversal: 'Added after reversal' }[a.added_after!]; }
 
   /** "Add files" is disabled at the limit (5 active, or 10 uploads in total). */

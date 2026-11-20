@@ -111,6 +111,7 @@ class DownloadTest extends AttachmentsTestCase
         }
         $deletes = collect(File::allFiles(app_path()))->filter(fn ($f) => preg_match('/\$disk->delete\(|Storage::disk\([^)]*\)->delete\(/', $f->getContents()))
             ->map(fn ($f) => $f->getRelativePathname())->values()->all();
-        $this->assertSame(['Http/Controllers/Api/V1/AttachmentController.php'], $deletes);
+        // AG-092 R3: the logo store rolls back a logo file whose upload failed, the same exception as attachments.
+        $this->assertSame(['Http/Controllers/Api/V1/AttachmentController.php', 'Support/LogoStore.php'], $deletes);
     }
 }

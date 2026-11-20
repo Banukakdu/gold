@@ -59,6 +59,7 @@ class TransferController extends Controller
     /** AG-054 */
     public function reverse(Request $request, Transaction $transaction)
     {
+        abort_if($transaction->type === Transaction::YEAR_END_CLOSE, 422, LedgerService::YEAR_END_LOCKED);
         $user = $request->user();
         if (in_array($transaction->type, self::SUPER_ADMIN_TYPES, true) && ! $user->is_super_admin) {
             abort(403, 'Only a Super Admin can reverse this entry.');

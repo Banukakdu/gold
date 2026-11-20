@@ -36,4 +36,13 @@ class Branch extends Model
     {
         return static::where('is_main', true)->firstOrFail();
     }
+
+    /**
+     * Every branch row FOR UPDATE, in id order (one lock order everywhere, so no deadlock). The year-end close and
+     * reopen, and period lock / unlock, all take it first, so they run one at a time (settings spec R8 / R13).
+     */
+    public static function lockAll(): void
+    {
+        static::query()->orderBy('id')->lockForUpdate()->get(['id']);
+    }
 }

@@ -3,6 +3,7 @@ import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
+import { AppDatePipe } from '../../core/app-date.pipe';
 import { MoneyPipe } from '../../core/money.pipe';
 import {
   BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, ReportMeta, ReportParams, currentMonth, fieldErrors, toHttpParams,
@@ -29,7 +30,7 @@ export const MOVEMENT_TYPES: [string, string][] = [
 /** AG-084 */
 @Component({
   standalone: true,
-  imports: [FormsModule, MoneyPipe, BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent],
+  imports: [FormsModule, MoneyPipe, AppDatePipe, BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent],
   template: `
     <h1>Transfers &amp; Allocations</h1>
     <form class="filters" (ngSubmit)="load(1)">
@@ -60,7 +61,7 @@ export const MOVEMENT_TYPES: [string, string][] = [
             <tbody>
               @for (m of r.movements.data; track m.id) {
                 <tr>
-                  <td>{{ m.txn_date }}</td><td class="mono">{{ m.ref_no }}</td>
+                  <td>{{ m.txn_date | appDate }}</td><td class="mono">{{ m.ref_no }}</td>
                   <td>{{ m.status === 'reversal' ? 'Reversal (' + typeLabel(m.movement_type) + ')' : typeLabel(m.movement_type) }}</td>
                   <td>{{ m.from.branch_code }} · {{ m.from.account }}</td><td>{{ m.to.branch_code }} · {{ m.to.account }}</td>
                   <td class="num" [class.neg]="+m.amount < 0">{{ m.amount | money }}</td>

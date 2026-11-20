@@ -5,7 +5,7 @@ import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe } from '../../core/money.pipe';
 import {
-  BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, ReportMeta, ReportParams, currentMonth, fieldErrors, toHttpParams,
+  BranchPickerComponent, ExportButtonsComponent, FiscalPresetsComponent, ReportHeadComponent, ReportMeta, ReportParams, currentMonth, fieldErrors, toHttpParams,
   readQuery, reportError, writeQuery,
 } from './report-common';
 
@@ -17,12 +17,13 @@ interface IncomeExpense extends ReportMeta { income: Section | null; expense: Se
 /** AG-082 */
 @Component({
   standalone: true,
-  imports: [FormsModule, RouterLink, MoneyPipe, BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent],
+  imports: [FormsModule, RouterLink, MoneyPipe, FiscalPresetsComponent, BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent],
   template: `
     <h1>Income &amp; Expense <small class="muted">by category</small></h1>
     <form class="filters" (ngSubmit)="load()">
       <label>From <input type="date" name="from" [(ngModel)]="f.from" required /></label>
       <label>To <input type="date" name="to" [(ngModel)]="f.to" required /></label>
+      <ag-fy-presets (pick)="preset($event)" />
       <ag-branch-picker [(selected)]="branches" />
       <select name="type" [(ngModel)]="f.type">
         <option value="all">All</option><option value="income">Income</option><option value="expense">Expense</option>
@@ -96,6 +97,11 @@ export class IncomeExpenseComponent implements OnInit {
     const { q, branches } = readQuery(this.route, this.auth.isAllBranches());
     this.f = { from: q.get('from') ?? this.f.from, to: q.get('to') ?? this.f.to, type: q.get('type') ?? this.f.type };
     this.branches.set(branches);
+    this.load();
+  }
+
+  preset(r: { from: string; to: string }) {
+    this.f = { ...this.f, ...r };
     this.load();
   }
 

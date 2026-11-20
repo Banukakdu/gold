@@ -12,7 +12,7 @@
             <tr class="carry"><td colspan="5">Brought forward</td><td class="num">{{ $m($page['bf']['receipt']) }}</td><td class="num">{{ $m($page['bf']['payment']) }}</td><td></td></tr>
             @forelse ($page['rows'] as $r)
                 @if ($r['kind'] === 'day')
-                    <tr class="b sub"><td>{{ $r['date'] }}</td><td colspan="3">Day</td><td class="num">{{ $m($r['opening']) }}</td><td class="num">{{ $m($r['receipts']) }}</td><td class="num">{{ $m($r['payments']) }}</td><td class="num">{{ $m($r['closing']) }}</td></tr>
+                    <tr class="b sub"><td>{{ app(\App\Support\Settings::class)->formatDate($r['date']) }}</td><td colspan="3">Day</td><td class="num">{{ $m($r['opening']) }}</td><td class="num">{{ $m($r['receipts']) }}</td><td class="num">{{ $m($r['payments']) }}</td><td class="num">{{ $m($r['closing']) }}</td></tr>
                 @else
                     <tr><td></td><td>{{ $r['ref_no'] }}</td><td>{{ \App\Services\ReportService::typeLabel($r['type']) }}</td><td>{{ \Illuminate\Support\Str::limit($r['description'], 60) }}</td><td></td>
                         <td class="num">{{ $r['receipt'] !== '0.00' ? $m($r['receipt']) : '' }}</td><td class="num">{{ $r['payment'] !== '0.00' ? $m($r['payment']) : '' }}</td><td></td></tr>

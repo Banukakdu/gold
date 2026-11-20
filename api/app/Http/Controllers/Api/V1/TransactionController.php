@@ -6,10 +6,10 @@ use App\Http\Controllers\Controller;
 use App\Models\Account;
 use App\Models\AuditLog;
 use App\Models\Branch;
-use App\Models\PeriodLock;
 use App\Models\Transaction;
 use App\Models\User;
 use App\Services\LedgerService;
+use App\Services\YearEnd;
 use App\Support\BranchContext;
 use App\Support\BusinessDate;
 use App\Support\Money;
@@ -163,9 +163,12 @@ class TransactionController extends Controller
     /** AG-063: edit descriptive fields (amount/account changes = void and re-enter, keeps the ledger simple and auditable). */
     public function update(Request $request, Transaction $transaction)
     {
+        abort_if($transaction->type === Transaction::YEAR_END_CLOSE, 422, LedgerService::YEAR_END_LOCKED);
         abort_unless(in_array($transaction->type, [Transaction::INCOME, Transaction::EXPENSE]) && $transaction->status === 'posted', 422, 'This entry cannot be edited.');
         $date = $transaction->txn_date->format('Y-m-d');
-        abort_if(PeriodLock::isLocked($transaction->branch_id, $date), 422, 'The period '.substr($date, 0, 7).' is locked.');
+        if ($refused = app(YearEnd::class)->closedOrLockedMessage($transaction->branch_id, $date)) {
+            abort(422, $refused);
+        }
         $request->user()->canDo("{$transaction->type}.edit") || abort(403, "Missing permission: {$transaction->type}.edit");
 
         $data = $request->validate([
@@ -180,7 +183,9 @@ class TransactionController extends Controller
             // Retried on a deadlock (review R3b): each attempt starts from the stored row.
             $transaction->refresh();
             // Re-check with a locking read inside the write (reviewer R5), like LedgerService::assertOpen.
-            abort_if(PeriodLock::isLocked($transaction->branch_id, $date, share: true), 422, 'The period '.substr($date, 0, 7).' is locked.');
+            if ($refused = app(YearEnd::class)->closedOrLockedMessage($transaction->branch_id, $date, share: true)) {
+                abort(422, $refused);
+            }
             $fields = Arr::except($data, ['category_id']);
             if ($fields) {
                 $old = $transaction->only(array_keys($fields));
@@ -199,6 +204,9 @@ class TransactionController extends Controller
 
     public function void(Request $request, Transaction $transaction)
     {
+        if ($transaction->type === Transaction::YEAR_END_CLOSE) {
+            return response()->json(['message' => LedgerService::YEAR_END_LOCKED], 422);
+        }
         // Type first: transfers have no *.void permission, and the answer for them is "use reverse" (AC 5).
         if (! in_array($transaction->type, [Transaction::INCOME, Transaction::EXPENSE], true)) {
             return response()->json(['message' => 'Only income and expense entries can be voided. Use reverse for transfers.'], 422);

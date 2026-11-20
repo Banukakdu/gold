@@ -2,6 +2,7 @@
 
 namespace App\Exports;
 
+use App\Support\Settings;
 use Maatwebsite\Excel\Concerns\WithEvents;
 use Maatwebsite\Excel\Concerns\WithTitle;
 use Maatwebsite\Excel\Events\AfterSheet;
@@ -93,7 +94,7 @@ class ReportSheet implements WithEvents, WithTitle
             $ws->getStyle([$col, $row])->getNumberFormat()->setFormatCode('0.0');
         } elseif ($type === 'date' && is_string($v) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $v)) {
             $ws->setCellValueExplicit([$col, $row], ExcelDate::stringToExcel($v), DataType::TYPE_NUMERIC);
-            $ws->getStyle([$col, $row])->getNumberFormat()->setFormatCode('yyyy-mm-dd');
+            $ws->getStyle([$col, $row])->getNumberFormat()->setFormatCode(app(Settings::class)->excelDateFormat()); // AG-092 S3
         } else {
             $this->text($ws, $col, $row, (string) $v);
         }

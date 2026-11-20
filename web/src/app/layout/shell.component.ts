@@ -1,6 +1,7 @@
-import { Component, inject } from '@angular/core';
+import { Component, OnInit, inject } from '@angular/core';
 import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { AuthService } from '../core/auth.service';
+import { SettingsService } from '../core/settings.service';
 
 @Component({
   selector: 'ag-shell',
@@ -9,7 +10,11 @@ import { AuthService } from '../core/auth.service';
   template: `
     <div class="shell">
       <aside class="side">
-        <div class="brand">Account<span>gold</span></div>
+        <!-- S2: the company's logo and name; the product name moves to the footer -->
+        <div class="company">
+          @if (settings.logoUrl(); as logo) { <img [src]="logo" [alt]="settings.companyName()" /> }
+          <span>{{ settings.companyName() }}</span>
+        </div>
         <nav>
           <a routerLink="/dashboard" routerLinkActive="on">Dashboard</a>
           @if (auth.can('transaction.view')) { <a routerLink="/transactions" routerLinkActive="on">Transactions</a> }
@@ -22,10 +27,13 @@ import { AuthService } from '../core/auth.service';
           @if (auth.can('report.view')) { <a routerLink="/reports" routerLinkActive="on">Reports</a> }
           @if (auth.can('audit.view')) { <a routerLink="/audit-log" routerLinkActive="on">Audit log</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/period-locks" routerLinkActive="on">Period locks</a> }
+          @if (auth.isSuperAdmin()) { <a routerLink="/year-end" routerLinkActive="on">Year-end</a> }
+          @if (auth.isSuperAdmin()) { <a routerLink="/settings" routerLinkActive="on">Settings</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/branches" routerLinkActive="on">Branches</a> }
           @if (auth.can('user.view')) { <a routerLink="/users" routerLinkActive="on">Users</a> }
           @if (auth.can('role.view')) { <a routerLink="/roles" routerLinkActive="on">Roles</a> }
         </nav>
+        <div class="side-foot"><span class="brand">Account<span>gold</span></span></div>
       </aside>
       <div class="main">
         <header class="top">
@@ -53,9 +61,12 @@ import { AuthService } from '../core/auth.service';
     </div>
   `,
 })
-export class ShellComponent {
+export class ShellComponent implements OnInit {
   auth = inject(AuthService);
+  settings = inject(SettingsService);
   private router = inject(Router);
+
+  ngOnInit() { this.settings.load(); }
 
   switch(id: string) {
     this.auth.switchBranch(id);

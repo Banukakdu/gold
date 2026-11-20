@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Support\BranchContext;
+use App\Support\Settings;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
@@ -13,6 +14,8 @@ class AppServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->app->scoped(BranchContext::class);
+        // AG-092 R1: settings are read once per request (memoised); a saved Setting flushes the memo.
+        $this->app->scoped(Settings::class);
     }
 
     public const ATTACHMENT_UPLOADS_PER_MINUTE = 30;

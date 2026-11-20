@@ -25,7 +25,7 @@ class LedgerVerify extends Command
 {
     protected $signature = 'ledger:verify';
 
-    protected $description = 'List legacy voids, check cached balances and the double-entry rules (V1-V6)';
+    protected $description = 'List legacy voids, check cached balances, the double-entry rules (V1-V6) and the year-end close (V7-V8)';
 
     public function handle(): int
     {
@@ -111,6 +111,16 @@ class LedgerVerify extends Command
         $v6 = LedgerChecks::notBackfilled();
         $failed = $this->check('V6 back-fill complete (no income, expense, capital or cross-branch entry with only money lines)', $v6->count(),
             ['Ref', 'Date', 'Branch', 'Type'], $v6->map(fn ($r) => [$r->ref_no ?? "#{$r->transaction_id}", substr((string) $r->txn_date, 0, 10), $r->branch, $r->type])->all()) || $failed;
+
+        // AG-092 year-end close (docs/specs/settings.md R9).
+        if (Schema::hasTable('year_end_closes')) {
+            $v7 = LedgerChecks::yearEnd()->map(fn ($r) => [$r['check'], $r['branch'], $r['detail'], Money::format(Money::fromCents($r['diff']))]);
+            $failed = $this->check('V7 year-end close: income and expense cleared, results moved as in the summary, Retained earnings = closed results',
+                $v7->count(), ['Check', 'Branch', 'Account / detail', 'Difference (Dr - Cr)'], $v7->all()) || $failed;
+            $v8 = LedgerChecks::closeLines()->map(fn ($r) => [$r['rule'], "line #{$r['id']}", $r['ref'], $r['date']]);
+            $failed = $this->check('V8 closing lines only in closes, nothing added to a closed year, Retained earnings written only by the close',
+                $v8->count(), ['Rule', 'Line', 'Ref', 'Date'], $v8->all()) || $failed;
+        }
 
         if ($failed) {
             $this->error('ledger:verify FAILED.');

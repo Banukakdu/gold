@@ -44,7 +44,7 @@ class ReportExportTest extends ReportTestCase
         ];
         $titles = ['income-expense' => 'Income & Expense by Category', 'branch-comparison' => 'Branch Comparison',
             'transfers' => 'Transfers & Allocations', 'cash-book' => 'Daily Cash Book'];
-        $header = ['Account-gold', 'Branches: KDY Kandy', 'Period: 2026-10-01 to 2026-10-31', 'Amounts in LKR',
+        $header = ['Account-gold', 'Branches: KDY Kandy', 'Period: 1 Oct 2026 to 31 Oct 2026', 'Amounts in LKR',
             'Posted entries incl. reversals; voided entries excluded', "Printed by {$this->acct->name} at "];
 
         foreach ($totals as $name => $expected) {
@@ -115,7 +115,8 @@ class ReportExportTest extends ReportTestCase
         $this->assertSame('A'.($headRow + 1), $ws->getFreezePane());
         // PhpSpreadsheet recycles Cell objects: read each cell right after fetching it.
         $this->assertSame('n', $ws->getCell([1, $headRow + 1])->getDataType());
-        $this->assertSame('2026-10-16', $ws->getCell([1, $headRow + 1])->getFormattedValue());
+        // AG-092 S3: a real date cell, shown in the date format setting (default "D MMM YYYY").
+        $this->assertSame('16 Oct 2026', $ws->getCell([1, $headRow + 1])->getFormattedValue());
         $this->assertSame('n', $ws->getCell([6, $headRow + 1])->getDataType());
         $this->assertSame('#,##0.00', $ws->getCell([6, $headRow + 1])->getStyle()->getNumberFormat()->getFormatCode());
         $this->assertSame('-10,000.00', $ws->getCell([6, $headRow + 1])->getFormattedValue()); // finding 6: signed
@@ -238,16 +239,18 @@ class ReportExportTest extends ReportTestCase
         $this->export('income-expense', $this->october(), 'xlsx', $u)->assertForbidden()->assertJsonPath('message', 'Missing permission: report.view');
     }
 
-    /** Nit: only PNG/JPEG data URIs are used as the logo. */
+    /**
+     * Nit, revised by AG-092 R3: the logo comes only from the stored, checked file (tests/Feature/Settings/LogoTest);
+     * a value written straight into the setting (data: URI, URL, script) is never printed.
+     */
     public function test_logo_only_png_or_jpeg_data_uri(): void
     {
         $exporter = app(ReportExporter::class);
         $p = app(ReportService::class)->params('income-expense', $this->october());
         $data = ['provisional' => false];
-        foreach (['data:image/png;base64,iVBORw0KGgo=' => true, 'data:image/jpeg;base64,/9j/4AAQ' => true, 'data:image/svg+xml;base64,PHN2Zz4=' => false,
-            'https://example.com/logo.png' => false, 'data:image/png;base64,"><script>' => false] as $logo => $ok) {
+        foreach (['data:image/png;base64,iVBORw0KGgo=', 'data:image/svg+xml;base64,PHN2Zz4=', 'https://example.com/logo.png', 'data:image/png;base64,"><script>'] as $logo) {
             Setting::put('company_logo', $logo);
-            $this->assertSame($ok ? $logo : null, $exporter->header('income-expense', $p, $data, $this->admin)['logo'], $logo);
+            $this->assertNull($exporter->header('income-expense', $p, $data, $this->admin)['logo'], $logo);
         }
     }
 

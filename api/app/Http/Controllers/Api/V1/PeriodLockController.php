@@ -8,9 +8,11 @@ use App\Models\Branch;
 use App\Models\PeriodLock;
 use App\Models\Transaction;
 use App\Models\User;
+use App\Models\YearEndClose;
 use App\Support\BranchContext;
 use App\Support\BusinessDate;
 use App\Support\LedgerChecks;
+use App\Support\Settings;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
@@ -129,11 +131,10 @@ class PeriodLockController extends Controller
         $scope = $branch ? "for {$branch->code}" : 'for all branches';
 
         try {
-            $lock = DB::transaction(function () use ($request, $period, $branchId, $label, $branch, $scope) {
-                // Serialise lock changes on the branch row (MySQL); the active-lock unique index is the last word.
-                if ($branch) {
-                    Branch::whereKey($branch->id)->lockForUpdate()->first();
-                }
+            $lock = DB::transaction(function () use ($request, $period, $branchId, $label, $scope) {
+                // Serialise lock changes with each other and with the year-end close and reopen (review S1): every
+                // branch row, in id order, as LedgerService does. The active-lock unique index is the last word.
+                Branch::lockAll();
                 $active = PeriodLock::active()->lockForUpdate()
                     ->where(fn ($q) => $q->whereNull('branch_id')->when($branchId, fn ($w) => $w->orWhere('branch_id', $branchId)))
                     ->where('period', '>=', $period)->get();
@@ -184,9 +185,18 @@ class PeriodLockController extends Controller
     /** @return array reopened months (R7) */
     private function doUnlock(Request $request, PeriodLock $periodLock, string $reason): array
     {
+        // Review S1: the same branch row locks as the close, so an unlock cannot interleave with a close.
+        Branch::lockAll();
         $lock = PeriodLock::lockForUpdate()->findOrFail($periodLock->id);
         abort_if($lock->unlocked_at !== null, 422, 'This lock is already unlocked.');
         $label = PeriodLock::label($lock->period);
+
+        // Settings review finding 1: the close's own lock stays while the year is closed.
+        $closes = YearEndClose::active()->sharedLock()->get();
+        $own = $closes->firstWhere('period_lock_id', $lock->id);
+        if ($own !== null) {
+            abort(422, self::closedMessage($own, $label));
+        }
 
         if ($lock->branch_id !== null) {
             $global = PeriodLock::active()->whereNull('branch_id')->where('period', $lock->period)->exists();
@@ -203,12 +213,27 @@ class PeriodLockController extends Controller
         }
 
         $reopens = $lock->reopens();
+        // Settings spec R8: no unlock may reopen a month of a closed fiscal year.
+        foreach ($closes as $c) {
+            $first = substr((string) $c->period_start->format('Y-m-d'), 0, 7);
+            $last = substr((string) $c->period_end->format('Y-m-d'), 0, 7);
+            foreach ($reopens as $r) {
+                if (($r['from'] === null || $r['from'] <= $last) && $r['to'] >= $first) {
+                    abort(422, self::closedMessage($c, $label));
+                }
+            }
+        }
         $lock->update(['unlocked_at' => now(), 'unlocked_by' => $request->user()->id, 'unlock_reason' => $reason]);
         AuditLog::record('period.unlocked', $lock,
             ['period' => $lock->period, 'branch_id' => $lock->branch_id, 'locked_by' => $lock->locked_by, 'locked_at' => $lock->created_at?->toIso8601String()],
             ['reason' => $reason, 'unlocked_by' => $request->user()->id, 'reopened' => $reopens], $lock->branch_id);
 
         return $reopens;
+    }
+
+    private static function closedMessage(YearEndClose $c, string $label): string
+    {
+        return app(Settings::class)->fiscalYearStarting((int) $c->fiscal_year)->label()." is closed. Reopen the year before unlocking {$label}.";
     }
 
     /**

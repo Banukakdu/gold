@@ -6,11 +6,13 @@ use App\Models\Account;
 use App\Models\Branch;
 use App\Models\Category;
 use App\Models\PeriodLock;
-use App\Models\Setting;
 use App\Models\Transaction;
+use App\Models\YearEndClose;
 use App\Support\BranchContext;
+use App\Support\FiscalYear;
 use App\Support\Money;
 use App\Support\ReportParams;
+use App\Support\Settings;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Collection;
@@ -53,6 +55,7 @@ class ReportService
         Transaction::INCOME => 'Income',
         Transaction::EXPENSE => 'Expense',
         Transaction::REVERSAL => 'Reversal',
+        Transaction::YEAR_END_CLOSE => 'Year-end close',
     ];
 
     public const MAX_DAYS = 366;
@@ -70,8 +73,13 @@ class ReportService
 
     public const BASIS = 'Posted entries incl. reversals; voided entries excluded';
 
-    /** Double-entry S2 basis line of the trial balance. */
-    public const TB_BASIS = 'All posted lines; period columns exclude voided entries; income and expense are cumulative since the first entry (no year-end close yet)';
+    /** Double-entry S2 basis line of the trial balance (before AG-092; the fiscal-year basis is tbBasis()). */
+    public const TB_BASIS = 'All posted lines; period columns exclude voided entries';
+
+    /** Settings spec R6: the virtual equity row of income and expense of earlier years that are not closed. */
+    public const EARLIER_RESULT = 'Result of earlier years not yet closed';
+
+    public const TB_CLOSING_ONLY_AT_YEAR_END = 'Closing entries can be included only for the last day of a closed fiscal year.';
 
     public const TB_GROUPS = ['asset' => 'Assets', 'liability' => 'Liabilities', 'equity' => 'Equity',
         'interbranch' => 'Inter-branch (eliminated on consolidation)', 'income' => 'Income', 'expense' => 'Expenses'];
@@ -104,15 +112,28 @@ class ReportService
             'income-expense' => ['type' => ['nullable', Rule::in(['all', 'income', 'expense'])]],
             'transfers' => ['types' => 'nullable|array', 'types.*' => ['string', Rule::in(self::MOVEMENT_TYPES)], 'page' => 'nullable|integer|min:1'],
             'cash-book' => ['accounts' => 'nullable|array', 'accounts.*' => 'integer|distinct'],
-            'trial-balance' => ['view' => ['nullable', Rule::in(['branch', 'consolidated'])]],
+            'trial-balance' => ['view' => ['nullable', Rule::in(['branch', 'consolidated'])], 'closing_entries' => 'nullable|boolean'],
             default => [],
         };
         $d = validator($input, $rules)->validate();
 
-        $days = CarbonImmutable::parse($d['from'])->diffInDays(CarbonImmutable::parse($d['to'])) + 1;
-        $max = $name === 'cash-book' ? self::CASH_BOOK_MAX_DAYS : self::MAX_DAYS;
-        if ($days > $max) {
-            throw ValidationException::withMessages(['to' => "The date range may not be longer than {$max} days."]);
+        $fy = null;
+        if ($name === 'trial-balance') {
+            // Settings spec R5: one fiscal year per trial balance (replaces the 366-day rule for this report).
+            $fy = app(Settings::class)->fiscalYear($d['from']);
+            if (! $fy->contains($d['to'])) {
+                throw ValidationException::withMessages(['to' => "From and To must be in the same fiscal year ({$fy->label()}: {$fy->start()} to {$fy->end()})."]);
+            }
+            if (filter_var($d['closing_entries'] ?? false, FILTER_VALIDATE_BOOLEAN)
+                && ($d['to'] !== $fy->end() || ! YearEndClose::active()->where('fiscal_year', $fy->startYear)->exists())) {
+                throw ValidationException::withMessages(['closing_entries' => self::TB_CLOSING_ONLY_AT_YEAR_END]);
+            }
+        } else {
+            $days = CarbonImmutable::parse($d['from'])->diffInDays(CarbonImmutable::parse($d['to'])) + 1;
+            $max = $name === 'cash-book' ? self::CASH_BOOK_MAX_DAYS : self::MAX_DAYS;
+            if ($days > $max) {
+                throw ValidationException::withMessages(['to' => "The date range may not be longer than {$max} days."]);
+            }
         }
 
         $requested = array_map('intval', $d['branches'] ?? []);
@@ -145,7 +166,8 @@ class ReportService
             'income-expense' => ['type' => $d['type'] ?? 'all'],
             'transfers' => ['types' => $d['types'] ?? self::MOVEMENT_TYPES, 'page' => (int) ($d['page'] ?? 1)],
             'cash-book' => ['accounts' => array_map('intval', $d['accounts'] ?? [])],
-            'trial-balance' => ['view' => $d['view'] ?? 'branch'],
+            'trial-balance' => ['view' => $d['view'] ?? 'branch', 'closing_entries' => filter_var($d['closing_entries'] ?? false, FILTER_VALIDATE_BOOLEAN),
+                'fiscal_year' => $fy->startYear],
             default => [],
         };
         if ($name === 'trial-balance' && $extra['view'] === 'consolidated' && ($ctx->isScoped() || $branches->count() < 2)) {
@@ -165,7 +187,8 @@ class ReportService
     public function meta(ReportParams $p): array
     {
         return [
-            'company' => (string) Setting::get('company_name', config('app.name')),
+            'company' => app(Settings::class)->companyName(),
+            'currency' => app(Settings::class)->currencyCode(),
             'from' => $p->from,
             'to' => $p->to,
             'branches' => $p->branches->map(fn (Branch $b) => ['id' => $b->id, 'code' => $b->code, 'name' => $b->name, 'status' => $b->status])->values()->all(),
@@ -569,8 +592,15 @@ class ReportService
         $ids = $p->branchIds();
         $dr = $this->cents('le.debit');
         $cr = $this->cents('le.credit');
+        $fy = app(Settings::class)->fiscalYearStarting((int) $p->extra['fiscal_year']);
+        $post = (bool) ($p->extra['closing_entries'] ?? false);
+        // Settings spec R6: income and expense start at the fiscal year start S; their earlier lines go to the virtual
+        // row. Pre-closing (default) leaves this year's closing lines out of every column; post-closing includes them.
         $sums = DB::table('ledger_entries as le')->join('transactions as t', 't.id', '=', 'le.transaction_id')
+            ->join('accounts as a', 'a.id', '=', 'le.account_id')
             ->whereIn('le.branch_id', $ids)->whereDate('le.entry_date', '<=', $p->to)
+            ->where(fn ($w) => $w->whereNotIn('a.class', ['income', 'expense'])->orWhereDate('le.entry_date', '>=', $fy->start()))
+            ->when(! $post, fn ($q) => $q->where(fn ($w) => $w->where('le.origin', '<>', 'close')->orWhereDate('le.entry_date', '<', $fy->start())))
             ->groupBy('le.account_id')
             ->selectRaw("le.account_id,
                 SUM(CASE WHEN DATE(le.entry_date) < ? THEN $dr - $cr ELSE 0 END) as opening,
@@ -582,11 +612,14 @@ class ReportService
         $num = fn ($id) => ['opening' => (int) ($sums[$id]->opening ?? 0), 'pdr' => (int) ($sums[$id]->pdr ?? 0),
             'pcr' => (int) ($sums[$id]->pcr ?? 0), 'closing' => (int) ($sums[$id]->closing ?? 0)];
         $groupOrder = array_flip(array_keys(self::TB_GROUPS));
+        $earlier = DB::table('ledger_entries as le')->join('accounts as a', 'a.id', '=', 'le.account_id')
+            ->whereIn('le.branch_id', $ids)->whereIn('a.class', ['income', 'expense'])->whereDate('le.entry_date', '<', $fy->start())
+            ->groupBy('le.branch_id')->selectRaw("le.branch_id, SUM($dr) - SUM($cr) as v")->pluck('v', 'branch_id')->map(fn ($v) => (int) $v)->all();
 
-        $out = $this->meta($p) + ['view' => $p->extra['view'], 'basis' => self::TB_BASIS];
+        $out = $this->meta($p) + ['view' => $p->extra['view'], 'basis' => $this->tbBasis($fy, $post)] + $this->fiscalMeta($fy, $post);
         if ($p->extra['view'] === 'consolidated') {
             // The consolidated `subset` (a pair not eliminated) replaces the meta one.
-            return array_merge($out, $this->consolidatedTrialBalance($p, $accounts, $num, $groupOrder));
+            return array_merge($out, $this->consolidatedTrialBalance($p, $accounts, $num, $groupOrder, $earlier));
         }
 
         $sections = [];
@@ -610,6 +643,22 @@ class ReportService
                 $rows[] = ['account' => ['id' => $a->id, 'code' => $a->code, 'name' => $a->name, 'class' => $a->class, 'type' => $a->type,
                     'group' => $a->group(), 'status' => $a->status]] + array_map([Money::class, 'fromCents'], $c);
             }
+            // R6 virtual row, after the equity accounts; shown only when not 0.00.
+            if ($v = $earlier[$b->id] ?? 0) {
+                $c = ['opening_dr' => max($v, 0), 'opening_cr' => max(-$v, 0), 'period_dr' => 0, 'period_cr' => 0, 'closing_dr' => max($v, 0), 'closing_cr' => max(-$v, 0)];
+                foreach ($c as $k => $x) {
+                    $tot[$k] += $x;
+                }
+                $row = ['account' => ['id' => null, 'code' => null, 'name' => self::EARLIER_RESULT, 'class' => 'equity', 'type' => 'earlier_result',
+                    'group' => 'equity', 'status' => 'active']] + array_map([Money::class, 'fromCents'], $c);
+                $pos = 0;
+                foreach ($rows as $i => $r) {
+                    if (($groupOrder[$r['account']['group']] ?? 9) <= $groupOrder['equity']) {
+                        $pos = $i + 1;
+                    }
+                }
+                array_splice($rows, $pos, 0, [$row]);
+            }
             $balanced = $identity && $tot['opening_dr'] === $tot['opening_cr'] && $tot['period_dr'] === $tot['period_cr'] && $tot['closing_dr'] === $tot['closing_cr']
                 && $tot['opening_dr'] - $tot['opening_cr'] + $tot['period_dr'] - $tot['period_cr'] === $tot['closing_dr'] - $tot['closing_cr'];
             $allBalanced = $allBalanced && $balanced;
@@ -624,7 +673,7 @@ class ReportService
         return $out + ['sections' => $sections, 'balanced' => $allBalanced];
     }
 
-    private function consolidatedTrialBalance(ReportParams $p, Collection $accounts, callable $num, array $groupOrder): array
+    private function consolidatedTrialBalance(ReportParams $p, Collection $accounts, callable $num, array $groupOrder, array $earlier = []): array
     {
         $ids = $p->branchIds();
         $main = Branch::where('is_main', true)->first();
@@ -635,6 +684,7 @@ class ReportService
             [$key, $label, $sort] = match (true) {
                 $a->isMoney() => ["acc:{$a->id}", "{$a->branch->code} · {$a->name}", [$a->branch->is_main ? 0 : 1, $a->branch->code, (string) $a->code]],
                 $a->type === 'owner_capital' => ['owner_capital', $a->name, [(string) $a->code]],
+                $a->type === Account::RETAINED_EARNINGS => ['retained_earnings', $a->name, [(string) $a->code]],
                 $a->type === 'category' => ["cat:{$a->code}", $a->name, [(string) $a->code]],
                 $a->type === 'head_office' => ["pair:{$a->branch_id}", ($main->code ?? 'MAIN')." ↔ {$a->branch->code}", [$a->branch->code]],
                 $a->type === 'branch_current' => ["pair:{$a->counterparty_branch_id}", "{$a->branch->code} ↔ ".($codes[$a->counterparty_branch_id] ?? ''), [$codes[$a->counterparty_branch_id] ?? '']],
@@ -650,6 +700,17 @@ class ReportService
             if (in_array($a->type, Account::INTERBRANCH_TYPES, true)) {
                 $lines[$key]['pair_branch'] = $a->type === 'head_office' ? $a->branch_id : $a->counterparty_branch_id;
             }
+        }
+        // Settings spec R6: one consolidation line for the virtual row, summed over branches.
+        if (array_filter($earlier)) {
+            $line = ['key' => 'earlier_result', 'label' => self::EARLIER_RESULT, 'group' => 'equity', 'sort' => [$groupOrder['equity'], '99999'],
+                'by_branch' => array_fill_keys($ids, 0), 'opening' => 0, 'pdr' => 0, 'pcr' => 0, 'closing' => 0, 'pair_branch' => null];
+            foreach ($earlier as $bid => $v) {
+                $line['by_branch'][$bid] = $v;
+                $line['opening'] += $v;
+                $line['closing'] += $v;
+            }
+            $lines['earlier_result'] = $line;
         }
         // Accountant sign-off B: group order first, then the keys within the group, element by element. Comparing the
         // arrays whole would order shorter arrays first (PHP compares array length before values), so money rows
@@ -709,6 +770,37 @@ class ReportService
             'balanced' => $balanced,
             'difference' => Money::fromCents($diff),
             'subset' => $subset,
+        ];
+    }
+
+    /** S6 basis line of the trial balance (settings spec, review finding 14). */
+    public function tbBasis(FiscalYear $fy, bool $post): string
+    {
+        return self::TB_BASIS.". Income and expense from the start of {$fy->label()} (".app(Settings::class)->formatDate($fy->start()).'). '
+            ."Results of earlier years are in Retained earnings (MAIN) and Head office current accounts once closed, otherwise in '"
+            .self::EARLIER_RESULT."'. Retained earnings excludes results before go-live. Closing entries ".($post ? 'included.' : 'excluded.');
+    }
+
+    /** S6 / API: the fiscal year of the report, its close state, and whether an earlier year is not closed. */
+    private function fiscalMeta(FiscalYear $fy, bool $post): array
+    {
+        $closes = YearEndClose::with(['closedBy:id,name', 'reopenedBy:id,name'])->where('fiscal_year', $fy->startYear)->orderBy('id')->get();
+        $active = $closes->firstWhere('status', YearEndClose::CLOSED);
+        $last = $closes->last();
+        $earlier = app(YearEnd::class)->earliestUnclosedBefore($fy);
+
+        return [
+            'fiscal_year' => $fy->toArray() + [
+                'closed' => $active !== null,
+                'closed_at' => $active?->closed_at?->toIso8601String(),
+                'closed_by' => $active?->closedBy?->name,
+                // Review finding 5: reopened and not closed again (red banner).
+                'reopened' => ! $active && $last ? ['at' => $last->reopened_at?->toIso8601String(), 'by' => $last->reopenedBy?->name, 'reason' => $last->reopen_reason] : null,
+                'reopen_count' => $closes->where('status', YearEndClose::REOPENED)->count(),
+            ],
+            'earlier_unclosed' => $earlier !== null,
+            'earlier_unclosed_label' => $earlier?->label(),
+            'closing_entries' => $post,
         ];
     }
 

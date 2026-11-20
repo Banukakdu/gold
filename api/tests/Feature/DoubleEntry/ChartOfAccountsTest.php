@@ -178,7 +178,7 @@ class ChartOfAccountsTest extends DoubleEntryTestCase
         $groups = collect($chart['groups'])->keyBy('group');
         $this->assertSame(['Branch current account – KDY', 'Branch current account – GAL'], array_column($groups['interbranch']['accounts'], 'name'));
         $this->assertSame(['KDY', 'GAL'], array_column(array_column($groups['interbranch']['accounts'], 'counterparty_branch'), 'code'));
-        $this->assertSame(["Owner's capital"], array_column($groups['equity']['accounts'], 'name'));
+        $this->assertSame(["Owner's capital", 'Retained earnings'], array_column($groups['equity']['accounts'], 'name'));
         foreach ([$this->kdy, $this->gal] as $b) {
             $this->assertSame([], collect($this->chart($this->sa(), ['branch_id' => $b->id])['groups'])->firstWhere('group', 'equity')['accounts']);
         }
