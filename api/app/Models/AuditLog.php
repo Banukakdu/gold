@@ -35,8 +35,10 @@ class AuditLog extends Model
      * $client overrides the current request's ip / user_agent (each key that is present, null included): a queued job
      * runs in the worker, so it passes the requester's values captured in the request (password reset spec R12,
      * accounting review finding 3); the console passes ['ip' => null, 'user_agent' => 'console'] (reviewer N6).
+     * `user_id` (when present, null included) replaces the signed-in user: a background export records its requester,
+     * and an expired export none (background exports R11).
      *
-     * @param  array{ip?: ?string, user_agent?: ?string}|null  $client
+     * @param  array{ip?: ?string, user_agent?: ?string, user_id?: ?int}|null  $client
      */
     public static function record(string $event, ?Model $model = null, ?array $old = null, ?array $new = null, ?int $branchId = null,
         ?array $client = null): self
@@ -44,7 +46,7 @@ class AuditLog extends Model
         $req = request();
 
         return static::create([
-            'user_id' => auth()->id(),
+            'user_id' => $client !== null && array_key_exists('user_id', $client) ? $client['user_id'] : auth()->id(),
             'branch_id' => $branchId ?? $model?->branch_id ?? null,
             'event' => $event,
             'auditable_type' => $model ? $model::class : null,

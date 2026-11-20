@@ -58,7 +58,8 @@ class AuditLogController extends Controller
         'accounts' => [['account.'], []],
         'branches' => [['branch.'], []],
         'periods' => [['period.'], []],
-        'reports' => [[], ['report.exported', 'audit.exported']],
+        // AG-087 R11: background exports are in the Reports group.
+        'reports' => [['export.'], ['report.exported', 'audit.exported']],
         'logins' => [['auth.'], []],
         'attachments' => [['attachment.'], []],
         // AG-092 R12
@@ -89,6 +90,12 @@ class AuditLogController extends Controller
         'period.unlocked' => 'Period unlocked',
         'report.exported' => 'Report exported',
         'audit.exported' => 'Audit log exported',
+        'export.requested' => 'Export requested',
+        'export.ready' => 'Export ready',
+        'export.failed' => 'Export failed',
+        'export.downloaded' => 'Export downloaded',
+        'export.expired' => 'Export expired',
+        'export.download_denied' => 'Export download refused',
         'auth.login' => 'Login',
         'auth.logout' => 'Logout',
         'auth.locked_out' => 'Login locked',
@@ -175,7 +182,7 @@ class AuditLogController extends Controller
         $sheetRows = array_map(fn (array $r) => ['bold' => false, 'cells' => [
             $r['created_at_local'],
             $r['branch']['code'] ?? '—',
-            $r['user'] ? $r['user']['name'].($r['user']['tag'] ? " ({$r['user']['tag']})" : '') : '—',
+            $r['system'] ? 'System' : ($r['user'] ? $r['user']['name'].($r['user']['tag'] ? " ({$r['user']['tag']})" : '') : '—'),
             $r['event_label'],
             $r['subject'],
             $r['summary'],
@@ -304,6 +311,8 @@ class AuditLogController extends Controller
                 'created_at_local' => $a->created_at?->copy()->setTimezone(self::TZ)->format('Y-m-d H:i:s'),
                 'branch' => $a->branch ? ['id' => $a->branch->id, 'code' => $a->branch->code] : null,
                 'user' => $a->user ? ['id' => $a->user->id, 'name' => $a->user->name, 'tag' => $this->tag($a->user, $a->branch_id, $members)] : null,
+                // AG-087 finding 7: a system event (ready, failed by the job or prune, expired) shows "System" as its user.
+                'system' => ($a->new_values['by_system'] ?? false) === true,
                 'event' => $a->event,
                 'event_label' => self::label($a->event, $txn?->type ?? ($a->new_values['type'] ?? null)),
                 'subject' => $this->subject($a, $subjects),
@@ -384,7 +393,7 @@ class AuditLogController extends Controller
             YearEndClose::class => app(Settings::class)->fiscalYearStarting((int) ($a->new_values['fiscal_year'] ?? $a->old_values['fiscal_year'] ?? YearEndClose::find($id)?->fiscal_year ?? 0))->label(),
             default => match ($a->event) {
                 // AG-065 R14: 'transactions' is not a ReportService name (that would open reports/transactions/export).
-                'report.exported' => (ReportExporter::TITLES + ['transactions' => 'Transactions'])[$a->new_values['name'] ?? ''] ?? '',
+                'report.exported', 'export.requested', 'export.ready', 'export.failed', 'export.downloaded', 'export.expired', 'export.download_denied' => (ReportExporter::TITLES + ['transactions' => 'Transactions'])[$a->new_values['name'] ?? ''] ?? '',
                 'audit.exported' => 'Audit log',
                 'settings.updated' => 'Settings',
                 'settings.logo_uploaded', 'settings.logo_removed' => 'Logo',

@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\V1\BranchController;
 use App\Http\Controllers\Api\V1\CategoryController;
 use App\Http\Controllers\Api\V1\ChartOfAccountsController;
 use App\Http\Controllers\Api\V1\DashboardController;
+use App\Http\Controllers\Api\V1\ExportController;
 use App\Http\Controllers\Api\V1\FiscalYearController;
 use App\Http\Controllers\Api\V1\PeriodLockController;
 use App\Http\Controllers\Api\V1\ReportController;
@@ -57,6 +58,12 @@ Route::prefix('v1')->group(function () {
             Route::get('reports/cash-flow', [ReportController::class, 'cashFlow'])->middleware('perm:report.view'); // AG-086
             Route::get('reports/trial-balance', [ReportController::class, 'trialBalance'])->middleware('perm:report.view');
             Route::post('reports/{name}/export', [ReportController::class, 'export'])->middleware('perm:report.view,report.export');
+
+            // AG-087 background exports (docs/specs/background-exports.md section 5): the requester's own only (404
+            // otherwise); signed in is enough, download re-checks access against the export's stored branch context.
+            Route::get('exports', [ExportController::class, 'index']);
+            Route::get('exports/{exportId}', [ExportController::class, 'show']);
+            Route::get('exports/{exportId}/download', [ExportController::class, 'download']);
 
             Route::get('branches', [BranchController::class, 'index']);
             Route::post('branches', [BranchController::class, 'store'])->middleware('super');

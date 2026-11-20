@@ -54,6 +54,8 @@ tr.sub td { background: #f6f1e4; font-weight: 600; }
   label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); } .wide { grid-column: 1 / -1; } }
 .actions { display: flex; justify-content: flex-end; }
 .alert { background: #fbeceb; color: var(--neg); border: 1px solid #f0c9c5; padding: 8px 10px; border-radius: 6px; }
+/* AG-087: a neutral notice (an export prepared in the background). */
+.alert.info { background: #e1ebf7; color: #2a5d9f; border-color: #c3d5ec; }
 .ok { background: #e8f4ec; color: var(--pos); border: 1px solid #c4e2cf; padding: 8px 10px; border-radius: 6px; }
 .pager { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; }
 .login { min-height: 100vh; display: grid; place-items: center; padding: 16px;
@@ -249,3 +251,9 @@ tr.tr-red td { background: #fbeceb; }
   .tr-actions { white-space: normal; }
   .tr-actions button.link { min-height: 44px; display: block; }
 }
+
+/* AG-087 S2 export status badges: Queued grey, Preparing blue, Ready green, Failed red, Expired grey. */
+.tag[data-s='ex-queued'], .tag[data-s='ex-expired'] { background: #f1f0ed; color: var(--muted); }
+.tag[data-s='ex-running'] { background: #e1ebf7; color: #2a5d9f; }
+.tag[data-s='ex-ready'] { background: #dff1e6; color: var(--pos); }
+.tag[data-s='ex-failed'] { background: #f4e1df; color: var(--neg); }

@@ -2,21 +2,26 @@
 
 namespace App\Services;
 
+use App\Exceptions\ExportFailure;
 use App\Exports\ReportWorkbook;
+use App\Exports\XlsxStreamWriter;
 use App\Models\AuditLog;
 use App\Models\User;
 use App\Support\Money;
+use App\Support\ReadSnapshot;
 use App\Support\ReportParams;
 use App\Support\Settings;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\CarbonImmutable;
+use Closure;
 use Illuminate\Support\Str;
 use Maatwebsite\Excel\Excel as ExcelWriter;
 use Maatwebsite\Excel\Facades\Excel;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
- * Synchronous PDF / Excel export of the reports (spec section 5, accounting review finding 4/5).
+ * PDF / Excel export of the reports (spec section 5, accounting review finding 4/5): synchronous, or built into a file by
+ * a background export (AG-087, docs/specs/background-exports.md).
  * The same numbers as the screen: every export is built from ReportService with all rows (not one screen page).
  */
 class ReportExporter
@@ -74,44 +79,159 @@ class ReportExporter
         };
     }
 
-    public function download(string $name, ReportParams $p, string $format, User $user): Response
+    /**
+     * The export endpoint (AG-087 R1). Read inside one consistent snapshot (finding 12). An Excel export with more than
+     * `exports.sync_rows` rows (at most `exports.max_rows`) is handed to $queue with its row count, except the Cash
+     * Flow Summary (at most 24 rows); PDF is never queued and keeps its own cap. `report.exported` is written after
+     * the snapshot closes (writes are not possible inside it).
+     *
+     * @param  (Closure(int): Response)|null  $queue  null = synchronous only (Excel cap = sync_rows)
+     */
+    public function download(string $name, ReportParams $p, string $format, User $user, ?Closure $queue = null): Response
     {
-        // Income & Expense counts lines from the built report: build it once and reuse it.
-        $data = match ($name) {
-            'income-expense' => $this->reports->incomeExpense($p),
-            'trial-balance' => $this->reports->trialBalance($p),
-            default => null,
-        };
-        $rows = $this->countRows($name, $p, $data);
-        $cap = $format === 'pdf' ? ReportService::PDF_EXPORT_CAP : ReportService::EXPORT_CAP;
-        if ($rows > $cap) {
-            $message = $format === 'pdf'
-                ? 'This export has '.number_format($rows).' rows; the limit for PDF is '.number_format($cap).'. Use Excel or narrow the date range or branches.'
-                : 'This export has '.number_format($rows).' rows; the limit is '.number_format($cap).'. Narrow the date range or branches.';
-            abort(response()->json(['message' => $message], 422));
+        $rows = 0;
+        $response = ReadSnapshot::run(function () use ($name, $p, $format, $user, $queue, &$rows) {
+            // Income & Expense counts lines from the built report: build it once and reuse it.
+            $data = $this->prebuild($name, $p);
+            $rows = $this->countRows($name, $p, $data);
+            ReadSnapshot::hook('counted');
+            if ($format === 'xlsx' && $rows > BackgroundExports::syncRows() && $name !== 'cash-flow') {
+                if ($rows > BackgroundExports::maxRows() || ! $queue) {
+                    $cap = $queue ? BackgroundExports::maxRows() : BackgroundExports::syncRows();
+                    abort(response()->json(['message' => 'This export has '.number_format($rows).' rows; the limit is '.number_format($cap).'. Narrow the date range or branches.'], 422));
+                }
+
+                return null; // queued below, outside the snapshot
+            }
+            if ($format === 'pdf' && $rows > ReportService::PDF_EXPORT_CAP) {
+                abort(response()->json(['message' => 'This export has '.number_format($rows).' rows; the limit for PDF is '
+                    .number_format(ReportService::PDF_EXPORT_CAP).'. Use Excel or narrow the date range or branches.'], 422));
+            }
+            if ($format === 'pdf') {
+                self::raisePdfLimits();
+            }
+
+            $data ??= $this->build($name, $p);
+            $head = $this->header($name, $p, $data, $user);
+            $file = self::fileName($name, $p, $format);
+
+            $response = $format === 'xlsx'
+                ? Excel::download(new ReportWorkbook($head['lines'], $this->sheets($name, $data)), $file, ExcelWriter::XLSX)
+                : $this->pdf($name, $head, $data, $file);
+            $response->headers->set('Content-Disposition', 'attachment; filename="'.$file.'"');
+
+            return $response;
+        });
+        if ($response === null) {
+            return $queue($rows);
         }
-        if ($format === 'pdf') {
-            self::raisePdfLimits();
-        }
 
-        $data ??= match ($name) {
-            'branch-comparison' => $this->reports->branchComparison($p),
-            'transfers' => $this->reports->transfers($p, all: true),
-            'cash-book' => $this->reports->cashBook($p),
-            'cash-flow' => $this->reports->cashFlow($p),
-        };
-        $head = $this->header($name, $p, $data, $user);
-        $file = "{$name}_{$p->from}_{$p->to}.{$format}";
-
-        $response = $format === 'xlsx'
-            ? Excel::download(new ReportWorkbook($head['lines'], $this->sheets($name, $data)), $file, ExcelWriter::XLSX)
-            : $this->pdf($name, $head, $data, $file);
-
-        $response->headers->set('Content-Disposition', 'attachment; filename="'.$file.'"');
         AuditLog::record('report.exported', null, null, ['name' => $name, 'format' => $format, 'params' => $p->toArray(), 'rows' => $rows],
             $p->branches->count() === 1 ? $p->branches->first()->id : null);
 
         return $response;
+    }
+
+    public static function fileName(string $name, ReportParams $p, string $format = 'xlsx'): string
+    {
+        return "{$name}_{$p->from}_{$p->to}.{$format}";
+    }
+
+    /** Finding 5: detail rows held by the built data (compared with the count taken in the snapshot). */
+    public function builtRows(string $name, array $d): int
+    {
+        return match ($name) {
+            'income-expense' => $this->reports->incomeExpenseRows($d),
+            'branch-comparison' => count($d['rows']),
+            'transfers' => count($d['movements']['data']),
+            'cash-book' => array_sum(array_map(fn ($a) => array_sum(array_map(fn ($day) => count($day['lines']), $a['days'])), $d['accounts'])),
+            'trial-balance' => $this->reports->trialBalanceRows($d),
+            'cash-flow' => count($d['months']),
+        };
+    }
+
+    /** The data the row count needs (I&E and trial balance count lines of the built report), else null. */
+    private function prebuild(string $name, ReportParams $p): ?array
+    {
+        return match ($name) {
+            'income-expense' => $this->reports->incomeExpense($p),
+            'trial-balance' => $this->reports->trialBalance($p),
+            default => null,
+        };
+    }
+
+    private function build(string $name, ReportParams $p): array
+    {
+        return match ($name) {
+            'branch-comparison' => $this->reports->branchComparison($p),
+            'transfers' => $this->reports->transfers($p, all: true),
+            'cash-book' => $this->reports->cashBook($p),
+            'cash-flow' => $this->reports->cashFlow($p),
+            'income-expense' => $this->reports->incomeExpense($p),
+            'trial-balance' => $this->reports->trialBalance($p),
+        };
+    }
+
+    /**
+     * AG-087 R4/R5: build a queued report export into $w, inside the job's snapshot (the caller opens it). The count
+     * is the first read (SQLite snapshot rule, finding 2). Returns the counts the completeness check needs (finding 5):
+     * the detail rows counted in the snapshot, those built from the data, each sheet's rows built and written, and the
+     * totals that do not foot. Throws ExportFailure over_limit when the data grew past the limit.
+     *
+     * @return array{rows: int, built: int, sheets: array<int, array{built: int, written: int}>, unfooted: string[]}
+     */
+    public function buildFile(string $name, ReportParams $p, User $user, XlsxStreamWriter $w, string $extracted): array
+    {
+        $data = $this->prebuild($name, $p);
+        $rows = $this->countRows($name, $p, $data);
+        ReadSnapshot::hook('counted');
+        if ($rows > BackgroundExports::maxRows()) {
+            throw ExportFailure::overLimit($rows);
+        }
+        $data ??= $this->build($name, $p);
+        $head = $this->header($name, $p, $data, $user, $extracted);
+        $sheets = [];
+        foreach ($this->sheets($name, $data) as $s) {
+            $sheets[] = ['built' => count($s['rows']), 'written' => $w->sheet($s['title'], $head['lines'], $s['columns'], $s['rows'], $s['notes'] ?? [])];
+        }
+
+        return ['rows' => $rows, 'built' => $this->builtRows($name, $data), 'sheets' => $sheets, 'unfooted' => $this->unfooted($name, $data)];
+    }
+
+    /**
+     * Finding 5: each total printed equals the sum of the rows written for it. Returns the totals that do not foot
+     * (empty = complete). All sums in integer cents.
+     *
+     * @return string[]
+     */
+    public function unfooted(string $name, array $d): array
+    {
+        $c = fn ($v) => Money::toCents((string) ($v ?? '0'));
+        $sum = fn (array $rows, callable $f) => array_sum(array_map(fn ($r) => $c($f($r)), $rows));
+        $bad = [];
+        $check = function (string $label, int $printed, int $summed) use (&$bad) {
+            if ($printed !== $summed) {
+                $bad[] = $label;
+            }
+        };
+        match ($name) {
+            'income-expense' => array_map(fn ($t) => $d[$t] === null ? null
+                : $check("{$t} total", $c($d[$t]['total']), $sum($d[$t]['categories'], fn ($cat) => $cat['amount'])), ['income', 'expense']),
+            'branch-comparison' => array_map(fn ($k) => $check("total {$k}", $c($d['total'][$k]), $sum($d['rows'], fn ($r) => $r[$k])), ReportService::COMPARISON_KEYS),
+            'transfers' => $check('net moved', $c($d['net_moved']), $sum($d['movements']['data'], fn ($m) => $m['amount'])),
+            'cash-book' => array_map(function ($a) use ($check, $c, $sum) {
+                $lines = array_merge(...array_map(fn ($day) => $day['lines'], $a['days'] ?: [['lines' => []]]));
+                $check("{$a['account']['name']} receipts", $c($a['receipts']), $sum($lines, fn ($l) => $l['receipt']));
+                $check("{$a['account']['name']} payments", $c($a['payments']), $sum($lines, fn ($l) => $l['payment']));
+            }, $d['accounts']),
+            'trial-balance' => isset($d['sections'])
+                ? array_map(fn ($sec) => array_map(fn ($k) => $check("{$sec['branch']['code']} {$k}", $c($sec['totals'][$k]), $sum($sec['rows'], fn ($r) => $r[$k])),
+                    ['opening_dr', 'opening_cr', 'period_dr', 'period_cr', 'closing_dr', 'closing_cr']), $d['sections'])
+                : array_map(fn ($k) => $check("consolidated {$k}", $c($d['totals'][$k]), $sum($d['rows'], fn ($r) => $r[$k])), ['elimination', 'dr', 'cr']),
+            default => null,
+        };
+
+        return $bad;
     }
 
     /** Safety margin for dompdf at the PDF cap (about 1,000 lines). Never lowers a higher limit. */
@@ -141,7 +261,7 @@ class ReportExporter
     }
 
     /** Header block (finding 4): identical lines at the top of every PDF page and every Excel sheet. */
-    public function header(string $name, ReportParams $p, array $data, User $user): array
+    public function header(string $name, ReportParams $p, array $data, User $user, ?string $extracted = null): array
     {
         $settings = app(Settings::class);
         $company = $settings->companyName();
@@ -182,6 +302,8 @@ class ReportExporter
             $currency,
             $basis,
             $printed,
+            // AG-087 R3 (finding 1): queued exports only, right after "Printed by".
+            $extracted,
             ...$notes,
             $data['provisional'] ? 'PROVISIONAL - period not locked' : null,
         ]));

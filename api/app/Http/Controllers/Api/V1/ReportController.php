@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
+use App\Services\BackgroundExports;
 use App\Services\ReportExporter;
 use App\Services\ReportService;
 use Illuminate\Http\Request;
@@ -50,12 +51,14 @@ class ReportController extends Controller
         return $this->reports->cashFlow($this->reports->params('cash-flow', $request->all()));
     }
 
-    public function export(Request $request, string $name)
+    /** AG-087 R1: validation first, then the count; a large Excel export is queued (202), anything else downloads. */
+    public function export(Request $request, string $name, BackgroundExports $exports)
     {
         abort_unless(in_array($name, ReportService::NAMES, true), 404, 'Unknown report.');
         $format = $request->validate(['format' => 'required|in:pdf,xlsx'])['format'];
         $params = $this->reports->params($name, $request->except('format'));
 
-        return $this->exporter->download($name, $params, $format, $request->user());
+        return $this->exporter->download($name, $params, $format, $request->user(),
+            fn (int $rows) => $exports->queueReport($request, $name, $params, $rows));
     }
 }

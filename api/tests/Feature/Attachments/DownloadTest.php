@@ -114,7 +114,8 @@ class DownloadTest extends AttachmentsTestCase
         // AG-092 R3: the logo store rolls back a logo file whose upload failed, the same exception as attachments.
         // AG-093 R7: local backup retention deletes archives on the `backups` disk only (backups AC 19); R5: the backup
         // store removes its own failed write there.
-        $this->assertSame(['Http/Controllers/Api/V1/AttachmentController.php', 'Services/Backups/BackupPruner.php',
+        // AG-087 R10: background exports delete on the `exports` disk only (prune, and the job's own .part file).
+        $this->assertSame(['Http/Controllers/Api/V1/AttachmentController.php', 'Services/BackgroundExports.php', 'Services/Backups/BackupPruner.php',
             'Services/Backups/LocalStore.php', 'Support/LogoStore.php'], $deletes);
     }
 }

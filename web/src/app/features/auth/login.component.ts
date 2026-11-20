@@ -3,6 +3,7 @@ import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
 import { errorText } from '../../core/api.interceptor';
+import { safeReturnUrl } from '../../core/guards';
 
 @Component({
   standalone: true,
@@ -39,7 +40,7 @@ export class LoginComponent {
     this.error.set('');
     try {
       await this.auth.login(this.email, this.password);
-      this.router.navigateByUrl('/dashboard');
+      this.router.navigateByUrl(safeReturnUrl(this.query.get('returnUrl')));
     } catch (e) {
       this.error.set(errorText(e));
     } finally {

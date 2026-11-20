@@ -12,7 +12,7 @@ import { Page, Transaction } from '../../core/models';
 import { errorText } from '../../core/api.interceptor';
 import { SettingsService } from '../../core/settings.service';
 import { LockBannerComponent } from '../period-locks/lock-banner.component';
-import { BranchPickerComponent } from '../reports/report-common';
+import { BranchPickerComponent, queuedNotice } from '../reports/report-common';
 import { RECEIPT_TAGS, receiptLabel } from '../../core/receipts';
 
 interface Creator { id: number; name: string; tag: string | null }
@@ -136,6 +136,7 @@ interface Chip { key: string; label: string; remove: string[] }
         }
       </div>
     </form>
+    @if (exportNotice(); as n) { <div class="alert info">{{ n }} <a routerLink="/exports">View exports</a></div> }
 
     <div class="ts-bar">
       <select class="ts-sort" aria-label="Sort" [ngModel]="sortKey()" (ngModelChange)="setSort($event)">
@@ -262,6 +263,12 @@ export class TransactionListComponent implements OnInit {
   /** QA Q1: one void / reverse at a time; a second click cannot post a second request. */
   busy = signal(false);
   exporting = signal(false);
+  /** AG-087 S1: the background notice, shown until the filters (the URL state) change. */
+  private queued = signal<{ key: string; message: string } | null>(null);
+  exportNotice = computed(() => {
+    const q = this.queued();
+    return q && q.key === JSON.stringify(this.applied()) ? q.message : '';
+  });
   panelOpen = signal(false);
   errors = signal<Record<string, string>>({});
 
@@ -503,8 +510,17 @@ export class TransactionListComponent implements OnInit {
     delete p['page']; delete p['per_page']; delete p['category_name'];
     const body: Record<string, unknown> = { ...p, format: 'xlsx' };
     if (p['branches']) body['branches'] = (p['branches'] as string[]).map(Number);
+    const key = JSON.stringify(this.applied());
+    this.queued.set(null);
     try {
-      const blob = await firstValueFrom(this.http.post('/api/v1/transactions/export', body, { responseType: 'blob' }));
+      const res = await firstValueFrom(this.http.post('/api/v1/transactions/export', body, { responseType: 'blob', observe: 'response' }));
+      // AG-087 S1: over 5,000 rows the export is prepared in the background (202 with a message).
+      const message = await queuedNotice(res);
+      if (message !== null) {
+        this.queued.set({ key, message });
+        return;
+      }
+      const blob = res.body as Blob;
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;

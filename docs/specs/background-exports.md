@@ -199,6 +199,7 @@ Request errors added to both export endpoints:
   - `failed()` sets `failed`, deletes any `.part` file, writes `export.failed` (with `failure_code` and attempts) and fires `ExportFinished`.
   - Users never see the raw exception text: other errors read "The export could not be prepared. Try again later."
   - The job is idempotent: if the row is already `ready` or `failed` when the job starts, it does nothing.
+  - Stored filters that no longer validate when the job re-runs `params()` (for example a branch or account filter that is no longer accepted) fail without a retry: `invalid`, "The filters of this export are no longer valid. Narrow the filters and run it again." A 403 from `params()` counts as `access_revoked`. The code of other errors is `error`.
 - **R10 Stale and expired (`exports:prune`, hourly).**
   1. `ready` with `expires_at <= now`: delete the file, set `expired`, clear `file_path`, write `export.expired`.
   2. `queued` or `running` older than `stale_minutes` (120): set `failed` (`stale`, "The export did not run. Try again later."), delete any `.part` file, write `export.failed`. This covers a stopped worker.

@@ -74,7 +74,9 @@ class RunTest extends BackupsTestCase
         $this->assertSame(1, $m['files']['branding']['files_count']);
         $this->assertSame('sqlite', $m['db_driver']);
         $this->assertNull($m['year_end']);
-        $this->assertSame('2026_11_26_000000_transfer_receipts', $m['last_migration']);
+        $this->assertSame('2026_11_27_000000_create_exports_table', $m['last_migration']);
+        // AG-087: background export files are not part of the backup set.
+        $this->assertArrayNotHasKey('exports', $m['files']);
         $this->assertSame($m['backup'], self::FIRST);
         // The plain sidecar is the same manifest.
         $this->assertEquals(self::ksorted($m), self::ksorted(json_decode(Storage::disk('backups')->get(self::FIRST.'.manifest.json'), true)));

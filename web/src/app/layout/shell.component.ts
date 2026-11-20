@@ -26,6 +26,7 @@ import { SettingsService } from '../core/settings.service';
           @if (auth.can('account.view')) { <a routerLink="/chart-of-accounts" routerLinkActive="on" class="subnav">Chart of accounts</a> }
           @if (auth.can('category.manage')) { <a routerLink="/categories" routerLinkActive="on" class="subnav">Categories</a> }
           @if (auth.can('report.view')) { <a routerLink="/reports" routerLinkActive="on">Reports</a> }
+          @if (auth.isSuperAdmin() || auth.can('report.export')) { <a routerLink="/exports" routerLinkActive="on" class="subnav">Exports</a> }
           @if (auth.can('audit.view')) { <a routerLink="/audit-log" routerLinkActive="on">Audit log</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/period-locks" routerLinkActive="on">Period locks</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/year-end" routerLinkActive="on">Year-end</a> }

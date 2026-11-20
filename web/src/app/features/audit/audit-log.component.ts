@@ -17,6 +17,8 @@ interface AuditRow {
   auditable_type: string | null; auditable_id: number | null;
   old_values: Record<string, unknown> | null; new_values: Record<string, unknown> | null;
   summary: string; self: boolean; ip: string | null; user_agent: string | null;
+  /** AG-087 finding 7: a system event (export ready / failed / expired) shows "System" as its user. */
+  system?: boolean;
 }
 interface AuditPage { data: AuditRow[]; meta: { current_page: number; last_page: number; per_page: number; total: number } }
 interface DiffLine { field: string; old: string; new: string; changed: boolean }
@@ -66,7 +68,7 @@ function show(v: unknown): string {
             <tr (click)="open(r)" style="cursor:pointer" [class.sub]="selected()?.id === r.id">
               <td class="mono">{{ r.created_at | appDateTime }}</td>
               <td>{{ r.branch?.code ?? '—' }}</td>
-              <td>{{ r.user?.name ?? (r.event.startsWith('backup.') ? 'System' : '—') }} @if (r.user?.tag) { <span class="tag" data-s="inactive">{{ r.user?.tag }}</span> }</td>
+              <td>@if (r.system) { System } @else { {{ r.user?.name ?? (r.event.startsWith('backup.') ? 'System' : '—') }} @if (r.user?.tag) { <span class="tag" data-s="inactive">{{ r.user?.tag }}</span> } }</td>
               <td>{{ r.event_label }}</td>
               <td class="mono">{{ r.subject }}</td>
               <td>{{ r.summary }}</td>
