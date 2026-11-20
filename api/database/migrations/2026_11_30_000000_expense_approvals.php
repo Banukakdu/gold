@@ -59,6 +59,14 @@ return new class extends Migration
                 .'Clear the limits on the Branches screen first (each change is audited), then roll back.');
         }
         if (Schema::hasIndex('transactions', self::SAME_DAY_INDEX)) {
+            // MySQL drops the implicit index behind the created_by foreign key once this composite index (which starts
+            // with created_by) exists, and then refuses to drop the composite (error 1553). Put the foreign key's own
+            // index back first, under the name the original migration gave it.
+            if (DB::getDriverName() === 'mysql'
+                && ! Schema::hasIndex('transactions', 'transactions_created_by_foreign')
+                && ! Schema::hasIndex('transactions', ['created_by'])) {
+                Schema::table('transactions', fn (Blueprint $t) => $t->index('created_by', 'transactions_created_by_foreign'));
+            }
             Schema::table('transactions', fn (Blueprint $t) => $t->dropIndex(self::SAME_DAY_INDEX));
         }
         if (Schema::hasColumn('branches', self::COLUMN)) {
