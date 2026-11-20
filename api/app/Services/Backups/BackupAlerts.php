@@ -3,7 +3,11 @@
 namespace App\Services\Backups;
 
 use App\Models\User;
+use App\Notifications\BackupAlertNotification;
+use App\Notifications\InAppNotification;
+use App\Services\InAppNotifications;
 use Illuminate\Contracts\Cache\Repository;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Notifications\Notification as BaseNotification;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Notification;
@@ -24,6 +28,16 @@ final class BackupAlerts
             report($e);
             $admins = null; // unreadable: the database is down
         }
+        $sent = self::mail($n, $admins);
+        // AG-094 R4: the in-app copy is written after the mail attempt, in its own try/catch, and is not a channel of
+        // the notification: a database error here must never make the mail look failed (and send the fallback twice).
+        self::inApp($n, $admins);
+
+        return $sent;
+    }
+
+    private static function mail(BaseNotification $n, ?Collection $admins): bool
+    {
         if ($admins !== null && $admins->isNotEmpty()) {
             try {
                 Notification::sendNow($admins, $n);
@@ -46,6 +60,25 @@ final class BackupAlerts
             report($e);
 
             return false;
+        }
+    }
+
+    /**
+     * AG-094 R1 / R4: a backup or restore-test failure also appears in each active Super Admin's bell, with the email
+     * subject as title and the stage and time only (never the error text). Nothing is written when the Super Admins
+     * could not be read: the database is down and the email is the alert.
+     */
+    private static function inApp(BaseNotification $n, ?Collection $admins): void
+    {
+        if (! $n instanceof BackupAlertNotification || $admins === null || $admins->isEmpty()) {
+            return;
+        }
+        try {
+            app(InAppNotifications::class)->send($admins, null, InAppNotification::BACKUP_FAILED, [
+                'title' => $n->subject(), 'body' => "Stage: {$n->stage}, {$n->at}", 'branch_id' => null, 'branch_code' => null, 'url' => '/backups',
+            ]);
+        } catch (Throwable $e) {
+            report($e);
         }
     }
 

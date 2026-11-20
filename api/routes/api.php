@@ -11,6 +11,7 @@ use App\Http\Controllers\Api\V1\ChartOfAccountsController;
 use App\Http\Controllers\Api\V1\DashboardController;
 use App\Http\Controllers\Api\V1\ExportController;
 use App\Http\Controllers\Api\V1\FiscalYearController;
+use App\Http\Controllers\Api\V1\NotificationController;
 use App\Http\Controllers\Api\V1\PeriodLockController;
 use App\Http\Controllers\Api\V1\ReportController;
 use App\Http\Controllers\Api\V1\RoleController;
@@ -53,6 +54,17 @@ Route::prefix('v1')->group(function () {
         Route::get('exports', [ExportController::class, 'index']);
         Route::get('exports/{exportId}', [ExportController::class, 'show']);
         Route::get('exports/{exportId}/download', [ExportController::class, 'download']);
+
+        // AG-094 notifications (docs/specs/notifications.md section 5): the caller's own rows only (404 otherwise, a Super
+        // Admin's included). Outside `branch`: a notification belongs to a user, not to the active branch (R5). There is
+        // deliberately no DELETE route; rows are pruned after 90 days by notifications:prune (R11).
+        Route::get('notifications', [NotificationController::class, 'index']);
+        Route::get('notifications/unread-count', [NotificationController::class, 'unreadCount']);
+        Route::post('notifications/read-all', [NotificationController::class, 'readAll']);
+        Route::get('notifications/preferences', [NotificationController::class, 'preferences']);
+        Route::put('notifications/preferences', [NotificationController::class, 'updatePreferences']);
+        Route::get('notifications/{id}', [NotificationController::class, 'show'])->whereUuid('id');
+        Route::post('notifications/{id}/read', [NotificationController::class, 'read'])->whereUuid('id');
 
         // Everything below runs in the context of the branch in X-Branch-Id
         Route::middleware('branch')->group(function () {

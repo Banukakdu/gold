@@ -27,6 +27,8 @@ class User extends Authenticatable
             'last_login_at' => 'datetime',
             'password' => 'hashed',
             'is_super_admin' => 'boolean',
+            // AG-094 R7: the approval-request email (only this email); changed through PUT /notifications/preferences.
+            'approval_request_email' => 'boolean',
         ];
     }
 

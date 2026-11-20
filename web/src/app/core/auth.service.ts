@@ -26,6 +26,8 @@ export class AuthService {
   readonly token = signal<string | null>(read(TOKEN));
   readonly me = signal<Me | null>(null);
   readonly activeBranchId = signal<string>(read(BRANCH) ?? '');
+  /** AG-094 S3: when /me was last loaded (ms), so the notification open flow can tell whether it is fresh. */
+  meAt = 0;
 
   readonly activeBranch = computed<BranchAccess | null>(() =>
     this.me()?.branches.find(b => String(b.id) === this.activeBranchId()) ?? null);
@@ -48,6 +50,12 @@ export class AuthService {
       this.clear();
       return false;
     }
+  }
+
+  /** AG-094 S3: reload /me (branches and permissions) without signing out when the request fails. */
+  async refreshMe(): Promise<void> {
+    if (!this.token()) return;
+    try { this.setUser(await firstValueFrom(this.http.get<Me>('/api/v1/me'))); } catch { /* keep the current profile */ }
   }
 
   async logout() {
@@ -76,6 +84,7 @@ export class AuthService {
 
   private setUser(user: Me) {
     this.me.set(user);
+    this.meAt = Date.now();
     const current = this.activeBranchId();
     const valid = (user.is_super_admin && current === 'all') || user.branches.some(b => String(b.id) === current);
     if (!valid) {

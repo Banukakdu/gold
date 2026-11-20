@@ -7,6 +7,7 @@ use App\Models\AuditLog;
 use App\Models\LedgerEntry;
 use App\Models\Transaction;
 use App\Notifications\TransferApprovalDecidedNotification;
+use App\Notifications\TransferApprovalRequestedMail;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Notification;
@@ -46,7 +47,9 @@ class DecisionsTest extends TransferApprovalTestCase
 
         $this->cancel($t->id)->assertOk()->assertJsonPath('approval_status', 'cancelled')->assertJsonPath('status', 'rejected');
         $this->assertCount(1, $this->audits($t, 'transfer.approval_cancelled'));
-        Notification::assertNothingSent();
+        // AG-094 R7: the only emails are the approval requests sent when T1 was requested; the cancel sends none.
+        Notification::assertSentTimes(TransferApprovalDecidedNotification::class, 0);
+        Notification::assertSentTimes(TransferApprovalRequestedMail::class, 2);
     }
 
     public function test_ac17_expiry_on_the_business_date_of_the_request(): void

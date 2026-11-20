@@ -2,6 +2,7 @@ import { Component, EventEmitter, HostListener, Input, OnInit, Output, inject, s
 import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { errorText } from './api.interceptor';
+import { NotificationsService } from './notifications.service';
 import { MoneyPipe } from './money.pipe';
 import { AuthService } from './auth.service';
 import { colomboToday } from './dates';
@@ -83,6 +84,7 @@ export class ReceiptDialogComponent implements OnInit {
   @Output() refused = new EventEmitter<string>();
 
   private http = inject(HttpClient);
+  private notifications = inject(NotificationsService);
   private auth = inject(AuthService);
   today = '';
   receivedOn = '';
@@ -129,7 +131,8 @@ export class ReceiptDialogComponent implements OnInit {
     if (this.mode === 'received') body['received_on'] = this.receivedOn;
     if (this.note.trim()) body['note'] = this.note.trim();
     this.http.post<ReceiptResult>(`/api/v1/transactions/${this.target.id}/receipt`, body).subscribe({
-      next: r => { this.busy.set(false); this.done.emit(r); },
+      // AG-094 R9: the user's own action may close or create notifications; refresh the bell's count now.
+      next: r => { this.busy.set(false); this.notifications.refreshCount(); this.done.emit(r); },
       error: e => {
         this.busy.set(false);
         this.error.set(errorText(e));

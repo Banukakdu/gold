@@ -48,6 +48,10 @@ export const routes: Routes = [
         loadComponent: () => import('./features/reports/trial-balance.component').then(m => m.TrialBalanceComponent) },
       // AG-087 S2: any signed-in user (their own background exports only).
       { path: 'exports', loadComponent: () => import('./features/exports/exports.component').then(m => m.ExportsComponent) },
+      // AG-094 S2 / S3: any signed-in user (their own notifications only); /notifications/:id is the email link.
+      { path: 'notifications', loadComponent: () => import('./features/notifications/notifications.component').then(m => m.NotificationsComponent) },
+      { path: 'notifications/:id',
+        loadComponent: () => import('./features/notifications/notification-open.component').then(m => m.NotificationOpenComponent) },
       { path: 'audit-log', canActivate: [permissionGuard('audit.view')],
         loadComponent: () => import('./features/audit/audit-log.component').then(m => m.AuditLogComponent) },
       { path: 'period-locks', canActivate: [superAdminGuard],
