@@ -23,7 +23,8 @@ class VoidTest extends ControlsTestCase
         $start = $this->balance($this->kdyCash);
         $e = $this->expense('2026-11-10', '5000.00');
         $this->assertSame(Money::add($start, '-5000.00'), $this->balance($this->kdyCash));
-        $original = LedgerEntry::where('transaction_id', $e['id'])->sole()->toArray();
+        // Double entry: the expense also has its category line; these checks are on the cash line.
+        $original = LedgerEntry::where('transaction_id', $e['id'])->where('account_id', $this->kdyCash->id)->sole()->toArray();
         $this->accKdy()->postJson("/api/v1/transactions/{$e['id']}/void", ['reason' => 'Duplicate'])->assertOk()->assertJsonPath('status', 'void');
 
         return [$e, $original];
@@ -35,7 +36,10 @@ class VoidTest extends ControlsTestCase
         [$e, $original] = $this->voidE(); // asserts 95,000.00 after recording E
 
         $this->assertSame('void', $this->txn($e['id'])->status);
-        $entries = LedgerEntry::where('transaction_id', $e['id'])->orderBy('id')->get();
+        // Double entry: 2 lines (cash, expense category) + 2 contras; the cash line and its contra are checked here.
+        $this->assertSame(4, LedgerEntry::where('transaction_id', $e['id'])->count());
+        $contraIds = LedgerEntry::where('transaction_id', $e['id'])->whereNotNull('contra_of_id')->orderBy('id')->pluck('id')->all();
+        $entries = LedgerEntry::where('transaction_id', $e['id'])->where('account_id', $this->kdyCash->id)->orderBy('id')->get();
         $this->assertCount(2, $entries);
         $this->assertSame($original, $entries[0]->toArray(), 'original entry unchanged');
         $this->assertSame('5000.00', $entries[0]->credit);
@@ -58,7 +62,8 @@ class VoidTest extends ControlsTestCase
         $this->assertSame('void', $new['status']);
         $this->assertSame('Duplicate', $new['reason']);
         $this->assertTrue($new['self']);
-        $this->assertSame([$contra->id], $new['contra_entry_ids']);
+        $this->assertSame($contraIds, $new['contra_entry_ids']);
+        $this->assertContains($contra->id, $contraIds);
         $this->assertSame($e['ref_no'], $new['ref_no']);
         $this->assertSame('5000.00', $new['amount']);
         $this->assertSame($this->kdyCash->id, $new['account_id']);
@@ -74,7 +79,7 @@ class VoidTest extends ControlsTestCase
                 $this->assertSame('Expense voided', $cells[3]);
                 $this->assertSame($e['ref_no'], $cells[4]);
                 $this->assertSame('Self', $cells[6]);
-                foreach (['"ref_no":"'.$e['ref_no'].'"', '"amount":"5000.00"', '"account_id":'.$this->kdyCash->id, '"txn_date":"2026-11-10"', '"reason":"Duplicate"', '"self":true', '"contra_entry_ids":['.$contra->id.']'] as $part) {
+                foreach (['"ref_no":"'.$e['ref_no'].'"', '"amount":"5000.00"', '"account_id":'.$this->kdyCash->id, '"txn_date":"2026-11-10"', '"reason":"Duplicate"', '"self":true', '"contra_entry_ids":['.implode(',', $contraIds).']'] as $part) {
                     $this->assertStringContainsString($part, $cells[10]);
                 }
             }
@@ -96,8 +101,8 @@ class VoidTest extends ControlsTestCase
         $sorted = $counts;
         sort($sorted);
         $this->assertSame($sorted, $counts);
-        // expense +1, void +1 (contra), expense +1, reversal +1
-        $this->assertSame([1, 1, 1, 1], [$counts[1] - $counts[0], $counts[2] - $counts[1], $counts[3] - $counts[2], $counts[4] - $counts[3]]);
+        // Double entry: expense +2, void +2 (contras), expense +2, reversal +2
+        $this->assertSame([2, 2, 2, 2], [$counts[1] - $counts[0], $counts[2] - $counts[1], $counts[3] - $counts[2], $counts[4] - $counts[3]]);
 
         $entry = LedgerEntry::first();
         $audit = AuditLog::first();
@@ -271,6 +276,6 @@ class VoidTest extends ControlsTestCase
         $rows = collect($this->accKdy()->getJson('/api/v1/transactions?status=void')->assertOk()->json('data'))->keyBy('id');
         $this->assertSame('Voided before 2026-11-18; ledger lines were not kept.', $rows[$id]['legacy_void_note']);
         $this->assertArrayNotHasKey('legacy_void_note', $rows[$e['id']]);
-        $this->assertSame(2, $rows[$e['id']]['entries_count']);
+        $this->assertSame(4, $rows[$e['id']]['entries_count']); // double entry: 2 lines + 2 contras
     }
 }

@@ -24,6 +24,18 @@ interface Detail {
   creator?: { name: string } | null;
   creator_tag?: string | null;
   legacy_void_note?: string;
+  /** Double-entry S3. */
+  entries?: LedgerLine[];
+  balanced?: boolean;
+  totals?: { debit: string; credit: string };
+  in_active_branch?: boolean;
+  backfilled_at?: string | null;
+}
+
+interface LedgerLine {
+  id: number; entry_date: string; debit: string; credit: string; contra_of_id: number | null; origin: 'posting' | 'reclass' | 'backfill';
+  account: { id: number; code: string | null; name: string; class: string; type: string } | null;
+  branch: { id: number; code: string } | null;
 }
 
 interface UploadLine { name: string; pct: number; error?: string }
@@ -62,6 +74,36 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
           <dd>{{ t.creator?.name }} @if (t.creator_tag) { <span class="tag" data-s="inactive">{{ t.creator_tag }}</span> }</dd>
         </dl>
       </div>
+
+      @if (t.entries?.length) {
+        <div class="card section">
+          <h2>Ledger lines</h2>
+          @if (t.in_active_branch === false) {
+            <p class="muted">This entry belongs to {{ t.branch?.code }}. It is shown because it has lines in the selected branch; it can only be changed there.</p>
+          }
+          <table class="list">
+            <thead><tr><th>Date</th><th>Branch</th><th>Code</th><th>Account</th><th class="num">Debit</th><th class="num">Credit</th><th>Note</th></tr></thead>
+            <tbody>
+              @for (e of t.entries; track e.id) {
+                <tr>
+                  <td>{{ e.entry_date | date: 'd MMM y' }}</td>
+                  <td>{{ e.branch?.code }}</td>
+                  <td class="mono">{{ e.account?.code }}</td>
+                  <td>{{ e.account?.name }}</td>
+                  <td class="num">{{ +e.debit ? (e.debit | money) : '' }}</td>
+                  <td class="num">{{ +e.credit ? (e.credit | money) : '' }}</td>
+                  <td class="muted">{{ lineNote(t, e) }}</td>
+                </tr>
+              }
+              <tr class="sub">
+                <td colspan="4">Total
+                  <span class="tag" [attr.data-s]="t.balanced ? 'balanced' : 'unbalanced'">{{ t.balanced ? 'Balanced' : 'Not balanced' }}</span></td>
+                <td class="num">{{ t.totals?.debit | money }}</td><td class="num">{{ t.totals?.credit | money }}</td><td></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      }
 
       @if (isEntry(t) && list(); as l) {
         <div class="card section att">
@@ -171,13 +213,25 @@ export class TransactionDetailComponent implements OnInit {
   ngOnInit() {
     this.id = Number(this.route.snapshot.paramMap.get('id'));
     this.http.get<Detail>(`/api/v1/transactions/${this.id}`).subscribe({
-      next: t => { this.t.set(t); if (this.isEntry(t)) this.loadFiles(); },
+      // Files, edit and void follow the entry's own branch (R10): a reader from another branch only sees the lines.
+      next: t => { this.t.set(t); if (this.isEntry(t) && t.in_active_branch !== false) this.loadFiles(); },
       error: e => this.msg.set(e?.status === 404 ? 'This entry does not exist in the selected branch.' : errorText(e)),
     });
   }
 
   isEntry(t: Detail) { return t.type === 'income' || t.type === 'expense'; }
   label(type: string) { return TYPE_LABELS[type] ?? type; }
+
+  /** Double-entry S3 note column: lines are numbered 1.. in id order. */
+  lineNote(t: Detail, e: LedgerLine): string {
+    if (e.contra_of_id) {
+      const n = (t.entries ?? []).findIndex(x => x.id === e.contra_of_id) + 1;
+      return n ? `Void contra of line ${n}` : 'Void contra';
+    }
+    if (e.origin === 'reclass') return 'Reclassification';
+    if (e.origin === 'backfill') return `Added by double-entry migration ${t.backfilled_at ?? ''}`.trim();
+    return '';
+  }
   size(n: number) { return fileSize(n); }
   when(iso: string | null) { return colomboDateTime(iso); }
   afterLabel(a: AttachmentRow) { return { close: 'Added after close', void: 'Added after void', reversal: 'Added after reversal' }[a.added_after!]; }

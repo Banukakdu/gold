@@ -59,13 +59,14 @@ class DashboardController extends Controller
         return [
             'scope' => $ctx->isScoped() ? 'branch' : 'all',
             'from' => $from, 'to' => $to,
-            'total_balance' => Money::add(Account::sum('current_balance')),
+            // Double-entry R8: money accounts only.
+            'total_balance' => Money::add(Account::money()->sum('current_balance')),
             'income' => Money::fromCents($income),
             'expense' => Money::fromCents($expense),
             'net' => Money::fromCents($income - $expense),
-            'accounts' => Account::with('branch:id,code,name')->where('status', 'active')->get(['id', 'branch_id', 'name', 'type', 'current_balance']),
+            'accounts' => Account::money()->with('branch:id,code,name')->where('status', 'active')->get(['id', 'branch_id', 'name', 'type', 'current_balance']),
             'branch_balances' => $ctx->isScoped() ? null : Branch::orderByDesc('is_main')->orderBy('name')->get(['id', 'code', 'name'])
-                ->map(fn ($b) => $b->only(['id', 'code', 'name']) + ['balance' => Money::add(Account::withoutGlobalScopes()->where('branch_id', $b->id)->sum('current_balance'))]),
+                ->map(fn ($b) => $b->only(['id', 'code', 'name']) + ['balance' => Money::add(Account::withoutGlobalScopes()->money()->where('branch_id', $b->id)->sum('current_balance'))]),
             'top_expense_categories' => $topExpenses,
             'trend' => $trend,
             'recent' => Transaction::with(['branch:id,code', 'category:id,name'])->latest('txn_date')->latest('id')->limit(10)

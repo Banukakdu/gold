@@ -19,5 +19,6 @@ export class ReportsHubComponent {
     { link: '/reports/branch-comparison', title: 'Branch Comparison', question: 'How is each branch doing: funds received, income, expenses and balance?' },
     { link: '/reports/transfers', title: 'Transfers & Allocations', question: 'How much money moved between Main and the branches, and between branches?' },
     { link: '/reports/cash-book', title: 'Daily Cash Book', question: 'What came in and went out of each account, day by day?' },
+    { link: '/reports/trial-balance', title: 'Trial Balance', question: 'Do debits equal credits, and what is the balance of every ledger account?' },
   ];
 }

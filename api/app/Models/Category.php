@@ -2,11 +2,16 @@
 
 namespace App\Models;
 
+use App\Services\ChartOfAccounts;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
+/**
+ * Income / expense category. Each node is a ledger account in every branch where it can be used
+ * (double-entry spec R1): ledger_code is assigned on create, and the accounts follow its name and status.
+ */
 class Category extends Model
 {
     use HasFactory;
@@ -14,6 +19,22 @@ class Category extends Model
     protected $fillable = ['parent_id', 'branch_id', 'type', 'name', 'is_active'];
 
     protected $casts = ['is_active' => 'boolean'];
+
+    /** QA B1: the DB default, known before the first save, so new category accounts are created active. */
+    protected $attributes = ['is_active' => true];
+
+    protected static function booted(): void
+    {
+        static::creating(function (Category $c) {
+            $c->ledger_code ??= app(ChartOfAccounts::class)->nextCategoryCode($c);
+        });
+        static::created(fn (Category $c) => app(ChartOfAccounts::class)->createCategoryAccounts($c));
+        static::updated(function (Category $c) {
+            if ($c->wasChanged(['name', 'is_active'])) {
+                app(ChartOfAccounts::class)->syncCategoryAccounts($c);
+            }
+        });
+    }
 
     public function parent(): BelongsTo
     {

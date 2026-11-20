@@ -18,6 +18,7 @@ import { AuthService } from '../core/auth.service';
           @if (auth.can('transfer.create')) { <a routerLink="/transfers/new" routerLinkActive="on">Transfer money</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/allocations/new" routerLinkActive="on">Fund a branch</a> }
           @if (auth.can('account.view')) { <a routerLink="/accounts" routerLinkActive="on">Accounts</a> }
+          @if (auth.can('account.view')) { <a routerLink="/chart-of-accounts" routerLinkActive="on" class="subnav">Chart of accounts</a> }
           @if (auth.can('report.view')) { <a routerLink="/reports" routerLinkActive="on">Reports</a> }
           @if (auth.can('audit.view')) { <a routerLink="/audit-log" routerLinkActive="on">Audit log</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/period-locks" routerLinkActive="on">Period locks</a> }

@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\ChartOfAccounts;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
@@ -14,6 +15,12 @@ class Branch extends Model
     protected $fillable = ['code', 'name', 'address', 'phone', 'is_main', 'status'];
 
     protected $casts = ['is_main' => 'boolean'];
+
+    /** Double-entry R1: a new branch gets its chart (inter-branch pair with MAIN, category accounts) in the same DB transaction. */
+    protected static function booted(): void
+    {
+        static::created(fn (Branch $b) => app(ChartOfAccounts::class)->setupBranch($b));
+    }
 
     public function accounts(): HasMany
     {

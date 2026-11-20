@@ -7,15 +7,18 @@ use App\Models\Account;
 use App\Models\AuditLog;
 use App\Models\LedgerEntry;
 use App\Models\Transaction;
+use App\Services\LedgerService;
 use App\Support\BranchContext;
 use App\Support\Money;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class AccountController extends Controller
 {
     public function index(Request $request)
     {
-        $q = Account::with('branch:id,code,name')->orderBy('branch_id')->orderBy('name');
+        // Double-entry S4: the Accounts list and every picker show cash / bank / wallet accounts only.
+        $q = Account::money()->with('branch:id,code,name')->orderBy('branch_id')->orderBy('name');
         if ($request->filled('branch_id')) {
             $q->where('branch_id', $request->integer('branch_id'));
         }
@@ -26,7 +29,7 @@ class AccountController extends Controller
     /** Accounts of every branch, for picking a transfer destination (no balances exposed). */
     public function destinations()
     {
-        return Account::withoutGlobalScopes()->with('branch:id,code,name')
+        return Account::withoutGlobalScopes()->money()->with('branch:id,code,name')
             ->where('status', 'active')->orderBy('branch_id')->get(['id', 'branch_id', 'name', 'type']);
     }
 
@@ -42,14 +45,22 @@ class AccountController extends Controller
             'is_main_account' => 'boolean',
         ]);
         $data['branch_id'] ??= $ctx->branchId;
-        $acc = Account::create($data);
-        AuditLog::record('account.created', $acc, null, $data);
+        // One DB transaction: the 11xxx code is assigned under the chart code lock, retried on a deadlock (review R3, R3b).
+        $acc = DB::transaction(function () use ($data) {
+            $acc = Account::create($data);
+            AuditLog::record('account.created', $acc, null, $data);
+
+            return $acc;
+        }, LedgerService::ATTEMPTS);
 
         return response()->json($acc, 201);
     }
 
     public function update(Request $request, Account $account)
     {
+        if (! $account->isMoney()) {
+            return response()->json(['message' => 'This account belongs to the chart of accounts and changes with its category or branch.'], 422);
+        }
         $data = $request->validate([
             'name' => 'sometimes|string|max:255',
             'bank_name' => 'nullable|string|max:255',
@@ -73,6 +84,10 @@ class AccountController extends Controller
      */
     public function statement(Request $request, Account $account)
     {
+        // Double-entry section 2: income, expense, equity and inter-branch balances are profit / funding information.
+        if (! $account->isMoney() && ! $request->user()->canDo('report.view')) {
+            return response()->json(['message' => 'Missing permission: report.view'], 403);
+        }
         $data = $request->validate(['from' => 'required|date', 'to' => 'required|date|after_or_equal:from', 'include_voided' => 'nullable|boolean']);
         $withVoided = (bool) ($data['include_voided'] ?? false);
 
@@ -94,6 +109,7 @@ class AccountController extends Controller
             $contra = $e->contra_of_id !== null;
 
             return [
+                'transaction_id' => $e->transaction_id,
                 'date' => $e->entry_date->format('Y-m-d'),
                 'ref_no' => $e->transaction->ref_no,
                 'type' => $e->transaction->type,

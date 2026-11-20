@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Account;
 use App\Models\AuditLog;
 use App\Models\Branch;
+use App\Services\LedgerService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -16,7 +17,8 @@ class BranchController extends Controller
     {
         $user = $request->user();
         $q = Branch::query()
-            ->withSum(['accounts as balance' => fn ($a) => $a->withoutGlobalScopes()], 'current_balance')
+            // Double-entry R8: money accounts only.
+            ->withSum(['accounts as balance' => fn ($a) => $a->withoutGlobalScopes()->money()], 'current_balance')
             ->orderByDesc('is_main')->orderBy('name');
         if (! $user->is_super_admin) {
             $q->whereIn('id', $user->branches()->pluck('branches.id'));
@@ -43,8 +45,9 @@ class BranchController extends Controller
             Account::create(['branch_id' => $branch->id, 'name' => 'Cash', 'type' => 'cash']);
             AuditLog::record('branch.created', $branch, null, $data, $branch->id);
 
-            return response()->json($branch->load('accounts'), 201);
-        });
+            // N7: the new branch's cash, bank and wallet accounts, not its whole chart.
+            return response()->json($branch->load(['accounts' => fn ($q) => $q->money()]), 201);
+        }, LedgerService::ATTEMPTS);
     }
 
     public function update(Request $request, Branch $branch)

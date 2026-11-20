@@ -19,7 +19,10 @@
     .b td, tr.b td { font-weight: bold; }
     .carry td { background: #f6f1e4; font-style: italic; }
     .sub td { background: #faf6ec; }
-    h2 { font-size: 11px; margin: 8px 0 4px; }
+    h2 { font-size: 11px; margin: 8px 0 4px; page-break-after: avoid; }
+    tr { page-break-inside: avoid; }
+    /* QA B3: a group heading row stays with the first row under it. */
+    tr.keep { page-break-after: avoid; }
     .note { color: #555; margin-top: 6px; }
     /* Core fonts have no em dash: draw it with DejaVu Sans (bundled with dompdf). */
     .g { font-family: 'DejaVu Sans', sans-serif; }
@@ -27,6 +30,7 @@
     .sign { margin-top: 28px; width: 100%; }
     .sign td { border: 0; padding: 18px 8px 2px; width: 33%; }
     .sign .l { border-top: 1px solid #333; padding-top: 3px; }
+    .alert { color: #b3362c; font-weight: bold; margin: 4px 0; }
 </style>
 </head>
 <body>
@@ -36,7 +40,7 @@
     <div class="title">{{ $head['title'] }}</div>
     <div class="line">Branches: {{ $head['branches'] }}</div>
     <div class="line">Period: {{ $head['period'] }}</div>
-    <div class="line">Amounts in LKR &middot; {{ \App\Services\ReportService::BASIS }}</div>
+    <div class="line">Amounts in LKR &middot; {{ $head['basis'] ?? \App\Services\ReportService::BASIS }}</div>
     <div class="line">{{ $head['printed'] }}</div>
     @if ($head['provisional'])<div class="provisional">PROVISIONAL - period not locked</div>@endif
 </header>
