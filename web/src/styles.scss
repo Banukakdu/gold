@@ -415,6 +415,7 @@ tr.rc-frozen td, .rc-line.rc-frozen { color: var(--muted); }
 .tpl-muted { color: var(--muted); }
 .tpl-muted td, .tpl-card.tpl-muted { opacity: .75; }
 .tpl-name { overflow-wrap: anywhere; min-width: 0; }
+.tpl-by { font-weight: normal; font-size: .85em; }
 .tpl-facts { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; li.warn { padding: 4px 8px; list-style: none; margin-left: -18px; } }
 .tpl-fact { display: inline-block; overflow-wrap: anywhere; }
 .tpl-warn { color: #8a5a00; font-weight: 600; }

@@ -55,8 +55,8 @@ class ExpenseTemplates
 
     public const PAYMENT_METHODS = ['cash', 'bank_transfer', 'cheque', 'card', 'online'];
 
-    /** R6 / R9: the linked expenses that count for a period (void, reversed, rejected, cancelled and expired do not). */
-    public const COUNTED = ['posted', 'pending'];
+    /** Review MUST 2 (a): a same-name template archived this many days ago or less is named to the approver. */
+    public const SAME_NAME_DAYS = 90;
 
     public const STATUS_LABELS = ['posted' => 'Posted', 'pending' => 'Pending approval'];
 
@@ -195,8 +195,10 @@ class ExpenseTemplates
             $v = isset($data[$k]) ? trim((string) $data[$k]) : null;
             $data[$k] = $v === '' ? null : $v;
         }
-        $data['payment_method'] = ($data['payment_method'] ?? null) ?: null;
-        $this->assertAccountAndCategory($branchId, (int) $data['account_id'], (int) $data['category_id']);
+        $acc = $this->assertAccountAndCategory($branchId, (int) $data['account_id'], (int) $data['category_id']);
+        // SHOULD 7 / QA D1: "empty" means the account's default method, stored as such, so the form's pre-fill and the
+        // R11 comparison at use agree.
+        $data['payment_method'] = ($data['payment_method'] ?? null) ?: RecurringTemplate::defaultPaymentMethod($acc->type);
 
         return $data;
     }
@@ -216,7 +218,7 @@ class ExpenseTemplates
     }
 
     /** R4: an active money account of the branch, and an effectively active expense sub-category, global or of the branch. */
-    private function assertAccountAndCategory(int $branchId, int $accountId, int $categoryId): void
+    private function assertAccountAndCategory(int $branchId, int $accountId, int $categoryId): Account
     {
         $acc = Account::withoutGlobalScopes()->whereKey($accountId)->where('branch_id', $branchId)->first();
         $errors = [];
@@ -231,6 +233,8 @@ class ExpenseTemplates
         if ($errors) {
             throw ValidationException::withMessages($errors);
         }
+
+        return $acc;
     }
 
     private function assertUniqueName(int $branchId, string $name, ?int $exceptId = null): void
@@ -272,26 +276,76 @@ class ExpenseTemplates
 
     /**
      * R2 / R6 / R10: the template of the active branch (scope on, so the message never confirms that it exists elsewhere),
-     * of the account's branch, not archived, locked FOR UPDATE so two uses run one after the other.
+     * not archived, locked FOR UPDATE so two uses run one after the other, with its linked expenses (review finding 1).
+     *
+     * The second use must see the first. On MySQL (REPEATABLE READ) a plain read answers from the snapshot taken at the
+     * transaction's first plain read, so:
+     *  - incomeOrExpense opens its own transaction and calls this as its FIRST statement. The snapshot is then taken
+     *    after this lock is granted, and every use and every template change (both hold this lock until they commit)
+     *    committed before it is visible to the plain reads that follow (uses, audit rows, template history).
+     *  - Inside an outer transaction (a caller's, or a test's) an earlier plain read may already have fixed the
+     *    snapshot, so the uses are read with a shared lock instead, which InnoDB answers from the latest committed
+     *    data (as the AG-064 R2b same-day rule does).
+     * The shared lock is not used in the outermost case on purpose: its next-key locks on the (expense_template_id,
+     * txn_date) index make parallel first uses of two different templates deadlock (seen on MySQL 8.0 with eight
+     * parallel uses), while the lock order alone already gives the current data there.
      */
-    public function lockForUse(int $id, Account $acc): RecurringTemplate
+    public function lockForUse(int $id): RecurringTemplate
     {
         $tpl = RecurringTemplate::whereKey($id)->lockForUpdate()->first();
-        if (! $tpl || $tpl->type !== RecurringTemplate::EXPENSE || (int) $tpl->branch_id !== (int) $acc->branch_id) {
+        if (! $tpl || $tpl->type !== RecurringTemplate::EXPENSE) {
             throw new LedgerException(self::NOT_FOUND);
         }
         if ($tpl->isArchived()) {
             throw new LedgerException(self::ARCHIVED);
         }
+        $tpl->setRelation('uses', Transaction::where('expense_template_id', $tpl->id)->where('type', Transaction::EXPENSE)
+            ->when(DB::transactionLevel() > 1, fn ($q) => $q->sharedLock())->orderBy('id')
+            ->get(['id', 'ref_no', 'status', 'approval_status', 'txn_date', 'requested_date', 'requested_on', 'expense_template_id']));
 
         return $tpl;
     }
 
+    /** R2: the template must be of the money account's branch (both are of the active branch in practice). */
+    public function assertSameBranch(RecurringTemplate $tpl, Account $acc): void
+    {
+        if ((int) $tpl->branch_id !== (int) $acc->branch_id) {
+            throw new LedgerException(self::NOT_FOUND);
+        }
+    }
+
     /**
-     * R6: the linked posted or pending expenses whose bill date is in the period of $date (review MUST 1). Without
-     * $confirm, any of them is a 409; with it, they are returned for the audit row.
+     * R6 / R9: does this linked expense count for its period? Posted, or pending and not yet past its AG-064 R8 expiry
+     * (requested_on + 30 days): a request the daily expiry job has not closed yet is already dead (review finding 4).
+     */
+    public static function counts(Transaction $t): bool
+    {
+        if ($t->status === 'posted') {
+            return true;
+        }
+
+        return $t->status === 'pending' && ($t->requested_on === null || $t->requested_on->format('Y-m-d') > self::expiryCutoff());
+    }
+
+    /** The same rule as a query (S1 "This period", "Last used", S2 "changed since its last use"). */
+    private static function whereCounts(Builder $q): Builder
+    {
+        return $q->where(fn (Builder $w) => $w->where('status', 'posted')
+            ->orWhere(fn (Builder $p) => $p->where('status', 'pending')
+                ->where(fn (Builder $r) => $r->whereNull('requested_on')->orWhereDate('requested_on', '>', self::expiryCutoff()))));
+    }
+
+    /** AG-064 R8: a request pending since this date or earlier has expired (expire() uses the same cutoff). */
+    private static function expiryCutoff(): string
+    {
+        return CarbonImmutable::parse(BusinessDate::today())->subDays(ExpenseApprovals::EXPIRY_DAYS)->toDateString();
+    }
+
+    /**
+     * R6: the template's counted uses (from lockForUse) whose bill date is in the period of $date (review MUST 1).
+     * Without $confirm, any of them is a 409; with it, they are returned for the audit row.
      *
-     * @return array<int, array{id: int, ref_no: ?string, date: string, status: string}>
+     * @return array<int, array{id: int, ref_no: ?string, date: string, status: string, status_label: string}>
      */
     public function assertNotDuplicate(RecurringTemplate $tpl, string $date, bool $confirm): array
     {
@@ -299,7 +353,8 @@ class ExpenseTemplates
         if ($period === null) {
             return [];
         }
-        $dupes = $this->linked([$tpl->id], $period['from'], $period['to'])->map(fn (Transaction $t) => self::txnRow($t))->values()->all();
+        $dupes = $tpl->uses->filter(fn (Transaction $t) => self::counts($t) && self::billDate($t) >= $period['from'] && self::billDate($t) <= $period['to'])
+            ->map(fn (Transaction $t) => self::txnRow($t))->values()->all();
         if ($dupes && ! $confirm) {
             $list = implode(', ', array_map(fn ($d) => "{$d['ref_no']} ({$d['status_label']}, {$d['date']})", $dupes));
             throw new DuplicateTemplateUseException("This template was already used for {$period['label']}: {$list}. Save anyway only if this is a separate bill.",
@@ -311,47 +366,41 @@ class ExpenseTemplates
 
     /**
      * R11 / R7a: the keys added to the use's audit row (`transaction.expense` or `expense.approval_requested`). Called
-     * before the expense row is written, so "the previous linked expense" is never this one.
+     * before the expense row is written, so no earlier use is ever this one.
+     *
+     *  - template_changes / template_values / template_labels: what the requester changed against the template as it is now.
+     *  - Review MUST 2 (sign-off finding 2): the template is compared with the version recorded by its latest use that an
+     *    approver approved (template_reviewed_*), not with its latest use, which may have posted below the limit with
+     *    nobody looking. Without such a use the approver is told so (template_first_review), with when and by whom the
+     *    template was created and last changed, and a same-name template archived in the last 90 days is named
+     *    (archive and re-create gives a new template with no history).
      */
     public function useAudit(RecurringTemplate $tpl, array $data, array $dupes): array
     {
+        $now = $this->compared($this->auditValues($tpl));
         $changes = [];
         $values = [];
         foreach (RecurringTemplate::COMPARED as $field) {
             if ($field === 'amount') {
                 if ($tpl->amount_cents !== null && Money::toCents((string) $data['amount']) !== (int) $tpl->amount_cents) {
                     $changes[] = 'amount';
-                    $values['amount'] = Money::fromCents((int) $tpl->amount_cents);
+                    $values['amount'] = $now['amount'];
                 }
 
                 continue;
             }
             $ids = in_array($field, ['account_id', 'category_id'], true);
-            $submitted = self::norm($data[$field] ?? null, $ids);
-            $template = self::norm($tpl->{$field}, $ids);
-            if ($submitted !== $template) {
+            if (self::norm($data[$field] ?? null, $ids) !== self::norm($now[$field], $ids)) {
                 $changes[] = $field;
-                $values[$field] = $template;
+                $values[$field] = $now[$field];
             }
         }
-        // Names for the id fields, so the approver and S3 can show the template's account / category (R7a).
-        $labels = [];
-        if (in_array('account_id', $changes, true)) {
-            $labels['account_id'] = $tpl->account?->name;
-        }
-        if (in_array('category_id', $changes, true)) {
-            $labels['category_id'] = ExpenseApprovals::categoryPath($tpl->category);
-        }
-        $previous = $this->previousVersions([$tpl->id])[$tpl->id] ?? null;
-        $changedSince = $previous !== null && (int) $tpl->version > $previous;
         $out = [
             'template_id' => $tpl->id, 'template_name' => $tpl->name, 'template_version' => (int) $tpl->version,
-            'template_changes' => $changes, 'template_values' => $values, 'template_changed_since_last_use' => $changedSince,
-        ] + ($labels ? ['template_labels' => $labels] : []);
-        if ($changedSince) {
-            $last = $this->lastChanges([$tpl->id])[$tpl->id] ?? null;
-            $out += ['template_previous_version' => $previous, 'template_changed_on' => $last['on'] ?? null, 'template_changed_by' => $last['by']['name'] ?? null];
-        }
+            'template_changes' => $changes, 'template_values' => $values,
+        ] + (($labels = $this->labels($values)) ? ['template_labels' => $labels] : []);
+
+        $out += $this->reviewFacts($tpl, $now);
         if ($dupes) {
             $out += ['duplicate_confirmed' => true, 'duplicate_of' => array_column($dupes, 'ref_no'),
                 'duplicate_period' => self::period($tpl->frequency, (string) $data['txn_date'])['label'],
@@ -361,13 +410,107 @@ class ExpenseTemplates
         return $out;
     }
 
+    /** Review MUST 2: the template against its last approved use, or the "first reviewed use" facts. */
+    private function reviewFacts(RecurringTemplate $tpl, array $now): array
+    {
+        $version = (int) $tpl->version;
+        $out = [];
+        $reviewed = $tpl->uses->filter(fn (Transaction $t) => $t->approval_status === ExpenseApprovals::APPROVED)->sortByDesc('id')->first();
+        $reviewedVersion = $reviewed ? (self::useAudits([$reviewed->id])[$reviewed->id]['template_version'] ?? null) : null;
+        if ($reviewedVersion !== null) {
+            $reviewedVersion = (int) $reviewedVersion;
+            $out += ['template_first_review' => false, 'template_reviewed_version' => $reviewedVersion,
+                'template_reviewed_ref' => $reviewed->ref_no, 'template_changed_since_review' => $version > $reviewedVersion];
+            if ($version > $reviewedVersion) {
+                $then = $this->compared($this->valuesAt($tpl, $reviewedVersion));
+                $fields = array_values(array_filter(RecurringTemplate::COMPARED, fn ($f) => self::norm($then[$f] ?? null, false) !== self::norm($now[$f], false)));
+                $thenValues = array_intersect_key($then, array_flip($fields));
+                $out += ['template_review_changes' => $fields, 'template_review_values' => (object) $thenValues]
+                    + (($labels = $this->labels($thenValues)) ? ['template_review_labels' => $labels] : []);
+            }
+        } else {
+            $out += ['template_first_review' => true, 'template_changed_since_review' => false,
+                'template_unreviewed_uses' => $tpl->uses->filter(fn (Transaction $t) => self::counts($t))->count()];
+        }
+        $out += ['template_created_on' => $tpl->created_at?->copy()->setTimezone(BusinessDate::timezone())->format('Y-m-d'),
+            'template_created_by' => $tpl->creator?->name];
+        if ($version > 1 && ($last = $this->lastChanges([$tpl->id])[$tpl->id] ?? null)) {
+            $out += ['template_changed_on' => $last['on'], 'template_changed_by' => $last['by']['name'] ?? null];
+        }
+        if ($archived = $this->sameNameArchived($tpl)) {
+            $out['template_same_name_archived'] = $archived;
+        }
+
+        return $out;
+    }
+
+    /**
+     * The template's fields as they were at $version, rebuilt from its `expense_template.created` row and the
+     * `expense_template.updated` rows up to that version (R11 keeps the changed fields and the version of each change).
+     */
+    private function valuesAt(RecurringTemplate $tpl, int $version): array
+    {
+        $state = [];
+        $rows = AuditLog::whereIn('event', ['expense_template.created', 'expense_template.updated'])->where('auditable_type', RecurringTemplate::class)
+            ->where('auditable_id', $tpl->id)->orderBy('id')->get(['event', 'new_values']);
+        foreach ($rows as $r) {
+            $new = (array) $r->new_values;
+            if ((int) ($new['version'] ?? 1) > $version) {
+                break;
+            }
+            $state = array_merge($state, $new);
+        }
+
+        return $state;
+    }
+
+    /** The compared fields of auditValues(), an empty payment method read as the account's default (QA D1). */
+    private function compared(array $values): array
+    {
+        $out = array_intersect_key($values, array_flip(RecurringTemplate::COMPARED));
+        if (($out['payment_method'] ?? null) === null && isset($out['account_id'])) {
+            $type = Account::withoutGlobalScopes()->whereKey((int) $out['account_id'])->value('type');
+            $out['payment_method'] = RecurringTemplate::defaultPaymentMethod($type);
+        }
+
+        return $out;
+    }
+
+    /** Names for the id fields among $values, so the approver and S3 can show an account or a category (R7a). */
+    private function labels(array $values): array
+    {
+        $labels = [];
+        if (array_key_exists('account_id', $values)) {
+            $labels['account_id'] = $values['account_id'] === null ? null
+                : Account::withoutGlobalScopes()->whereKey((int) $values['account_id'])->value('name');
+        }
+        if (array_key_exists('category_id', $values)) {
+            $labels['category_id'] = $values['category_id'] === null ? null
+                : ExpenseApprovals::categoryPath(Category::find((int) $values['category_id']));
+        }
+
+        return $labels;
+    }
+
+    /** Review MUST 2 (a): a template of the same name in this branch archived in the last 90 days, the latest one. */
+    private function sameNameArchived(RecurringTemplate $tpl): ?array
+    {
+        $other = RecurringTemplate::withoutGlobalScopes()->with('archiver:id,name')->where('branch_id', $tpl->branch_id)->whereKeyNot($tpl->id)
+            ->whereNotNull('archived_at')->where('archived_at', '>=', now()->subDays(self::SAME_NAME_DAYS))
+            ->whereRaw('LOWER(name) = ?', [mb_strtolower($tpl->name)])->orderByDesc('archived_at')->orderByDesc('id')->first();
+
+        return $other ? ['id' => $other->id, 'name' => $other->name,
+            'archived_on' => $other->archived_at->copy()->setTimezone(BusinessDate::timezone())->format('Y-m-d'),
+            'archived_by' => $other->archiver?->name, 'reason' => $other->archive_reason] : null;
+    }
+
     private static function norm(mixed $v, bool $id): int|string|null
     {
         if ($v === null || (is_string($v) && trim($v) === '')) {
             return null;
         }
 
-        return $id ? (int) $v : trim((string) $v);
+        return $id || is_int($v) ? (int) $v : trim((string) $v);
     }
 
     /**
@@ -393,15 +536,15 @@ class ExpenseTemplates
     }
 
     /**
-     * Linked posted / pending expenses of $templateIds whose bill date (requested_date when set, else txn_date) is in
-     * [$from, $to], with whereDate bounds (portable). Branch scope on: a template's expenses are in its branch.
+     * Counted linked expenses of $templateIds whose bill date (requested_date when set, else txn_date) is in
+     * [$from, $to], with whereDate bounds (portable). Branch scope on: a template's expenses are in its branch. Display
+     * only (S1); a use reads its own through lockForUse().
      *
      * @return Collection<int, Transaction>
      */
     private function linked(array $templateIds, string $from, string $to): Collection
     {
-        return Transaction::whereIn('expense_template_id', $templateIds ?: [0])->where('type', Transaction::EXPENSE)
-            ->whereIn('status', self::COUNTED)
+        return self::whereCounts(Transaction::whereIn('expense_template_id', $templateIds ?: [0])->where('type', Transaction::EXPENSE))
             ->where(fn (Builder $w) => $w
                 ->where(fn (Builder $x) => $x->whereNotNull('requested_date')->whereDate('requested_date', '>=', $from)->whereDate('requested_date', '<=', $to))
                 ->orWhere(fn (Builder $x) => $x->whereNull('requested_date')->whereDate('txn_date', '>=', $from)->whereDate('txn_date', '<=', $to)))
@@ -421,26 +564,23 @@ class ExpenseTemplates
     }
 
     /**
-     * R11: the template_version recorded by the latest posted or pending linked expense of each template.
+     * S2 (display only): the template_version recorded by the latest counted linked expense of each template.
      *
      * @return array<int, int> by template id
      */
     private function previousVersions(array $templateIds): array
     {
-        $latest = Transaction::whereIn('expense_template_id', $templateIds ?: [0])->where('type', Transaction::EXPENSE)
-            ->whereIn('status', self::COUNTED)->groupBy('expense_template_id')
+        $latest = self::whereCounts(Transaction::whereIn('expense_template_id', $templateIds ?: [0])->where('type', Transaction::EXPENSE))
+            ->groupBy('expense_template_id')
             ->selectRaw('expense_template_id, MAX(id) as last_id')->toBase()->get()
             ->mapWithKeys(fn ($r) => [(int) $r->last_id => (int) $r->expense_template_id]);
         if ($latest->isEmpty()) {
             return [];
         }
         $out = [];
-        $rows = AuditLog::whereIn('event', self::USE_EVENTS)->where('auditable_type', Transaction::class)
-            ->whereIn('auditable_id', $latest->keys()->all())->orderBy('id')->get(['auditable_id', 'new_values']);
-        foreach ($rows as $r) {
-            $tid = $latest[(int) $r->auditable_id];
-            if (! isset($out[$tid]) && isset($r->new_values['template_version'])) {
-                $out[$tid] = (int) $r->new_values['template_version'];
+        foreach (self::useAudits($latest->keys()->all()) as $txnId => $audit) {
+            if (isset($audit['template_version'])) {
+                $out[$latest[$txnId]] = (int) $audit['template_version'];
             }
         }
 
@@ -481,7 +621,7 @@ class ExpenseTemplates
         $year = substr($today, 0, 4);
         // Every "this period" contains today and lies inside today's calendar year.
         $linked = $this->linked($ids, "{$year}-01-01", "{$year}-12-31")->groupBy('expense_template_id');
-        $last = Transaction::whereIn('expense_template_id', $ids)->where('type', Transaction::EXPENSE)->whereIn('status', self::COUNTED)
+        $last = self::whereCounts(Transaction::whereIn('expense_template_id', $ids)->where('type', Transaction::EXPENSE))
             ->groupBy('expense_template_id')->selectRaw('expense_template_id, MAX(COALESCE(requested_date, txn_date)) as last_used')
             ->toBase()->get()->mapWithKeys(fn ($r) => [(int) $r->expense_template_id => substr((string) $r->last_used, 0, 10)]);
         $versions = $this->previousVersions($ids);
@@ -503,7 +643,7 @@ class ExpenseTemplates
                     'branch' => ['id' => $t->branch_id, 'code' => $t->branch?->code],
                     'name' => $t->name,
                     'version' => (int) $t->version,
-                    'account' => ['id' => (int) $t->account_id, 'name' => $t->account?->name, 'status' => $t->account?->status],
+                    'account' => ['id' => (int) $t->account_id, 'name' => $t->account?->name, 'status' => $t->account?->status, 'type' => $t->account?->type],
                     'category' => ['id' => (int) $t->category_id, 'parent_id' => $c?->parent_id, 'path' => ExpenseApprovals::categoryPath($c),
                         'active' => $c !== null && $c->is_active && ($c->parent_id === null || (bool) $c->parent?->is_active)],
                     'amount' => $t->amount_cents === null ? null : Money::fromCents((int) $t->amount_cents),
@@ -532,8 +672,9 @@ class ExpenseTemplates
     }
 
     /**
-     * R7a / S3: what the use's audit row recorded (template name, changes with the template's values, changed since its
-     * last use, confirmed duplicate). Empty keys when the row has no template.
+     * R7a / S3: what the use's audit row recorded (template name, changes with the template's values, the comparison
+     * with the last approved use or the first-review facts, a same-name template archived lately, confirmed duplicate).
+     * Empty keys when the row has no template.
      */
     public static function facts(?array $audit): array
     {
@@ -545,10 +686,19 @@ class ExpenseTemplates
             'template_changes' => $has ? array_values((array) ($a['template_changes'] ?? [])) : [],
             'template_values' => $has ? (object) ($a['template_values'] ?? []) : (object) [],
             'template_labels' => (object) ($a['template_labels'] ?? []),
-            'template_changed_since_last_use' => (bool) ($a['template_changed_since_last_use'] ?? false),
-            'template_previous_version' => $a['template_previous_version'] ?? null,
+            'template_first_review' => (bool) ($a['template_first_review'] ?? false),
+            'template_unreviewed_uses' => (int) ($a['template_unreviewed_uses'] ?? 0),
+            'template_reviewed_version' => $a['template_reviewed_version'] ?? null,
+            'template_reviewed_ref' => $a['template_reviewed_ref'] ?? null,
+            'template_changed_since_review' => (bool) ($a['template_changed_since_review'] ?? false),
+            'template_review_changes' => array_values((array) ($a['template_review_changes'] ?? [])),
+            'template_review_values' => (object) ($a['template_review_values'] ?? []),
+            'template_review_labels' => (object) ($a['template_review_labels'] ?? []),
+            'template_created_on' => $a['template_created_on'] ?? null,
+            'template_created_by' => $a['template_created_by'] ?? null,
             'template_changed_on' => $a['template_changed_on'] ?? null,
             'template_changed_by' => $a['template_changed_by'] ?? null,
+            'template_same_name_archived' => $a['template_same_name_archived'] ?? null,
             'duplicate_confirmed' => (bool) ($a['duplicate_confirmed'] ?? false),
             'duplicate_of' => array_values((array) ($a['duplicate_of'] ?? [])),
             'duplicate_period' => $a['duplicate_period'] ?? null,

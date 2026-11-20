@@ -14,7 +14,7 @@ import {
 import { LockBannerComponent } from '../period-locks/lock-banner.component';
 import { ReceiptDialogComponent, ReceiptResult, receiptLabel } from '../../core/receipts';
 import { ApprovalDialogComponent, ApprovalTarget, approvalLabel } from '../../core/approvals';
-import { TemplateFacts, approvalTemplateLines, changesText, useText } from '../../core/expense-templates';
+import { TemplateFacts, TemplateLine, approvalTemplateLines } from '../../core/expense-templates';
 
 interface Detail extends TemplateFacts {
   id: number; ref_no: string; type: string; status: string; txn_date: string; amount: string;
@@ -107,9 +107,8 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
             <!-- AG-066 S3: the template link and what its use recorded (R11). -->
             <dt>From template</dt>
             <dd class="tpl-detail">{{ tpl.name }} @if (tpl.archived) { <span class="tag" data-s="inactive">Archived</span> }
-              @if (t.template_changes?.length) { <br /><span>Changed from template: {{ changes(t) }}</span> }
-              @if (t.template_changed_since_last_use) { <br /><span>Template changed since its last use</span> }
-              @if (t.duplicate_confirmed) { <br /><span class="tpl-warn">Second use for {{ t.duplicate_period }} confirmed: {{ duplicates(t) }}</span> }
+              <!-- R7a: the same lines as the approver's, after "From template". -->
+              @for (l of templateLines(t); track $index) { <br /><span [class.tpl-warn]="l.warn">{{ l.text }}</span> }
             </dd>
           }
         </dl>
@@ -330,12 +329,8 @@ export class TransactionDetailComponent implements OnInit {
 
   approvalText(s: string | null | undefined) { return approvalLabel(s); }
 
-  /** AG-066 S3 */
-  changes(t: Detail): string { return changesText(t); }
-
-  duplicates(t: Detail): string {
-    return t.duplicate_entries?.length ? t.duplicate_entries.map(useText).join(', ') : (t.duplicate_of ?? []).join(', ');
-  }
+  /** AG-066 S3: the R7a lines without the first ("From template <name>", already the label). */
+  templateLines(t: Detail): TemplateLine[] { return approvalTemplateLines(t).slice(1); }
 
   approvalDone(r: { ref_no: string }, mode: 'approve' | 'reject') {
     this.approvalMode.set(null);

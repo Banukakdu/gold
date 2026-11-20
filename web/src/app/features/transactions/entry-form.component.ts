@@ -13,7 +13,7 @@ import { AuthService } from '../../core/auth.service';
 import { ToastService } from '../../core/toast.service';
 import { toCents } from '../../core/approvals';
 import { lateEntryWarning } from '../../core/reconciliation';
-import { ExpenseTemplate, ExpenseTemplateList, useText } from '../../core/expense-templates';
+import { ExpenseTemplate, ExpenseTemplateList, defaultPaymentMethod, useText } from '../../core/expense-templates';
 
 interface UploadLine { name: string; size: number; pct: number; error?: string; done?: boolean }
 interface SaveResult {
@@ -23,6 +23,8 @@ interface SaveResult {
 }
 interface SaveResponse { id: number; ref_no: string; status?: string; hold_reason?: string | null; same_day_total?: string | null; warning?: string | null; txn_date?: string }
 interface BranchLimit { id: number; expense_approval_threshold?: string | null }
+/** The fields whose typed value a template would replace. */
+const TYPED_KEYS = ['amount', 'payee_payer', 'reference', 'description', 'category_id'];
 /** AG-066 S2: the R6 409 (soft block) waiting for "Save anyway". */
 interface Duplicate { message: string }
 
@@ -166,6 +168,8 @@ export class EntryFormComponent implements OnInit {
   @ViewChild('amountInput') amountInput?: ElementRef<HTMLInputElement>;
   private loads = 0;
   private urlTemplate: number | null = null;
+  /** The form values the picked template filled in (review finding 5), null without a template. */
+  private filled: Record<string, unknown> | null = null;
   today = colomboToday();
   accounts = signal<Account[]>([]);
   categories = signal<Category[]>([]);
@@ -240,10 +244,16 @@ export class EntryFormComponent implements OnInit {
     this.fill(t);
   }
 
-  /** Something the user typed that a template would replace (account and date are pre-set, so they do not count). */
+  /**
+   * Something the user typed that a template would replace (review finding 5). Without a template: any amount, payee,
+   * reference, description or category (account, date and method are pre-set, so they do not count). After a template:
+   * only a field that now differs from what that template filled in.
+   */
   private typed(): boolean {
-    const m = this.m;
-    return [m['amount'], m['payee_payer'], m['reference'], m['description'], m['category_id']].some(v => v !== null && v !== undefined && String(v).trim() !== '');
+    const norm = (v: unknown) => (v === null || v === undefined ? '' : String(v).trim());
+    const base = this.filled;
+    const keys = base ? [...TYPED_KEYS, 'account_id', 'payment_method'] : TYPED_KEYS;
+    return keys.some(k => norm(this.m[k]) !== (base ? norm(base[k]) : ''));
   }
 
   /**
@@ -268,10 +278,12 @@ export class EntryFormComponent implements OnInit {
       category_id: categoryOk ? t.category.id : null,
       amount: t.amount,
       payee_payer: t.payee_payer ?? '',
-      payment_method: t.payment_method ?? 'cash',
+      // QA D1 / SHOULD 7: a template without a method uses its account's default, as the server compares it.
+      payment_method: t.payment_method ?? defaultPaymentMethod(t.account.type),
       description: t.description ?? '',
       reference: '',
     };
+    this.filled = { ...this.m };
     // The AG-064 hint and the "Send for approval" button follow the amount signal.
     this.amount.set(t.amount);
     this.template.set(t);
@@ -280,6 +292,7 @@ export class EntryFormComponent implements OnInit {
   }
 
   private clearTemplate() {
+    this.filled = null;
     this.template.set(null);
     this.templateNotes.set([]);
     this.duplicate.set(null);

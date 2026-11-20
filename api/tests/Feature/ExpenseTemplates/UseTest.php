@@ -32,7 +32,14 @@ class UseTest extends ExpenseTemplateTestCase
         $this->assertSame('Rent - Kandy office', $a->new_values['template_name']);
         $this->assertSame([], $a->new_values['template_changes']);
         $this->assertSame(1, $a->new_values['template_version']);
-        $this->assertFalse($a->new_values['template_changed_since_last_use']);
+        // Review MUST 2: no earlier use was approved, so the approver is told who made the template and when.
+        $this->assertTrue($a->new_values['template_first_review']);
+        $this->assertSame(0, $a->new_values['template_unreviewed_uses']);
+        $this->assertFalse($a->new_values['template_changed_since_review']);
+        $this->assertSame('2026-11-20', $a->new_values['template_created_on']);
+        $this->assertSame($this->acc->name, $a->new_values['template_created_by']);
+        $this->assertArrayNotHasKey('template_changed_on', $a->new_values);
+        $this->assertArrayNotHasKey('template_same_name_archived', $a->new_values);
         $this->assertSame('INV-11', $txn->reference);
         // A plain expense still answers expense_template_id: null.
         $this->record('100.00', '2026-11-20')->assertCreated()->assertJsonPath('expense_template_id', null);
@@ -64,7 +71,8 @@ class UseTest extends ExpenseTemplateTestCase
         $this->as($this->acc, $this->kdy)->getJson("/api/v1/transactions/{$id}")->assertOk()
             ->assertJsonPath('expense_template.name', 'Rent - Kandy office')->assertJsonPath('expense_template.archived', false)
             ->assertJsonPath('template_changes', ['amount', 'payee_payer'])->assertJsonPath('template_values.amount', '150000.00')
-            ->assertJsonPath('template_changed_since_last_use', false)->assertJsonPath('duplicate_confirmed', false);
+            ->assertJsonPath('template_first_review', true)->assertJsonPath('template_changed_since_review', false)
+            ->assertJsonPath('duplicate_confirmed', false);
         // A plain expense has no template.
         $plain = $this->record('100.00', '2026-11-20')->json('id');
         $this->as($this->acc, $this->kdy)->getJson("/api/v1/transactions/{$plain}")->assertOk()->assertJsonPath('expense_template', null);
@@ -181,19 +189,39 @@ class UseTest extends ExpenseTemplateTestCase
      * connection, so the race is shown by its mechanism: the template row is read FOR UPDATE inside the posting
      * transaction before the duplicate read, which serialises two uses on MySQL; the second then sees the first.
      */
+    /**
+     * AC 19 / review finding 1, by mechanism (one connection here; the two-connection proof on MySQL is
+     * ConcurrencyTest): inside the posting transaction the template lock is the FIRST statement, so on MySQL no
+     * snapshot exists before it, and the template's uses are read next with a locking read.
+     */
     public function test_ac19_parallel_uses_are_serialised_by_the_template_lock(): void
     {
         $rent = $this->tRent();
-        DB::enableQueryLog();
+        $base = DB::transactionLevel();
+        $log = [];
+        DB::listen(function ($q) use (&$log) {
+            $log[] = ['sql' => strtolower($q->sql), 'level' => DB::transactionLevel()];
+        });
         $statuses = [$this->useTpl($rent)->status(), $this->useTpl($rent)->status()];
         $this->assertSame([201, 409], $statuses);
         $this->assertSame(1, Transaction::withoutGlobalScopes()->where('expense_template_id', $rent->id)->count());
-        $log = array_column(DB::getQueryLog(), 'query');
-        $lock = array_keys(array_filter($log, fn ($q) => str_contains($q, 'recurring_templates') && str_contains($q, 'where')
-            && (DB::connection()->getDriverName() !== 'mysql' || str_contains($q, 'for update'))));
-        $insert = array_keys(array_filter($log, fn ($q) => str_starts_with(strtolower($q), 'insert into') && str_contains($q, 'transactions')));
-        $this->assertNotEmpty($lock);
-        $this->assertLessThan($insert[0], $lock[0], 'the template is locked before the expense row is written');
+
+        $mysql = DB::connection()->getDriverName() === 'mysql';
+        // The lock reads the template by id only (the R7a same-name read also reads recurring_templates, by name).
+        $locks = array_keys(array_filter($log, fn ($q) => $q['level'] > $base && preg_match('/from [`"]recurring_templates[`"]/', $q['sql'])
+            && ! str_contains($q['sql'], 'lower(name)')));
+        $this->assertCount(2, $locks);
+        foreach ($locks as $i) {
+            $this->assertLessThanOrEqual($base, $log[$i - 1]['level'], 'the template lock is the first statement of the posting transaction');
+            $uses = $log[$i + 1]['sql'];
+            $this->assertStringContainsString('expense_template_id', $uses);
+            if ($mysql) {
+                $this->assertStringContainsString('for update', $log[$i]['sql']);
+                $this->assertStringContainsString('lock in share mode', $uses);
+            }
+        }
+        $insert = array_keys(array_filter($log, fn ($q) => str_starts_with($q['sql'], 'insert into') && str_contains($q['sql'], 'transactions')));
+        $this->assertLessThan($insert[0], $locks[0], 'the template is locked before the expense row is written');
     }
 
     public function test_ac20_archived_template_cannot_be_used_and_ac21_links_stay(): void
@@ -278,11 +306,16 @@ class UseTest extends ExpenseTemplateTestCase
         $this->assertSame($rent->id, (int) $this->txn($id)->expense_template_id);
     }
 
-    /** Review MUST 2: versions, changes with the template's values, and a confirmed duplicate reach the approver. */
+    /**
+     * Review MUST 2: versions, changes with the template's values, and a confirmed duplicate reach the approver. The
+     * template is compared with the version of its last APPROVED use (sign-off finding 2).
+     */
     public function test_ac28a_the_approver_sees_the_template_facts(): void
     {
         $rent = $this->tRent();
         $first = $this->txn($this->useTpl($rent)->assertCreated()->json('id'));
+        $this->approve($first->id)->assertOk();
+        $first->refresh();
         $this->accKdy()->putJson("/api/v1/expense-templates/{$rent->id}", $this->rentBody(['payee_payer' => 'K. Perera (new landlord)']))->assertOk()
             ->assertJsonPath('version', 2);
         // S2: the list says the template changed since its last use.
@@ -294,9 +327,14 @@ class UseTest extends ExpenseTemplateTestCase
         $second = $this->txn($this->useTpl($rent, ['confirm_duplicate' => true])->assertCreated()->json('id'));
         $a = $this->useAudit($second->id, 'expense.approval_requested')->new_values;
         $this->assertSame(2, $a['template_version']);
-        $this->assertTrue($a['template_changed_since_last_use']);
         $this->assertSame([], $a['template_changes']);
-        $this->assertSame(1, $a['template_previous_version']);
+        $this->assertFalse($a['template_first_review']);
+        $this->assertSame(1, $a['template_reviewed_version']);
+        $this->assertSame($first->ref_no, $a['template_reviewed_ref']);
+        $this->assertTrue($a['template_changed_since_review']);
+        $this->assertSame(['payee_payer'], $a['template_review_changes']);
+        $this->assertSame(['payee_payer' => 'S. Fernando (landlord)'], $a['template_review_values']);
+        $this->assertSame('2026-11-20', $a['template_changed_on']);
         $this->assertSame($this->acc->name, $a['template_changed_by']);
         $this->assertTrue($a['duplicate_confirmed']);
         $this->assertSame([$first->ref_no], $a['duplicate_of']);
@@ -304,32 +342,134 @@ class UseTest extends ExpenseTemplateTestCase
         $widget = $this->widget($this->kdyBa, $this->kdy);
         $r = collect($widget['to_approve']['data'])->firstWhere('id', $second->id);
         $this->assertSame(['id' => $rent->id, 'name' => 'Rent - Kandy office', 'version' => 2], $r['template']);
-        $this->assertTrue($r['template_changed_since_last_use']);
+        $this->assertTrue($r['template_changed_since_review']);
+        $this->assertSame(1, $r['template_reviewed_version']);
+        $this->assertSame(['payee_payer'], $r['template_review_changes']);
+        $this->assertSame('S. Fernando (landlord)', $r['template_review_values']['payee_payer']);
         $this->assertTrue($r['duplicate_confirmed']);
         $this->assertSame([$first->ref_no], $r['duplicate_of']);
         $this->assertSame('November 2026', $r['duplicate_period']);
         $this->assertSame($first->ref_no, $r['duplicate_entries'][0]['ref_no']);
-        $this->assertFalse(collect($widget['to_approve']['data'])->firstWhere('id', $first->id)['template_changed_since_last_use']);
 
-        // A later use with no template change in between: false. With 140,000.00: the change and the template's value.
+        // Once version 2 has been approved, a later use with no template change in between is not flagged. With
+        // 140,000.00: the change and the template's value.
+        $this->approve($second->id)->assertOk();
         $this->at('2026-12-01');
+        $this->sa()->postJson('/api/v1/allocations', ['from_account_id' => $this->mainAcc->id, 'to_account_id' => $this->kdyBank->id,
+            'amount' => '200000.00', 'txn_date' => '2026-12-01', 'kind' => 'top_up'])->assertCreated();
         $third = $this->useTpl($rent, ['amount' => '140000.00'])->assertCreated()->json('id');
         $a = $this->useAudit($third, 'expense.approval_requested')->new_values;
-        $this->assertFalse($a['template_changed_since_last_use']);
+        $this->assertSame(2, $a['template_reviewed_version']);
+        $this->assertFalse($a['template_changed_since_review']);
+        $this->assertArrayNotHasKey('template_review_changes', $a);
         $this->assertSame(['amount'], $a['template_changes']);
         $this->assertSame('150000.00', $a['template_values']['amount']);
         $r = collect($this->widget($this->kdyBa, $this->kdy)['to_approve']['data'])->firstWhere('id', $third);
         $this->assertSame(['amount'], $r['template_changes']);
         $this->assertSame('150000.00', $r['template_values']['amount']);
+        $this->assertFalse($r['template_changed_since_review']);
         $this->assertFalse($r['duplicate_confirmed']);
         // A row without a template.
         $plain = $this->e1();
         $r = collect($this->widget($this->kdyBa, $this->kdy)['to_approve']['data'])->firstWhere('id', $plain->id);
         $this->assertNull($r['template']);
         $this->assertSame([], $r['template_changes']);
+        $this->assertFalse($r['template_first_review']);
     }
 
-    /** Review SHOULD 6: the link is fixed at creation. */
+    /** Sign-off finding 2 (b): a below-limit use that nobody reviewed does not absorb a template change. */
+    public function test_ac28c_a_use_below_the_limit_does_not_hide_a_template_change(): void
+    {
+        $rent = $this->tRent();
+        $first = $this->useTpl($rent)->assertCreated()->json('id');
+        $this->approve($first)->assertOk();
+        $this->accKdy()->putJson("/api/v1/expense-templates/{$rent->id}", $this->rentBody(['payee_payer' => 'K. Perera', 'account_id' => $this->kdyCash->id,
+            'payment_method' => 'cash']))->assertOk()->assertJsonPath('version', 2);
+        // A small use posts at once (below 50,000.00): nobody reviews it.
+        $this->at('2026-12-01');
+        $this->useTpl($rent, ['amount' => '1000.00'])->assertCreated()->assertJsonPath('status', 'posted');
+        // The next held use is still compared with version 1, the last one an approver saw.
+        $this->at('2027-01-04');
+        $this->sa()->postJson('/api/v1/allocations', ['from_account_id' => $this->mainAcc->id, 'to_account_id' => $this->kdyCash->id,
+            'amount' => '200000.00', 'txn_date' => '2027-01-04', 'kind' => 'top_up'])->assertCreated();
+        $held = $this->useTpl($rent)->assertCreated()->assertJsonPath('status', 'pending')->json('id');
+        $a = $this->useAudit($held, 'expense.approval_requested')->new_values;
+        $this->assertSame(1, $a['template_reviewed_version']);
+        $this->assertTrue($a['template_changed_since_review']);
+        $this->assertSame(['account_id', 'payee_payer', 'payment_method'], $a['template_review_changes']);
+        $this->assertSame(['account_id' => $this->kdyBank->id, 'payee_payer' => 'S. Fernando (landlord)', 'payment_method' => 'bank_transfer'],
+            self::sorted($a['template_review_values']));
+        $this->assertSame(['account_id' => $this->kdyBank->name], $a['template_review_labels']);
+        $r = collect($this->widget($this->kdyBa, $this->kdy)['to_approve']['data'])->firstWhere('id', $held);
+        $this->assertSame(['account_id', 'payee_payer', 'payment_method'], $r['template_review_changes']);
+        $this->assertSame($this->kdyBank->name, $r['template_review_labels']['account_id']);
+    }
+
+    /** Sign-off finding 2 (b) without any approved use: "first reviewed use", who made the template and its last change. */
+    public function test_ac28d_no_approved_use_shows_the_first_review_facts(): void
+    {
+        $rent = $this->tRent();
+        $this->accKdy()->putJson("/api/v1/expense-templates/{$rent->id}", $this->rentBody(['payee_payer' => 'K. Perera']))->assertOk();
+        $this->useTpl($rent, ['amount' => '1000.00'])->assertCreated()->assertJsonPath('status', 'posted');
+        $this->at('2026-12-01');
+        $held = $this->useTpl($rent)->assertCreated()->assertJsonPath('status', 'pending')->json('id');
+        $a = $this->useAudit($held, 'expense.approval_requested')->new_values;
+        $this->assertTrue($a['template_first_review']);
+        $this->assertSame(1, $a['template_unreviewed_uses']);
+        $this->assertSame('2026-11-20', $a['template_created_on']);
+        $this->assertSame($this->acc->name, $a['template_created_by']);
+        $this->assertSame('2026-11-20', $a['template_changed_on']);
+        $this->assertSame($this->acc->name, $a['template_changed_by']);
+        $this->as($this->acc, $this->kdy)->getJson("/api/v1/transactions/{$held}")->assertOk()
+            ->assertJsonPath('template_first_review', true)->assertJsonPath('template_unreviewed_uses', 1)
+            ->assertJsonPath('template_created_by', $this->acc->name)->assertJsonPath('template_changed_on', '2026-11-20');
+    }
+
+    /** Sign-off finding 2 (a): archive and re-create with the same name is named to the approver for 90 days. */
+    public function test_ac28e_a_same_name_template_archived_lately_is_shown(): void
+    {
+        $old = $this->tRent();
+        $this->approve($this->useTpl($old)->assertCreated()->json('id'))->assertOk();
+        $this->accKdy()->postJson("/api/v1/expense-templates/{$old->id}/archive", ['reason' => 'Lease ended'])->assertOk();
+        $new = $this->tRent(['payee_payer' => 'K. Perera']);
+        $this->at('2026-12-01');
+        $held = $this->useTpl($new)->assertCreated()->assertJsonPath('status', 'pending')->json('id');
+        $a = $this->useAudit($held, 'expense.approval_requested')->new_values;
+        $this->assertTrue($a['template_first_review']);
+        $this->assertSame(0, $a['template_unreviewed_uses']);
+        $this->assertSame(self::sorted(['id' => $old->id, 'name' => 'Rent - Kandy office', 'archived_on' => '2026-11-20', 'archived_by' => $this->acc->name,
+            'reason' => 'Lease ended']), self::sorted($a['template_same_name_archived']));
+        $r = collect($this->widget($this->kdyBa, $this->kdy)['to_approve']['data'])->firstWhere('id', $held);
+        $this->assertSame('2026-11-20', $r['template_same_name_archived']['archived_on']);
+
+        // More than 90 days after the archive: no longer named.
+        $this->approve($held)->assertOk();
+        DB::table('recurring_templates')->where('id', $old->id)->update(['archived_at' => now()->subDays(91)]);
+        $this->at('2027-01-04');
+        $this->sa()->postJson('/api/v1/allocations', ['from_account_id' => $this->mainAcc->id, 'to_account_id' => $this->kdyBank->id,
+            'amount' => '200000.00', 'txn_date' => '2027-01-04', 'kind' => 'top_up'])->assertCreated();
+        $next = $this->useTpl($new)->assertCreated()->json('id');
+        $this->assertArrayNotHasKey('template_same_name_archived', $this->useAudit($next, 'expense.approval_requested')->new_values);
+    }
+
+    /** Review finding 4: a pending request past its AG-064 R8 expiry no longer counts, even before the expiry job runs. */
+    public function test_r6_an_expired_request_not_yet_closed_does_not_count(): void
+    {
+        $q = $this->tRent(['frequency' => 'quarterly', 'name' => 'Insurance - Kandy']);
+        $this->at('2026-10-15');
+        $first = $this->useTpl($q)->assertCreated()->assertJsonPath('status', 'pending')->json('id');
+        $this->at('2026-11-13');
+        $this->useTpl($q)->assertStatus(409);
+        $this->assertSame('Q4 2026', $this->rowOf($this->list($this->csh, $this->kdy), $q)['this_period']['label']);
+        $this->assertCount(1, $this->rowOf($this->list($this->csh, $this->kdy), $q)['this_period']['transactions']);
+        // 30 days after requested_on (expires_on 2026-11-14): expired by AG-064 R8, still 'pending' until
+        // expenses:expire-approvals runs.
+        $this->at('2026-11-14');
+        $this->assertSame('pending', $this->txn($first)->status);
+        $this->assertSame([], $this->rowOf($this->list($this->csh, $this->kdy), $q)['this_period']['transactions']);
+        $this->useTpl($q)->assertCreated();
+    }
+
     public function test_ac28b_the_link_never_changes_and_contras_and_reversals_do_not_carry_it(): void
     {
         $elec = $this->tElec();
@@ -384,6 +524,40 @@ class UseTest extends ExpenseTemplateTestCase
         $this->approve($id)->assertOk();
         $this->assertSame('250000.00', $this->bal($this->kdyBank));
         $this->assertVerifies();
+    }
+
+    /** QA D1 / review SHOULD 7: "no payment method" on a template is the account's default, stored and compared as such. */
+    public function test_qa_d1_an_empty_payment_method_is_the_accounts_default(): void
+    {
+        $rent = $this->tRent(['payment_method' => null]);
+        $this->assertSame('bank_transfer', $rent->payment_method);
+        $this->assertSame('cash', $this->tElec(['payment_method' => ''])->payment_method);
+        // A template saved without one before this rule: the account's default is no change at use.
+        DB::table('recurring_templates')->where('id', $rent->id)->update(['payment_method' => null]);
+        $id = $this->useTpl($rent, ['payment_method' => 'bank_transfer'])->assertCreated()->json('id');
+        $this->assertSame([], $this->useAudit($id, 'expense.approval_requested')->new_values['template_changes']);
+        $this->at('2026-12-01');
+        $id = $this->useTpl($rent, ['payment_method' => 'cheque'])->assertCreated()->json('id');
+        $a = $this->useAudit($id, 'expense.approval_requested')->new_values;
+        $this->assertSame(['payment_method'], $a['template_changes']);
+        $this->assertSame(['payment_method' => 'bank_transfer'], $a['template_values']);
+    }
+
+    /** QA D2: a Super Admin in All branches mode (header "all" or none) cannot record an income or expense. */
+    public function test_qa_d2_all_branches_mode_cannot_record_an_income_or_expense(): void
+    {
+        $rent = $this->tRent();
+        $count = Transaction::withoutGlobalScopes()->count();
+        $audits = AuditLog::count();
+        $this->useTpl($rent, by: $this->admin, branch: 'all')->assertUnprocessable()->assertJsonPath('message', 'Choose a branch first.');
+        $plain = ['account_id' => $this->kdyCash->id, 'category_id' => $this->electricity->id, 'txn_date' => '2026-11-20', 'amount' => '100.00'];
+        $this->as($this->admin, 'all')->postJson('/api/v1/expenses', $plain)->assertUnprocessable()->assertJsonPath('message', 'Choose a branch first.');
+        $this->as($this->admin, 'all')->postJson('/api/v1/incomes', $plain)->assertUnprocessable()->assertJsonPath('message', 'Choose a branch first.');
+        $this->flushHeaders()->actingAs($this->admin)->postJson('/api/v1/expenses', $plain)->assertUnprocessable();
+        $this->assertSame($count, Transaction::withoutGlobalScopes()->count());
+        $this->assertSame($audits, AuditLog::count());
+        // In branch mode the Super Admin records as before.
+        $this->useTpl($rent, by: $this->admin, branch: $this->kdy)->assertCreated()->assertJsonPath('expense_template_id', $rent->id);
     }
 
     public function test_income_ignores_template_fields(): void

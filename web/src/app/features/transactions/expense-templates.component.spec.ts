@@ -1,7 +1,7 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
-import { ActivatedRoute, Router, convertToParamMap, provideRouter } from '@angular/router';
+import { ActivatedRoute, ActivatedRouteSnapshot, Router, RouterStateSnapshot, UrlTree, convertToParamMap, provideRouter } from '@angular/router';
 import { Component, Provider, Type } from '@angular/core';
 import { AuthService } from '../../core/auth.service';
 import { me } from '../../core/notifications.service.spec';
@@ -11,6 +11,7 @@ import { BranchAccess } from '../../core/models';
 import { phoneFrame } from '../../../testing/phone-frame';
 import { ExpenseTemplate, ExpenseTemplateList, approvalTemplateLines } from '../../core/expense-templates';
 import { ExpenseTemplatesComponent } from './expense-templates.component';
+import { entryBranchGuard } from '../../core/guards';
 import { EntryFormComponent } from './entry-form.component';
 import { TransactionDetailComponent } from './transaction-detail.component';
 import { ExpenseApprovals, ExpenseApprovalsComponent, ExpenseRowWithTemplate } from '../dashboard/expense-approvals.component';
@@ -165,6 +166,38 @@ describe('AG-066 expense templates (web)', () => {
       expect(button(el, 'Save expense')).toBeTruthy();
     });
 
+    it('review finding 5: a second template asks first only when a field differs from what the first one filled in', async () => {
+      const f = await form([rent(), elec()]);
+      const confirm = spyOn(window, 'confirm').and.returnValue(true);
+      const pick = el.querySelector<HTMLSelectElement>('select[name="template"]')!;
+      pick.value = '7';
+      pick.dispatchEvent(new Event('change'));
+      await settle(f);
+      pick.value = '8';
+      pick.dispatchEvent(new Event('change'));
+      await settle(f);
+      expect(confirm).not.toHaveBeenCalled();
+      expect(value('payee_payer')).toBe('Ceylon Electricity Board');
+
+      const payee = el.querySelector<HTMLInputElement>('[name="payee_payer"]')!;
+      payee.value = 'CEB Kandy';
+      payee.dispatchEvent(new Event('input'));
+      await settle(f);
+      pick.value = '7';
+      pick.dispatchEvent(new Event('change'));
+      await settle(f);
+      expect(confirm).toHaveBeenCalledOnceWith('Replace what you typed with the template?');
+      expect(value('payee_payer')).toBe('S. Fernando (landlord)');
+    });
+
+    it('QA D1: a template without a payment method fills in its account\'s default', async () => {
+      const f = await form([rent({ payment_method: null, account: { id: 11, name: 'Bank', status: 'active', type: 'bank' } })], { template: '7' });
+      expect(selectedText('payment_method')).toBe('Bank transfer');
+      el.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit'));
+      f.detectChanges();
+      expect(http.expectOne(r => r.method === 'POST' && r.url === '/api/v1/expenses').request.body.payment_method).toBe('bank_transfer');
+    });
+
     it('F5 / R5: an inactive account or category is left empty with its message; S2 shows the R6 and MUST 2 lines', async () => {
       await form([rent({ account: { id: 99, name: 'Old Bank', status: 'inactive' }, category: { id: 31, parent_id: 30, path: 'Rent > Office rent', active: false },
         this_period: { label: 'November 2026', transactions: [{ id: 510, ref_no: 'KDY-EXP-2026-000510', date: '2026-11-20', status: 'posted', status_label: 'Posted' }] },
@@ -218,6 +251,16 @@ describe('AG-066 expense templates (web)', () => {
       expect(frame.doc.documentElement.scrollWidth).toBeLessThanOrEqual(390);
       frame.remove();
     });
+  });
+
+  it('QA D2: in All branches mode the income / expense form redirects (a template link to Expense templates)', () => {
+    setup(null, true, 'all');
+    const run = (query: Record<string, string>) => TestBed.runInInjectionContext(() =>
+      entryBranchGuard({ queryParamMap: convertToParamMap(query) } as ActivatedRouteSnapshot, {} as RouterStateSnapshot));
+    expect((run({ template: '7' }) as UrlTree).toString()).toBe('/expense-templates');
+    expect((run({}) as UrlTree).toString()).toBe('/transactions');
+    TestBed.inject(AuthService).switchBranch('2');
+    expect(run({ template: '7' })).toBeTrue();
   });
 
   describe('S1 Expense templates', () => {
@@ -282,6 +325,25 @@ describe('AG-066 expense templates (web)', () => {
         errors: { name: ['A template named Rent - Kandy office already exists in this branch.'] } }, { status: 422, statusText: 'Unprocessable' });
       await settle(f);
       expect(dlg.querySelector('.field-error')!.textContent).toContain('already exists in this branch');
+    });
+
+    it('R10 / review finding 3: the creator is shown, with "Inactive" when deactivated; QA D1: Edit shows the account default method', async () => {
+      const f = start(ACCOUNTANT, [rent({ can_edit: true, payment_method: null, account: { id: 11, name: 'Bank', status: 'active', type: 'bank' },
+        created_by: { id: 3, name: 'Old Accountant', inactive: true } }), elec({ can_edit: true })]);
+      const rows = Array.from(el.querySelectorAll('.tpl-table tbody tr'));
+      const rentRow = rows.find(r => r.textContent!.includes('Rent - Kandy office'))!;
+      const elecRow = rows.find(r => r.textContent!.includes('Electricity - Kandy'))!;
+      expect(elecRow.querySelector('.tpl-by')!.textContent).toContain('Created by KDY Accountant');
+      expect(elecRow.querySelector('.tpl-by .tag')).toBeNull();
+      expect(rentRow.querySelector('.tpl-by')!.textContent).toContain('Created by Old Accountant');
+      expect(rentRow.querySelector('.tpl-by .tag')!.textContent!.trim()).toBe('Inactive');
+      expect(el.querySelector('.tpl-cards')!.textContent).toContain('Created by Old Accountant');
+      button(rentRow, 'Edit')!.click();
+      await settle(f);
+      http.expectOne('/api/v1/accounts').flush(ACCOUNTS);
+      http.expectOne(r => r.url === '/api/v1/categories').flush(CATEGORIES);
+      await settle(f);
+      expect(el.querySelector<HTMLSelectElement>('[role="dialog"] select[name="payment_method"]')!.value).toBe('bank_transfer');
     });
 
     it('AC 33: the archive dialog and its toast', async () => {
@@ -352,21 +414,40 @@ describe('AG-066 expense templates (web)', () => {
   describe('S3 / S5 approver lines (review MUST 2)', () => {
     const facts = {
       template: { id: 7, name: 'Rent - Kandy office', version: 2 }, template_changes: ['amount', 'payee_payer'],
-      template_values: { amount: '150000.00', payee_payer: 'S. Fernando (landlord)' }, template_changed_since_last_use: true,
-      template_previous_version: 1, template_changed_on: '2026-11-19', template_changed_by: 'KDY Accountant', duplicate_confirmed: true,
-      duplicate_of: ['KDY-EXP-2026-000510'], duplicate_period: 'November 2026',
+      template_values: { amount: '150000.00', payee_payer: 'S. Fernando (landlord)' }, template_first_review: false,
+      template_reviewed_version: 1, template_reviewed_ref: 'KDY-EXP-2026-000509', template_changed_since_review: true,
+      template_review_changes: ['account_id', 'payee_payer'], template_review_values: { account_id: 12, payee_payer: 'A. Silva' },
+      template_review_labels: { account_id: 'Cash' }, template_changed_on: '2026-11-19', template_changed_by: 'KDY Accountant',
+      duplicate_confirmed: true, duplicate_of: ['KDY-EXP-2026-000510'], duplicate_period: 'November 2026',
       duplicate_entries: [{ id: 510, ref_no: 'KDY-EXP-2026-000510', date: '2026-11-20', status: 'pending' }],
     };
 
-    it('builds the R7a lines', () => {
+    it('builds the R7a lines: changes, the change since the last approved use, a confirmed duplicate', () => {
       expect(approvalTemplateLines(facts).map(l => l.text)).toEqual([
         'From template Rent - Kandy office',
         'Changed from template: Amount (template 150,000.00), Paid to (template S. Fernando (landlord))',
-        'Template changed since its last use (version 1 -> 2, 2026-11-19 by KDY Accountant)',
+        'Template changed since its last approved use (KDY-EXP-2026-000509, version 1 -> 2, last changed 2026-11-19 by KDY Accountant): '
+          + 'Paid from (was Cash), Paid to (was A. Silva)',
         'Second use for November 2026, confirmed by the requester: KDY-EXP-2026-000510 (Pending approval, 2026-11-20)',
       ]);
-      expect(approvalTemplateLines(facts)[3].warn).toBeTrue();
+      expect(approvalTemplateLines(facts).map(l => !!l.warn)).toEqual([false, false, true, true]);
       expect(approvalTemplateLines({ template: null })).toEqual([]);
+      // Unchanged since the last approved use: no line.
+      expect(approvalTemplateLines({ ...facts, template_changed_since_review: false, duplicate_confirmed: false, template_changes: [] }).length).toBe(1);
+    });
+
+    it('sign-off finding 2: no approved use yet, and a same-name template archived lately', () => {
+      const first = { template: { id: 9, name: 'Rent - Kandy office', version: 3 }, template_changes: [], template_first_review: true,
+        template_unreviewed_uses: 0, template_created_on: '2026-11-02', template_created_by: 'KDY Accountant', template_changed_on: '2026-11-19',
+        template_changed_by: 'KDY Accountant', template_same_name_archived: { id: 7, name: 'Rent - Kandy office', archived_on: '2026-11-01',
+          archived_by: 'KDY Accountant', reason: 'Lease ended' } };
+      expect(approvalTemplateLines(first).map(l => l.text)).toEqual([
+        'From template Rent - Kandy office',
+        'First use of this template: created 2026-11-02 by KDY Accountant; last changed 2026-11-19 by KDY Accountant',
+        'A template with the same name was archived 2026-11-01 by KDY Accountant (Lease ended); this one is a different template',
+      ]);
+      expect(approvalTemplateLines({ ...first, template_unreviewed_uses: 2, template_changed_on: null, template_same_name_archived: null }).map(l => l.text)[1])
+        .toBe('No earlier use of this template was approved (2 earlier uses not reviewed): created 2026-11-02 by KDY Accountant');
     });
 
     it('AC 28a (web): the widget row and the approve dialog show the R7a lines', async () => {
@@ -394,8 +475,10 @@ describe('AG-066 expense templates (web)', () => {
       await settle(m.fixture);
       const dlg = el.querySelector<HTMLElement>('[role="dialog"]')!;
       expect(dlg.textContent).toContain('From template Rent - Kandy office');
-      expect(dlg.textContent).toContain('Template changed since its last use (version 1 -> 2');
-      expect(dlg.querySelector('.tpl-facts li.warn')!.textContent).toContain('Second use for November 2026');
+      expect(dlg.textContent).toContain('Template changed since its last approved use (KDY-EXP-2026-000509, version 1 -> 2');
+      const warns = Array.from(dlg.querySelectorAll('.tpl-facts li.warn')).map(li => li.textContent!);
+      expect(warns.length).toBe(2);
+      expect(warns[1]).toContain('Second use for November 2026');
     });
 
     it('AC 14 / 21 (web): the detail shows the template, the changes and "(archived)"', async () => {
@@ -415,8 +498,9 @@ describe('AG-066 expense templates (web)', () => {
       expect(detail).toContain('Rent - Kandy office');
       expect(detail).toContain('Archived');
       expect(detail).toContain('Changed from template: Amount (template 150,000.00), Paid to');
-      expect(detail).toContain('Template changed since its last use');
-      expect(detail).toContain('Second use for November 2026 confirmed: KDY-EXP-2026-000510');
+      expect(detail).toContain('Template changed since its last approved use (KDY-EXP-2026-000509');
+      expect(detail).toContain('Second use for November 2026, confirmed by the requester: KDY-EXP-2026-000510');
+      expect(detail).not.toContain('From template Rent'); // the label already says it
     });
   });
 });

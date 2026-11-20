@@ -274,11 +274,16 @@ class LedgerService
         $this->assertPositive((string) $data['amount']);
 
         return DB::transaction(function () use ($type, $data) {
-            $acc = $this->moneyAccount((int) $data['account_id']);
-            // AG-066 R2 / R6 / R10: the template (active branch, not archived) is locked first, so two uses of it run one
-            // after the other. It is only a link: every field posted below comes from the request (R5).
+            // AG-066 R2 / R6 / R10: the template (active branch, not archived) is locked as the FIRST statement of this
+            // transaction, so two uses of it run one after the other and the second sees the first: on MySQL no snapshot
+            // exists before this lock (review finding 1, see ExpenseTemplates::lockForUse). Nothing may be read before it.
+            // It is only a link: every field posted below comes from the request (R5).
             $templates = app(ExpenseTemplates::class);
-            $tpl = $type === Transaction::EXPENSE && ! empty($data['template_id']) ? $templates->lockForUse((int) $data['template_id'], $acc) : null;
+            $tpl = $type === Transaction::EXPENSE && ! empty($data['template_id']) ? $templates->lockForUse((int) $data['template_id']) : null;
+            $acc = $this->moneyAccount((int) $data['account_id']);
+            if ($tpl) {
+                $templates->assertSameBranch($tpl, $acc);
+            }
             $cat = Category::findOrFail($data['category_id']);
             $this->assertEntryCategory($type, $cat, $acc);
             [$lines, $locked] = $this->prepare($this->rules->incomeExpense($type, $acc->id, $acc->branch_id, $cat->id, Money::toCents($data['amount'])), $data['txn_date']);

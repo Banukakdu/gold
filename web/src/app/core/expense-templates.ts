@@ -6,7 +6,7 @@ export interface TemplateUse { id: number; ref_no: string | null; date: string; 
 /** GET /expense-templates row (section 5). */
 export interface ExpenseTemplate {
   id: number; branch: { id: number; code: string | null }; name: string; version: number;
-  account: { id: number; name: string | null; status: string | null };
+  account: { id: number; name: string | null; status: string | null; type?: string | null };
   category: { id: number; parent_id: number | null; path: string; active: boolean };
   amount: string | null; payee_payer: string | null; payment_method: string | null; description: string | null;
   frequency: 'monthly' | 'quarterly' | 'yearly' | 'none';
@@ -46,10 +46,20 @@ export interface TemplateFacts {
   template_changes?: string[];
   template_values?: Record<string, string | number | null>;
   template_labels?: Record<string, string | null>;
-  template_changed_since_last_use?: boolean;
-  template_previous_version?: number | null;
+  /** Review MUST 2 (sign-off finding 2): compared with the last use an approver approved. */
+  template_first_review?: boolean;
+  template_unreviewed_uses?: number;
+  template_reviewed_version?: number | null;
+  template_reviewed_ref?: string | null;
+  template_changed_since_review?: boolean;
+  template_review_changes?: string[];
+  template_review_values?: Record<string, string | number | null>;
+  template_review_labels?: Record<string, string | null>;
+  template_created_on?: string | null;
+  template_created_by?: string | null;
   template_changed_on?: string | null;
   template_changed_by?: string | null;
+  template_same_name_archived?: { id: number; name: string; archived_on: string; archived_by: string | null; reason: string | null } | null;
   duplicate_confirmed?: boolean;
   duplicate_of?: string[];
   duplicate_period?: string | null;
@@ -65,10 +75,10 @@ const FIELD_LABELS: Record<string, string> = {
 
 const money = new MoneyPipe();
 
-function fieldValue(field: string, f: TemplateFacts): string {
-  const label = f.template_labels?.[field];
+function shown(field: string, values: Record<string, unknown> | undefined, labels: Record<string, string | null> | undefined): string {
+  const label = labels?.[field];
   if (label) return label;
-  const v = f.template_values?.[field];
+  const v = values?.[field];
   if (v === null || v === undefined || v === '') return 'empty';
   if (field === 'amount') return money.transform(String(v));
   if (field === 'payment_method') return PAYMENT_METHOD_LABELS[String(v)] ?? String(v);
@@ -77,24 +87,43 @@ function fieldValue(field: string, f: TemplateFacts): string {
 
 /** "Amount (template 150,000.00), Paid to (template S. Fernando (landlord))" */
 export function changesText(f: TemplateFacts): string {
-  return (f.template_changes ?? []).map(c => `${FIELD_LABELS[c] ?? c} (template ${fieldValue(c, f)})`).join(', ');
+  return (f.template_changes ?? []).map(c => `${FIELD_LABELS[c] ?? c} (template ${shown(c, f.template_values, f.template_labels)})`).join(', ');
+}
+
+/** "Paid to (was S. Fernando (landlord)), Paid from (was KDY Bank)": the template's values at its last approved use. */
+export function reviewChangesText(f: TemplateFacts): string {
+  return (f.template_review_changes ?? []).map(c => `${FIELD_LABELS[c] ?? c} (was ${shown(c, f.template_review_values, f.template_review_labels)})`).join(', ');
+}
+
+function by(on: string | null | undefined, name: string | null | undefined): string {
+  return [on ?? '', name ? `by ${name}` : ''].filter(Boolean).join(' ');
 }
 
 /**
- * AG-066 R7a: the lines the approver sees for a held expense saved from a template (the dashboard row, the approve
- * dialog), from the request's audit row. Empty when the expense has no template.
+ * AG-066 R7a: the lines the approver sees for an expense saved from a template (the dashboard row, the approve dialog,
+ * the S3 detail), from the use's audit row. Empty when the expense has no template.
  */
 export function approvalTemplateLines(f: TemplateFacts | null | undefined): TemplateLine[] {
   const name = f?.template?.name ?? f?.expense_template?.name;
   if (!f || !name) return [];
   const lines: TemplateLine[] = [{ text: `From template ${name}` }];
   if (f.template_changes?.length) lines.push({ text: `Changed from template: ${changesText(f)}` });
-  if (f.template_changed_since_last_use) {
+  const lastChange = f.template_changed_on ? `last changed ${by(f.template_changed_on, f.template_changed_by)}` : '';
+  if (f.template_first_review) {
+    const earlier = f.template_unreviewed_uses ? `No earlier use of this template was approved (${f.template_unreviewed_uses} earlier use${f.template_unreviewed_uses === 1 ? '' : 's'} not reviewed)`
+      : 'First use of this template';
+    const created = f.template_created_on ? `created ${by(f.template_created_on, f.template_created_by)}` : '';
+    lines.push({ text: `${earlier}${created || lastChange ? ': ' + [created, lastChange].filter(Boolean).join('; ') : ''}`, warn: true });
+  } else if (f.template_changed_since_review) {
     const version = f.template?.version;
-    const from = f.template_previous_version ?? (version ? version - 1 : null);
-    const detail = [from !== null && version ? `version ${from} -> ${version}` : '', f.template_changed_on ?? '', f.template_changed_by ? `by ${f.template_changed_by}` : '']
-      .filter(Boolean).join(', ').replace(/, by /, ' by ');
-    lines.push({ text: `Template changed since its last use${detail ? ` (${detail})` : ''}` });
+    const versions = f.template_reviewed_version && version ? `version ${f.template_reviewed_version} -> ${version}` : '';
+    const detail = [f.template_reviewed_ref ?? '', versions, lastChange].filter(Boolean).join(', ');
+    const fields = reviewChangesText(f);
+    lines.push({ text: `Template changed since its last approved use${detail ? ` (${detail})` : ''}${fields ? ': ' + fields : ''}`, warn: true });
+  }
+  const archived = f.template_same_name_archived;
+  if (archived) {
+    lines.push({ text: `A template with the same name was archived ${by(archived.archived_on, archived.archived_by)}${archived.reason ? ` (${archived.reason})` : ''}; this one is a different template`, warn: true });
   }
   if (f.duplicate_confirmed) {
     const refs = f.duplicate_entries?.length ? f.duplicate_entries.map(useText).join(', ') : (f.duplicate_of ?? []).join(', ');

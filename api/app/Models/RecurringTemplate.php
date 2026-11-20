@@ -23,6 +23,19 @@ class RecurringTemplate extends Model
     /** The fields an expense from the template is compared on (R11 template_changes), in this order. */
     public const COMPARED = ['account_id', 'category_id', 'amount', 'payee_payer', 'payment_method', 'description'];
 
+    /**
+     * Review SHOULD 7 / QA D1: the payment method that follows the account's type. A template saved without a method
+     * stores this one, and an older template without one is compared at use as if it had it.
+     */
+    public static function defaultPaymentMethod(?string $accountType): string
+    {
+        return match ($accountType) {
+            'bank' => 'bank_transfer',
+            'wallet' => 'online',
+            default => 'cash',
+        };
+    }
+
     protected $guarded = ['id'];
 
     protected $casts = ['amount_cents' => 'integer', 'version' => 'integer', 'archived_at' => 'datetime'];

@@ -1,5 +1,5 @@
 import { Routes } from '@angular/router';
-import { anyPermissionGuard, authGuard, branchModeGuard, permissionGuard, superAdminGuard } from './core/guards';
+import { anyPermissionGuard, authGuard, branchModeGuard, entryBranchGuard, permissionGuard, superAdminGuard } from './core/guards';
 import { ShellComponent } from './layout/shell.component';
 
 export const routes: Routes = [
@@ -16,7 +16,7 @@ export const routes: Routes = [
       { path: 'dashboard', loadComponent: () => import('./features/dashboard/dashboard.component').then(m => m.DashboardComponent) },
       { path: 'transactions', canActivate: [permissionGuard('transaction.view')],
         loadComponent: () => import('./features/transactions/transaction-list.component').then(m => m.TransactionListComponent) },
-      { path: 'transactions/new/:kind', loadComponent: () => import('./features/transactions/entry-form.component').then(m => m.EntryFormComponent) },
+      { path: 'transactions/new/:kind', canActivate: [entryBranchGuard], loadComponent: () => import('./features/transactions/entry-form.component').then(m => m.EntryFormComponent) },
       // AG-066 S1 expense templates: read with expense.create or expense.edit; posts nothing.
       { path: 'expense-templates', canActivate: [anyPermissionGuard('expense.create', 'expense.edit')],
         loadComponent: () => import('./features/transactions/expense-templates.component').then(m => m.ExpenseTemplatesComponent) },

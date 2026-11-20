@@ -54,7 +54,12 @@ interface TemplateForm {
               @for (t of rows(); track t.id) {
                 <tr [class.tpl-muted]="!!t.archived_at">
                   @if (auth.isAllBranches()) { <td class="mono">{{ t.branch.code }}</td> }
-                  <td class="tpl-name">{{ t.name }}</td>
+                  <td class="tpl-name">{{ t.name }}
+                    @if (t.created_by; as c) {
+                      <!-- R10: the creator, with the usual "Inactive" tag (review finding 3). -->
+                      <div class="muted tpl-by">Created by {{ c.name }} @if (c.inactive) { <span class="tag" data-s="inactive">Inactive</span> }</div>
+                    }
+                  </td>
                   <td>{{ t.account.name }} @if (accountInactive(t)) { <span class="tag" data-s="inactive">Account inactive</span> }</td>
                   <td><span class="ea-path" [title]="t.category.path">{{ t.category.path }}</span>
                     @if (!t.category.active) { <span class="tag" data-s="inactive">Category inactive</span> }</td>
@@ -93,6 +98,9 @@ interface TemplateForm {
               <div class="ea-line ea-sub"><span>{{ t.account.name }}</span><span class="ea-path" [title]="t.category.path">{{ t.category.path }}</span>
                 @if (auth.isAllBranches()) { <span>{{ t.branch.code }}</span> }</div>
               <div class="ea-line ea-sub"><span>{{ t.payee_payer }}</span><span>{{ frequency(t) }}</span></div>
+              @if (t.created_by; as c) {
+                <div class="ea-line ea-sub tpl-by"><span>Created by {{ c.name }} @if (c.inactive) { <span class="tag" data-s="inactive">Inactive</span> }</span></div>
+              }
               <div class="ea-line ea-sub">
                 @if (t.this_period; as p) {
                   @for (u of p.transactions; track u.id) {
@@ -280,7 +288,9 @@ export class ExpenseTemplatesComponent implements OnInit {
     this.editing.set(t);
     this.methodTouched = true;
     this.openForm({ name: t.name, account_id: t.account.id, parent_id: t.category.parent_id, category_id: t.category.id, amount: t.amount ?? '',
-      payee_payer: t.payee_payer ?? '', payment_method: t.payment_method ?? '', description: t.description ?? '', frequency: t.frequency });
+      payee_payer: t.payee_payer ?? '',
+      // QA D1: a template saved without a method uses its account's default (SHOULD 7); the select shows that one.
+      payment_method: t.payment_method ?? defaultPaymentMethod(t.account.type), description: t.description ?? '', frequency: t.frequency });
   }
 
   private openForm(f: TemplateForm) {

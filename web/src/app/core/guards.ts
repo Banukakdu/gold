@@ -35,3 +35,13 @@ export const branchModeGuard = (redirectTo: string): CanActivateFn => () => {
   const auth = inject(AuthService);
   return !auth.isAllBranches() || inject(Router).parseUrl(redirectTo);
 };
+
+/**
+ * AG-066 QA D2: an income or expense belongs to one branch, so its form is closed in "All branches" mode (the API
+ * refuses it too). A template link goes to Expense templates, where "Switch to <branch> and use" picks the branch.
+ */
+export const entryBranchGuard: CanActivateFn = route => {
+  const auth = inject(AuthService);
+  if (!auth.isAllBranches()) return true;
+  return inject(Router).parseUrl(route.queryParamMap.get('template') ? '/expense-templates' : '/transactions');
+};

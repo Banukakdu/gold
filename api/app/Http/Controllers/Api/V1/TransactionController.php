@@ -307,6 +307,9 @@ class TransactionController extends Controller
 
     private function validated(Request $request, bool $expense = false): array
     {
+        // AG-066 QA D2: an income or expense belongs to one branch; a Super Admin in All branches mode only reads
+        // (the shell hides "Record income/expense" there). Transfers keep their own rules (fund-return AC 4).
+        abort_unless(app(BranchContext::class)->isScoped(), 422, ExpenseTemplates::CHOOSE_BRANCH);
         $data = $request->validate([
             // AG-066 (expense only): the template is a link, never a source of field values (R5).
             ...($expense ? ['template_id' => 'nullable|integer', 'confirm_duplicate' => 'nullable|boolean'] : []),
