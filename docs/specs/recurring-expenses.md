@@ -256,7 +256,7 @@ Checked: `git diff feature/bank-reconciliation...HEAD` up to 3c70cfd (code read;
   - **AC 28i:** Given T-RENT's use approved at version 1, then the KDY Branch Admin changes its payee (version 2), When the KDY Cashier's use is held, Then the audit row has `template_authors = [<KDY Branch Admin id>]`; the KDY Branch Admin's approve and reject return 403 with that message and the request stays pending; S1 approves with 200. Given a template created by the KDY Branch Admin and never approved, its first held use is refused to the KDY Branch Admin in the same way. Given a Branch Admin change made *before* the last approved use, Then `template_authors = []` and the Branch Admin may approve.
 - B. SHOULD (follow-up, not blocking): the "changed since its last approved use" line names only the latest changer. Once A is built, name every user in `template_authors`.
 
-**Release notes / follow-ups (for when A is done)**
+**Release notes / follow-ups**
 1. Templates post nothing; every expense saved from one is an ordinary entry under AG-064 (no pre-approval, no automatic or scheduled posting).
 2. Super Admin can no longer record income or expenses in "All branches" mode (API 422 "Choose a branch first."). Choose the branch first. Transfers are unchanged.
 3. A template saved without a payment method now stores the account's default (bank: Bank transfer, wallet: Online, cash: Cash).
@@ -264,4 +264,17 @@ Checked: `git diff feature/bank-reconciliation...HEAD` up to 3c70cfd (code read;
 5. An approved use later voided or reversed still counts as the reviewed baseline for R7a, because an approver did see that version. This is accepted.
 6. Run `ConcurrencyTest` on MySQL 8 once before release. Migration rollback refuses while any template exists.
 
-**Verdict: NOT SIGNED OFF.** Required change: finding A (R7b with AC 28i and its API test). Everything else is acceptable as delivered. Re-submit for sign-off when A is done.
+First-round verdict (3c70cfd): NOT SIGNED OFF. Required change: finding A (R7b with AC 28i and its API test). Everything else is acceptable as delivered. Re-submit for sign-off when A is done.
+
+**Re-check of 181b9dd (2026-11-20, code read; reported results: SQLite 898 and MySQL 899 passed, pint, ng build and ng test green)**
+- A (R7b): **DONE.**
+  - `ExpenseTemplates::authors` stores `template_authors` / `template_author_names` in the use's audit row. With no approved use, it lists every created/updated author; otherwise only the `updated` rows above the reviewed version. A legacy approved use without a version falls back to all authors, which is stricter.
+  - `ExpenseApprovals::templateAuthor` is checked in `lockedForDecision` after R4a (403 on approve and reject), in `canApprove` and in the widget `row` (`can_approve` false, `template_author` true, tag "Another approver must decide", no buttons).
+  - `SendInAppNotifications::handleExpenseApprovalRequested` leaves those users out of both the in-app row and the email.
+  - The Super Admin exemption is kept.
+  - Tests: `TemplateAuthorTest` (`test_ac28i_*`, three cases).
+- B: **DONE.** The "changed since its last approved use" line names every author, with the date of the last change (`approvalTemplateLines`).
+- Role templates as delivered: Branch Admin `*` (may approve, but not uses of templates they set up or changed since the last approved use); Accountant maintains templates but has no `expense.approve`; Cashier uses templates only; Viewer has none. No permission or role change. Acceptable.
+- Residual risk, accepted: uses below the approval limit after a template change are detective only (release note 4). A Super Admin may approve a use of a template they changed (owner).
+
+**Verdict: SIGNED OFF** (2026-11-20, accountant) for release with release notes 1-6. Release note 6 (`ConcurrencyTest` on MySQL 8) is reported done in this round (MySQL 899 passed); repeat it on the release build.
