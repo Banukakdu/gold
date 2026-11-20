@@ -466,6 +466,8 @@ tr.rc-frozen td, .rc-line.rc-frozen { color: var(--muted); }
 .sr-reason, .sr-recips { overflow-wrap: anywhere; }
 .sr-run-card { margin-bottom: 8px; }
 @media (max-width: 760px) {
+  /* QA D6: the S3 back link is a 44 px tap target at phone width (AC 36). */
+  .sr-back a { display: inline-flex; align-items: center; min-height: 44px; }
   .sr-toolbar { flex-direction: column; align-items: stretch; input, button { width: 100%; min-height: 44px; } }
   .sr-tabs button { flex: 1; min-height: 44px; }
   .sr-table { display: none; }

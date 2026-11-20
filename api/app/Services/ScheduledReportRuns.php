@@ -108,6 +108,13 @@ class ScheduledReportRuns
             $s->next_run_at = $t;
             $s->save();
 
+            // Review S2: when the missed run is the failure that pauses the schedule (R10), the on-time planned time is
+            // not sent either; it is folded into the missed run, so every planned time is recorded somewhere.
+            if ($missed && $send && $this->wouldPause($s)) {
+                $missed[] = $send;
+                $send = null;
+            }
+
             $paused = false;
             if ($missed) {
                 $paused = $this->recordMissed($s, $missed);
@@ -161,17 +168,21 @@ class ScheduledReportRuns
         return (int) config("scheduled_reports.late_minutes.{$frequency}", $frequency === ReportSchedule::WEEKLY ? 1440 : 360);
     }
 
-    /** R4 / A3: runs queued or running for longer than stale_run_minutes fail as `stale`, like a failed job. */
+    /**
+     * R4 / A3: runs queued or running for more than stale_run_minutes fail as `stale`, like a failed job. The age is
+     * repeated in the failing UPDATE (review S3): a run a worker claimed after the SELECT has a fresh started_at and
+     * is left alone.
+     */
     public function failStaleRuns(): int
     {
         $cut = now()->subMinutes((int) config('scheduled_reports.stale_run_minutes', 120));
+        $stale = fn ($q) => $q->where(fn ($q) => $q
+            ->where(fn ($q) => $q->where('status', ReportScheduleRun::QUEUED)->where('created_at', '<', $cut))
+            ->orWhere(fn ($q) => $q->where('status', ReportScheduleRun::RUNNING)->where('started_at', '<', $cut)));
         $n = 0;
-        ReportScheduleRun::where(fn ($q) => $q
-            ->where(fn ($q) => $q->where('status', ReportScheduleRun::QUEUED)->where('created_at', '<=', $cut))
-            ->orWhere(fn ($q) => $q->where('status', ReportScheduleRun::RUNNING)->where('started_at', '<=', $cut)))
-            ->orderBy('created_at')->get()
-            ->each(function (ReportScheduleRun $run) use (&$n) {
-                if ($this->failRun($run, 'stale', self::STALE)) {
+        ReportScheduleRun::query()->tap($stale)->orderBy('created_at')->get()
+            ->each(function (ReportScheduleRun $run) use (&$n, $stale) {
+                if ($this->failRun($run, 'stale', self::STALE, guard: $stale)) {
                     $n++;
                 }
             });
@@ -179,13 +190,23 @@ class ScheduledReportRuns
         return $n;
     }
 
-    /** R4 / A3: deliveries still queued after delivery_stale_hours fail as `stale`; a later mail job sends nothing. */
+    /**
+     * R4 / A3: deliveries still queued after delivery_stale_hours fail as `stale`; a later mail job sends nothing.
+     * Review S1: a delivery `sending` for more than sending_stale_minutes (the worker died, or recording `sent` failed
+     * after the mailer accepted it) fails as `unknown`: it may have gone out, so it is never sent again.
+     */
     public function failStaleDeliveries(): int
     {
-        $cut = now()->subHours((int) config('scheduled_reports.delivery_stale_hours', 24));
+        $queuedCut = now()->subHours((int) config('scheduled_reports.delivery_stale_hours', 24));
+        $sendingCut = now()->subMinutes((int) config('scheduled_reports.sending_stale_minutes', 60));
         $n = 0;
-        foreach (ReportScheduleDelivery::where('status', ReportScheduleDelivery::QUEUED)->where('queued_at', '<=', $cut)->orderBy('id')->pluck('id') as $id) {
-            if ($this->deliveryFailed((int) $id, 'stale')) {
+        foreach (ReportScheduleDelivery::where('status', ReportScheduleDelivery::QUEUED)->where('queued_at', '<', $queuedCut)->orderBy('id')->pluck('id') as $id) {
+            if ($this->deliveryFailed((int) $id, 'stale', [ReportScheduleDelivery::QUEUED], fn ($q) => $q->where('queued_at', '<', $queuedCut))) {
+                $n++;
+            }
+        }
+        foreach (ReportScheduleDelivery::where('status', ReportScheduleDelivery::SENDING)->where('sending_at', '<', $sendingCut)->orderBy('id')->pluck('id') as $id) {
+            if ($this->deliveryFailed((int) $id, 'unknown', [ReportScheduleDelivery::SENDING], fn ($q) => $q->where('sending_at', '<', $sendingCut))) {
                 $n++;
             }
         }
@@ -197,8 +218,13 @@ class ScheduledReportRuns
 
     public function build(RunScheduledReport $job): void
     {
-        // 1. Claim: only a queued run becomes running (idempotent; prune or a stale check may have failed it).
-        $claimed = ReportScheduleRun::whereKey($job->runId)->where('status', ReportScheduleRun::QUEUED)
+        // 1. Claim: only a queued run becomes running (idempotent; prune or a stale check may have failed it). Review N1:
+        // also a run left `running` longer than the job timeout: its worker died (killed, out of memory) and the queue
+        // handed the job out again after retry_after; a live worker is always stopped by the timeout before that.
+        $dead = now()->subSeconds((int) $job->timeout);
+        $claimed = ReportScheduleRun::whereKey($job->runId)
+            ->where(fn ($q) => $q->where('status', ReportScheduleRun::QUEUED)
+                ->orWhere(fn ($q) => $q->where('status', ReportScheduleRun::RUNNING)->where('started_at', '<', $dead)))
             ->update(['status' => ReportScheduleRun::RUNNING, 'started_at' => now(), 'attempts' => DB::raw('attempts + 1'), 'updated_at' => now()]);
         $run = $claimed ? ReportScheduleRun::find($job->runId) : null;
         if (! $run) {
@@ -293,8 +319,14 @@ class ScheduledReportRuns
 
                 return;
             }
+            // The run is done. If one email cannot be queued (the queue store is down), the others still are; that
+            // delivery stays `queued` and the dispatcher fails it as `stale` after delivery_stale_hours (review N2).
             foreach (ReportScheduleDelivery::where('run_id', $run->id)->where('status', ReportScheduleDelivery::QUEUED)->orderBy('id')->get() as $d) {
-                Notification::route('mail', $d->email)->notify(new ScheduledReportMail($d->id, $built['provisional']));
+                try {
+                    Notification::route('mail', $d->email)->notify(new ScheduledReportMail($d->id, $built['provisional']));
+                } catch (Throwable $e) {
+                    report($e);
+                }
             }
             $this->alertSkipped($s, count($skipped));
         } catch (ValidationException $v) {
@@ -395,10 +427,10 @@ class ScheduledReportRuns
      * Mark a queued or running run failed (once): its audit row, its queued deliveries skipped (`run_failed`), the
      * failure counted (R10) and the owner alerted (S5). The status change and the audit rows commit together.
      */
-    public function failRun(ReportScheduleRun $run, string $code, string $message, bool $alertOwner = true, ?string $pause = null): bool
+    public function failRun(ReportScheduleRun $run, string $code, string $message, bool $alertOwner = true, ?string $pause = null, ?\Closure $guard = null): bool
     {
-        $won = DB::transaction(function () use ($run, $code, $message, $pause) {
-            if (! ReportScheduleRun::whereKey($run->id)->whereIn('status', ReportScheduleRun::ACTIVE)->update([
+        $won = DB::transaction(function () use ($run, $code, $message, $pause, $guard) {
+            if (! ReportScheduleRun::whereKey($run->id)->whereIn('status', ReportScheduleRun::ACTIVE)->when($guard, $guard)->update([
                 'status' => ReportScheduleRun::FAILED, 'failure_code' => $code, 'error' => $message, 'finished_at' => now(), 'updated_at' => now(),
             ])) {
                 return false;
@@ -426,6 +458,12 @@ class ScheduledReportRuns
         return $won;
     }
 
+    /** R10: whether one more failure pauses this schedule. */
+    private function wouldPause(ReportSchedule $s): bool
+    {
+        return $s->status === ReportSchedule::ACTIVE && (int) $s->consecutive_failures + 1 >= (int) config('scheduled_reports.failures_before_pause', 3);
+    }
+
     /** R10: one more run in a row that failed, was missed or sent nothing; paused by the system at the limit. */
     private function countFailure(ReportSchedule $s): bool
     {
@@ -448,18 +486,18 @@ class ScheduledReportRuns
         $this->systemAudit('report_schedule.paused', $s, ['status' => ReportSchedule::PAUSED, 'paused_reason' => $reason, 'name' => $s->name], $s->auditBranchId(), $old);
         $title = "{$s->name} was paused: ".(ScheduledReports::PAUSED_REASONS[$reason] ?? $reason);
         $id = $s->id;
-        $ownerId = $s->owner_id;
-        $this->afterCommit(function () use ($id, $ownerId, $title) {
-            $users = $this->inApp->superAdmins()->concat(User::whereKey($ownerId)->get())->unique('id');
-            $this->alert($users, $id, N::SCHEDULE_PAUSED, $title, 'Open the schedule, check its owner and recipients, and resume it.', true);
+        $this->afterCommit(function () use ($id, $title) {
+            // Every active Super Admin; the owner is one of them, or no longer may see schedules (QA D7).
+            $this->alert($this->inApp->superAdmins(), $id, N::SCHEDULE_PAUSED, $title, 'Open the schedule, check its owner and recipients, and resume it.', true);
         });
     }
 
     // ------------------------------------------------------------------ send (R5 at send, R7, R8, R9)
 
     /**
-     * ScheduledReportMail::shouldSend. Null = send nothing (the delivery was skipped or failed here, with its audit row,
-     * or it is no longer queued). Else the verified PDF bytes (null for a link-only email).
+     * ScheduledReportChannel, before the mailer. Null = send nothing (the delivery was skipped or failed here, with its
+     * audit row, or it is no longer queued: sending, sent, skipped or failed). Else the delivery is now `sending` and
+     * this is the verified PDF (null for a link-only email).
      *
      * @return array{pdf: ?string}|null
      */
@@ -488,7 +526,12 @@ class ScheduledReportRuns
 
             return null;
         }
-        ReportScheduleDelivery::whereKey($d->id)->update(['attempts' => DB::raw('attempts + 1'), 'updated_at' => now()]);
+        // Review S1: claim it. Whoever loses (a retry, a second worker) sends nothing.
+        if (! ReportScheduleDelivery::whereKey($d->id)->where('status', ReportScheduleDelivery::QUEUED)->update([
+            'status' => ReportScheduleDelivery::SENDING, 'sending_at' => now(), 'attempts' => DB::raw('attempts + 1'), 'updated_at' => now(),
+        ])) {
+            return null;
+        }
         if (! $run->attached) {
             return ['pdf' => null];
         }
@@ -498,13 +541,13 @@ class ScheduledReportRuns
         $bytes = $path !== '' && $disk->exists($path) ? $disk->get($path) : null;
         if ($bytes === null) {
             Log::error("Scheduled report run {$run->id}: file missing from storage.", ['path' => $path]);
-            $this->deliveryFailed($d->id, 'missing');
+            $this->deliveryFailed($d->id, 'missing', [ReportScheduleDelivery::SENDING]);
 
             return null;
         }
         if (! hash_equals((string) $run->sha256, hash('sha256', $bytes))) {
             report(new RuntimeException("Scheduled report run {$run->id}: sha256 mismatch."));
-            $this->deliveryFailed($d->id, 'damaged');
+            $this->deliveryFailed($d->id, 'damaged', [ReportScheduleDelivery::SENDING]);
 
             return null;
         }
@@ -542,9 +585,10 @@ class ScheduledReportRuns
             $mail->attachData($pdf, self::attachmentName($run), ['mime' => 'application/pdf']);
         } else {
             $rows = (int) $run->rows;
+            $limit = '(limit '.number_format(ReportService::PDF_EXPORT_CAP).' rows and '.str_replace('.0 MB', ' MB', self::size((int) config('scheduled_reports.attach_max_bytes'))).')';
             $mail->line($rows > ReportService::PDF_EXPORT_CAP
-                ? 'This report has '.number_format($rows).' rows, which is too many to attach (limit 1,000 rows and 5 MB). Open it in Account-gold:'
-                : 'This report is too large to attach (limit 1,000 rows and 5 MB). Open it in Account-gold:');
+                ? 'This report has '.number_format($rows)." rows, which is too many to attach {$limit}. Open it in Account-gold:"
+                : "This report is too large to attach {$limit}. Open it in Account-gold:");
             $mail->action('Open the report', self::reportLink($run));
             $mail->line('The figures on screen are current. They may differ from the extracted time if entries in an unlocked period changed.');
         }
@@ -553,11 +597,21 @@ class ScheduledReportRuns
             .'This email contains company financial information: do not forward it.');
     }
 
-    /** NotificationSent (AppServiceProvider): the mailer accepted the email (R9: bounces are not tracked). */
+    /** ScheduledReportChannel: the mailer threw, nothing was accepted. The claim goes back so the queue's retry can send. */
+    public function releaseSend(int $deliveryId): void
+    {
+        ReportScheduleDelivery::whereKey($deliveryId)->where('status', ReportScheduleDelivery::SENDING)
+            ->update(['status' => ReportScheduleDelivery::QUEUED, 'sending_at' => null, 'updated_at' => now()]);
+    }
+
+    /**
+     * ScheduledReportChannel: the mailer accepted the email (R9: bounces are not tracked). Retried on a deadlock; if it
+     * still fails, the channel reports it and the delivery stays `sending` (see failStaleDeliveries).
+     */
     public function markSent(int $deliveryId): void
     {
         DB::transaction(function () use ($deliveryId) {
-            if (! ReportScheduleDelivery::whereKey($deliveryId)->where('status', ReportScheduleDelivery::QUEUED)
+            if (! ReportScheduleDelivery::whereKey($deliveryId)->where('status', ReportScheduleDelivery::SENDING)
                 ->update(['status' => ReportScheduleDelivery::SENT, 'sent_at' => now(), 'updated_at' => now()])) {
                 return;
             }
@@ -568,7 +622,7 @@ class ScheduledReportRuns
                 'file' => $run->attached ? $run->sha256 : 'link'], $run->auditBranchId());
             // R9: a run with at least one delivery sent resets the count.
             ReportSchedule::whereKey($s->id)->update(['consecutive_failures' => 0]);
-        });
+        }, 3);
     }
 
     /** R5 at send: a queued delivery is skipped with its reason (and `report_schedule.delivery_skipped`). */
@@ -587,13 +641,18 @@ class ScheduledReportRuns
         });
     }
 
-    /** R8 / R9 / R4: a queued delivery fails (damaged, missing, mail_error, stale); the owner gets a bell row. */
-    public function deliveryFailed(int $deliveryId, string $code): bool
+    /**
+     * R8 / R9 / R4: a delivery in one of $from fails (damaged, missing, mail_error, stale, unknown); the owner gets a
+     * bell row. $guard repeats the stale age in the UPDATE.
+     *
+     * @param  string[]  $from
+     */
+    public function deliveryFailed(int $deliveryId, string $code, array $from, ?\Closure $guard = null): bool
     {
         $s = null;
         $name = '';
-        $won = DB::transaction(function () use ($deliveryId, $code, &$s, &$name) {
-            if (! ReportScheduleDelivery::whereKey($deliveryId)->where('status', ReportScheduleDelivery::QUEUED)
+        $won = DB::transaction(function () use ($deliveryId, $code, $from, $guard, &$s, &$name) {
+            if (! ReportScheduleDelivery::whereKey($deliveryId)->whereIn('status', $from)->when($guard, $guard)
                 ->update(['status' => ReportScheduleDelivery::FAILED, 'reason' => $code, 'failed_at' => now(), 'updated_at' => now()])) {
                 return false;
             }
@@ -616,7 +675,7 @@ class ScheduledReportRuns
     // ------------------------------------------------------------------ files (R12)
 
     /**
-     * exports:prune: a run's PDF goes `keep_file_days` after the run finished, when no delivery is still queued. The
+     * exports:prune: a run's PDF goes `keep_file_days` after the run finished, when no delivery is queued or sending. The
      * row keeps everything else; one `report_schedule.files_removed` system row per pass.
      */
     public function pruneFiles(): int
@@ -626,7 +685,7 @@ class ScheduledReportRuns
         $removed = [];
         ReportScheduleRun::whereNotNull('file_path')->whereNotNull('finished_at')->where('finished_at', '<=', $cut)
             ->whereNotExists(fn ($q) => $q->from('report_schedule_deliveries as d')->whereColumn('d.run_id', 'report_schedule_runs.id')
-                ->where('d.status', ReportScheduleDelivery::QUEUED))
+                ->whereIn('d.status', [ReportScheduleDelivery::QUEUED, ReportScheduleDelivery::SENDING]))
             ->orderBy('finished_at')->get()
             ->each(function (ReportScheduleRun $run) use ($disk, &$removed) {
                 $path = $run->file_path;
@@ -698,16 +757,27 @@ class ScheduledReportRuns
     public static function reportLink(ReportScheduleRun $run): string
     {
         $base = rtrim((string) config('app.frontend_url', config('app.url')), '/');
+        $params = (array) $run->params;
         $url = "{$base}/reports/{$run->report}?from={$run->periodFrom()}&to={$run->periodTo()}";
+        // Review N4: the schedule's own filter, so the screen opens as the report was built.
+        $filter = '';
+        if ($run->report === 'income-expense' && ($params['type'] ?? 'all') !== 'all') {
+            $filter = '&type='.rawurlencode((string) $params['type']);
+        }
+        if ($run->report === 'transfers') {
+            foreach ((array) ($params['types'] ?? []) as $t) {
+                $filter .= '&types='.rawurlencode((string) $t);
+            }
+        }
         if ($run->branch_id) {
-            return "{$url}&branch={$run->branch_id}";
+            return "{$url}&branch={$run->branch_id}{$filter}";
         }
         $url .= '&branch=all';
-        foreach ((array) (((array) $run->params)['branches'] ?? []) as $id) {
+        foreach ((array) ($params['branches'] ?? []) as $id) {
             $url .= '&branches='.(int) $id;
         }
 
-        return $url;
+        return $url.$filter;
     }
 
     private static function codes(array $ids)
@@ -736,12 +806,19 @@ class ScheduledReportRuns
         }
     }
 
+    /**
+     * S5 owner alerts. QA D7 / review N3: an owner who is no longer an active Super Admin cannot open the schedule, so
+     * the alert goes to the other active Super Admins instead.
+     */
     private function alertOwner(int $scheduleId, string $kind, string $title, ?string $body, bool $email): void
     {
         $s = ReportSchedule::find($scheduleId);
-        if ($s) {
-            $this->alert(User::whereKey($s->owner_id)->get(), $s->id, $kind, $title, $body, $email);
+        if (! $s) {
+            return;
         }
+        $owner = User::find($s->owner_id);
+        $to = $owner && $owner->status === 'active' && $owner->is_super_admin ? collect([$owner]) : $this->inApp->superAdmins();
+        $this->alert($to, $s->id, $kind, $title, $body, $email);
     }
 
     /** S5: one bell row per active user (AG-094), plus the email when asked for. Best effort: never fails the caller. */

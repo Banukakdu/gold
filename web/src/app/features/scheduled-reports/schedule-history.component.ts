@@ -18,7 +18,7 @@ interface RunPage { data: ScheduleRun[]; meta: { current_page: number; last_page
   standalone: true,
   imports: [RouterLink],
   template: `
-    <p class="att-back"><a routerLink="/scheduled-reports">Back to scheduled reports</a></p>
+    <p class="att-back sr-back"><a routerLink="/scheduled-reports">Back to scheduled reports</a></p>
     @if (error()) { <div class="alert">{{ error() }}</div> }
     @if (s(); as s) {
       <h1>{{ s.name }}</h1>

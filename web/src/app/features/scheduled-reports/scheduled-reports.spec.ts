@@ -105,6 +105,15 @@ describe('Scheduled reports (AG-088)', () => {
     expect(runBadge({ ...base, sent: 0, skipped: 2 })).toEqual({ label: 'Nothing sent', s: 'sr-grey' });
     expect(runBadge({ ...base, status: 'failed' })).toEqual({ label: 'Failed', s: 'sr-red' });
     expect(runBadge({ ...base, status: 'missed' })).toEqual({ label: 'Missed', s: 'sr-red' });
+    // QA D2: every email failed (damaged or missing file, mail server, stale) is red, not "Nothing sent".
+    expect(runBadge({ ...base, sent: 0, failed: 2 })).toEqual({ label: 'Not delivered', s: 'sr-red' });
+    expect(runBadge({ ...base, sent: 0, skipped: 1, failed: 1 })).toEqual({ label: 'Not delivered', s: 'sr-red' });
+    // Review N4: the schedule's own filter.
+    expect(reportUrl('income-expense', '2026-11-20', '2026-11-20', [2], { type: 'expense' }))
+      .toBe('/reports/income-expense?from=2026-11-20&to=2026-11-20&branch=2&type=expense');
+    expect(reportUrl('income-expense', '2026-11-20', '2026-11-20', [2], { type: 'all' })).toBe('/reports/income-expense?from=2026-11-20&to=2026-11-20&branch=2');
+    expect(reportUrl('transfers', '2026-11-20', '2026-11-20', [], { types: ['top_up', 'fund_return'] }))
+      .toBe('/reports/transfers?from=2026-11-20&to=2026-11-20&branch=all&types=top_up&types=fund_return');
   });
 
   it('AC 34: S2 live line, multi-branch recipients and the preview link', async () => {
@@ -215,10 +224,50 @@ describe('Scheduled reports (AG-088)', () => {
     const { http } = setup(SA_BRANCHES, true, 'all');
     const { fixture, el } = mount(ScheduleListComponent);
     fixture.detectChanges();
-    http.expectOne(r => r.url === '/api/v1/report-schedules').flush({ data: [] });
+    http.expectOne(r => r.url === '/api/v1/report-schedules' && r.params.get('status') === 'current').flush({ data: [] });
+    await settle(fixture);
+    http.expectOne(r => r.url === '/api/v1/report-schedules' && r.params.get('status') === 'archived').flush({ data: [] });
     await settle(fixture);
     expect(text(el)).toContain('No scheduled reports yet.');
     expect(text(el)).toContain('Get a daily or weekly report by email as a PDF, without signing in.');
+    fixture.destroy();
+  });
+
+  it('QA D5: an empty tab says so when other tabs have schedules', async () => {
+    const { http } = setup(SA_BRANCHES, true, 'all');
+    const { fixture, el } = mount(ScheduleListComponent);
+    fixture.detectChanges();
+    http.expectOne(r => r.url === '/api/v1/report-schedules' && r.params.get('status') === 'current').flush({ data: [d1()] });
+    await settle(fixture);
+    Array.from(el.querySelectorAll<HTMLButtonElement>('.sr-tabs button')).find(b => text(b) === 'Archived')!.click();
+    await settle(fixture);
+    http.expectOne(r => r.url === '/api/v1/report-schedules' && r.params.get('status') === 'archived').flush({ data: [] });
+    await settle(fixture);
+    http.expectOne(r => r.url === '/api/v1/report-schedules' && r.params.get('status') === 'current').flush({ data: [d1()] });
+    await settle(fixture);
+    expect(text(el.querySelector('.sr-empty')!)).toBe('No archived schedules.');
+    fixture.destroy();
+  });
+
+  it('QA D3: a double click on Save sends one request', async () => {
+    const { http } = setup(SA_BRANCHES, true, 'all', { id: '5' });
+    const { fixture, el } = mount(ScheduleFormComponent);
+    fixture.detectChanges();
+    http.expectOne('/api/v1/report-schedules/5').flush(d1());
+    http.expectOne('/api/v1/branches').flush(BRANCHES);
+    await settle(fixture);
+    http.expectOne(r => r.url === '/api/v1/report-schedules/recipient-options').flush({ data: options([2]) });
+    http.expectOne(r => r.url === '/api/v1/report-schedules/preview-time').flush({ next_run_at: '2026-11-21T01:30:00Z', period_from: '2026-11-20', period_to: '2026-11-20' });
+    await settle(fixture);
+    const save = el.querySelector<HTMLButtonElement>('.sr-save button[type=submit]')!;
+    save.click();
+    save.click();
+    const put = http.match(r => r.method === 'PUT' && r.url === '/api/v1/report-schedules/5');
+    expect(put.length).toBe(1);
+    fixture.detectChanges();
+    expect(save.disabled).toBeTrue();
+    put[0].flush(d1());
+    await settle(fixture);
     fixture.destroy();
   });
 
@@ -271,6 +320,8 @@ describe('Scheduled reports (AG-088)', () => {
     expect(frame.win.getComputedStyle(hist.el.querySelector('.sr-table')!).display).toBe('none');
     expect(hist.el.querySelectorAll('.sr-run-card').length).toBe(1);
     expect(hist.el.querySelectorAll('.sr-run-card .sr-delivery').length).toBe(2);
+    // QA D6: the back link is a 44 px tap target too.
+    expect(hist.el.querySelector<HTMLElement>('.sr-back a')!.getBoundingClientRect().height).toBeGreaterThanOrEqual(44);
     expect(frame.doc.documentElement.scrollWidth).toBeLessThanOrEqual(390);
     hist.fixture.destroy();
     frame.remove();

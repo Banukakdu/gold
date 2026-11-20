@@ -18,7 +18,7 @@ export interface Schedule {
   recipients: ScheduleRecipient[]; cannot_receive: number; last_run: ScheduleLastRun | null;
 }
 export interface RunDelivery {
-  user: { id: number; name: string }; email: string; status: 'queued' | 'sent' | 'skipped' | 'failed';
+  user: { id: number; name: string }; email: string; status: 'queued' | 'sending' | 'sent' | 'skipped' | 'failed';
   reason: string | null; reason_text: string | null; sent_at: string | null; failed_at: string | null;
 }
 export interface ScheduleRun {
@@ -77,13 +77,20 @@ export function nextEmailLine(settings: SettingsService, nextRunAt: string, from
 }
 
 /** S2 "Preview this report" and the email link (R7): the report screen with the period and branch scope (W1). */
-export function reportUrl(report: string, from: string, to: string, branches: number[]): string {
+export function reportUrl(report: string, from: string, to: string, branches: number[], params: { type?: string; types?: string[] } = {}): string {
   const base = `/reports/${report}?from=${from}&to=${to}`;
-  if (branches.length === 1) return `${base}&branch=${branches[0]}`;
-  return `${base}&branch=all${branches.map(b => `&branches=${b}`).join('')}`;
+  // The schedule's own filter (review N4), as in the email link.
+  let filter = '';
+  if (report === 'income-expense' && params.type && params.type !== 'all') filter = `&type=${encodeURIComponent(params.type)}`;
+  if (report === 'transfers') filter = (params.types ?? []).map(t => `&types=${encodeURIComponent(t)}`).join('');
+  if (branches.length === 1) return `${base}&branch=${branches[0]}${filter}`;
+  return `${base}&branch=all${branches.map(b => `&branches=${b}`).join('')}${filter}`;
 }
 
-/** S1 / S3 badges: Sent (green), Partly sent (amber), Failed / Missed (red), Nothing sent (grey). */
+/**
+ * S1 / S3 badges: Sent (green), Partly sent (amber), Failed / Missed / Not delivered (red), Nothing sent (grey: the R5
+ * case, nobody could receive). QA D2: a done run whose emails all failed is "Not delivered" (red), not grey.
+ */
 export function runBadge(r: { status: RunStatus; sent: number; skipped: number; failed: number; queued: number }): { label: string; s: string } {
   switch (r.status) {
     case 'failed': return { label: 'Failed', s: 'sr-red' };
@@ -92,13 +99,13 @@ export function runBadge(r: { status: RunStatus; sent: number; skipped: number; 
     case 'running': return { label: 'Running', s: 'sr-grey' };
   }
   if (r.queued > 0) return { label: 'Sending', s: 'sr-grey' };
-  if (r.sent === 0) return { label: 'Nothing sent', s: 'sr-grey' };
+  if (r.sent === 0) return r.failed > 0 ? { label: 'Not delivered', s: 'sr-red' } : { label: 'Nothing sent', s: 'sr-grey' };
   if (r.skipped + r.failed > 0) return { label: 'Partly sent', s: 'sr-amber' };
   return { label: 'Sent', s: 'sr-green' };
 }
 
 export const STATUS_LABELS: Record<Schedule['status'], string> = { active: 'Active', paused: 'Paused', archived: 'Archived' };
-export const DELIVERY_LABELS: Record<RunDelivery['status'], string> = { queued: 'Queued', sent: 'Sent', skipped: 'Skipped', failed: 'Failed' };
+export const DELIVERY_LABELS: Record<RunDelivery['status'], string> = { queued: 'Queued', sending: 'Sending', sent: 'Sent', skipped: 'Skipped', failed: 'Failed' };
 
 /** "12 KB" / "1.2 MB". */
 export function fileSize(bytes: number | null): string {

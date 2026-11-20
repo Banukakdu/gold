@@ -14,6 +14,9 @@ class ReportScheduleDelivery extends Model
 {
     public const QUEUED = 'queued';
 
+    /** Claimed by a mail job; the mailer is being called (review S1). */
+    public const SENDING = 'sending';
+
     public const SENT = 'sent';
 
     public const SKIPPED = 'skipped';
@@ -24,7 +27,7 @@ class ReportScheduleDelivery extends Model
 
     protected $casts = [
         'user_id' => 'integer', 'attempts' => 'integer',
-        'queued_at' => 'datetime', 'sent_at' => 'datetime', 'failed_at' => 'datetime',
+        'queued_at' => 'datetime', 'sending_at' => 'datetime', 'sent_at' => 'datetime', 'failed_at' => 'datetime',
     ];
 
     protected static function booted(): void

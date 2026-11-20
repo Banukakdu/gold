@@ -32,8 +32,12 @@ type Tab = 'current' | 'archived' | 'all';
     @if (loaded()) {
       @if (!all().length) {
         <div class="card sr-empty">
-          <p>No scheduled reports yet.</p>
-          <p class="muted">Get a daily or weekly report by email as a PDF, without signing in.</p>
+          @if (anyElsewhere()) {
+            <p>{{ tab() === 'archived' ? 'No archived schedules.' : 'No active or paused schedules.' }}</p>
+          } @else {
+            <p>No scheduled reports yet.</p>
+            <p class="muted">Get a daily or weekly report by email as a PDF, without signing in.</p>
+          }
         </div>
       } @else {
         <div class="card sr-table">
@@ -122,6 +126,8 @@ export class ScheduleListComponent implements OnInit {
   loaded = signal(false);
   error = signal('');
   archiveTarget = signal<Schedule | null>(null);
+  /** QA D5: this tab is empty but another tab has schedules. */
+  anyElsewhere = signal(false);
   reason = '';
   rows = computed(() => {
     const q = this.q().trim().toLowerCase();
@@ -138,6 +144,12 @@ export class ScheduleListComponent implements OnInit {
   async load() {
     try {
       const res = await firstValueFrom(this.http.get<{ data: Schedule[] }>('/api/v1/report-schedules', { params: { status: this.tab() } }));
+      let elsewhere = false;
+      if (!res.data.length && this.tab() !== 'all') {
+        const other = this.tab() === 'archived' ? 'current' : 'archived';
+        elsewhere = (await firstValueFrom(this.http.get<{ data: Schedule[] }>('/api/v1/report-schedules', { params: { status: other } }))).data.length > 0;
+      }
+      this.anyElsewhere.set(elsewhere);
       this.all.set(res.data);
       this.error.set('');
     } catch (e) {

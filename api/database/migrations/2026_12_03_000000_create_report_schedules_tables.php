@@ -115,10 +115,11 @@ return new class extends Migration
             $t->foreign('run_id')->references('id')->on('report_schedule_runs')->restrictOnDelete();
             $t->foreignId('user_id')->constrained('users')->restrictOnDelete();
             $t->string('email'); // the address checked at build; the only address the email goes to (A2)
-            $t->string('status', 10); // queued | sent | skipped | failed
+            $t->string('status', 10); // queued | sending | sent | skipped | failed
             $t->string('reason', 30)->nullable();
             $t->unsignedTinyInteger('attempts')->default(0);
             $t->timestamp('queued_at')->nullable();
+            $t->timestamp('sending_at')->nullable(); // claimed by a mail job (review S1)
             $t->timestamp('sent_at')->nullable();
             $t->timestamp('failed_at')->nullable();
             $t->timestamps();

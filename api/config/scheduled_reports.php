@@ -18,7 +18,7 @@ return [
     ],
     // S4 (accounting review A5): a run started more than this many minutes after planned_at says "Sent late".
     'sent_late_minutes' => 60,
-    // R4: a run `queued` or `running` for longer than this is failed as `stale`.
+    // R4: a run `queued` or `running` for more than this many minutes is failed as `stale`.
     'stale_run_minutes' => 120,
     // R12: a run's PDF is deleted this many days after the run finished (when no delivery is still queued).
     'keep_file_days' => (int) env('SCHEDULED_REPORTS_KEEP_FILE_DAYS', 7),
@@ -26,6 +26,9 @@ return [
     'failures_before_pause' => (int) env('SCHEDULED_REPORTS_FAILURES_BEFORE_PAUSE', 3),
     // R4: a delivery still `queued` after this many hours is failed as `stale`.
     'delivery_stale_hours' => (int) env('SCHEDULED_REPORTS_DELIVERY_STALE_HOURS', 24),
+    // Review S1: a delivery `sending` (claimed by a mail job) for longer than this is failed as `unknown` ("may have
+    // been sent"), never sent again. Well above the time one SMTP send of a 5 MB attachment can take.
+    'sending_stale_minutes' => (int) env('SCHEDULED_REPORTS_SENDING_STALE_MINUTES', 60),
     // S5: also email the owner (and the Super Admins for a system pause) about failed, missed and paused runs.
     'email_owner' => (bool) env('SCHEDULED_REPORTS_EMAIL_OWNER', true),
 ];

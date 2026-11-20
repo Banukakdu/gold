@@ -83,7 +83,7 @@ Nav: "Scheduled reports" (`class="subnav"`) under Reports, after Exports, shown 
 | Frequency | "Daily 07:00" / "Weekly, Monday 07:00" |
 | Recipients | count; danger tag "N cannot receive" when R5 fails now for N (tooltip lists names + reason) |
 | Next email | date time, or "-" when paused/archived |
-| Last run | date time + badge: Sent (green), Partly sent (amber), Failed (red), Missed (red), Nothing sent (grey); "Never" |
+| Last run | date time + badge: Sent (green), Partly sent (amber), Failed (red), Missed (red), Not delivered (red: none sent and at least one email failed), Nothing sent (grey: nobody could receive, R5); "Never" |
 | Status | Active (green) / Paused (grey, tooltip reason) / Archived (grey) |
 | Actions | Edit · Pause/Resume · Archive/Restore · History |
 
@@ -125,7 +125,7 @@ Nav: "Scheduled reports" (`class="subnav"`) under Reports, after Exports, shown 
   - "Sent late: this email was planned for <date time> (Asia/Colombo)." (only when the run started more than 60 minutes after `planned_at`; accounting review A5)
   - Then one of:
     - **attached:** "The report is attached as a PDF (<size>)."
-    - **link:** "This report has <N> rows, which is too many to attach (limit 1,000 rows and 5 MB). Open it in Account-gold: <button>." The figures on screen are current, so the email adds "They may differ from the extracted time if entries in an unlocked period changed."
+    - **link:** "This report has <N> rows, which is too many to attach (limit 1,000 rows and 5 MB). Open it in Account-gold: <button>." (Over 5 MB with at most 1,000 rows: "This report is too large to attach (limit ...)". The limits shown are the configured ones.) The figures on screen are current, so the email adds "They may differ from the extracted time if entries in an unlocked period changed."
   - Footer: "You receive this because <owner> added you to the scheduled report "<name>". To stop it, ask a Super Admin. This email contains company financial information: do not forward it."
 - No amounts, balances or names of accounts appear in the body. The words "as at" are not used.
 
@@ -135,11 +135,12 @@ Nav: "Scheduled reports" (`class="subnav"`) under Reports, after Exports, shown 
   - `report_schedule.missed`: "<name>: <n> scheduled emails were missed"
   - `report_schedule.recipients_skipped`: "<name>: <n> recipient(s) skipped"
   - `report_schedule.delivery_failed`: "<name>: email to <recipient> failed"
-  - `report_schedule.paused`: "<name> was paused: <reason>". Sent to the owner and every active Super Admin.
+  - `report_schedule.paused`: "<name> was paused: <reason>". Sent to every active Super Admin (the owner included while they are one).
+- **Owner no longer an active Super Admin** (QA D7): they cannot open the schedule, so the alerts meant for the owner go to the other active Super Admins instead; nothing goes to the former owner.
 - **Email (queued `ReportScheduleProblemMail`)** only for run failed, missed and system pause. Same text, a link to S3, no figures.
 
 ### W1 Report screens accept `?branch=<id|all>`
-On load, if `branch` differs from the active branch: a Super Admin, or a member when the value is an id, is switched to it (the existing `switchBranch`), the param is dropped and the report loads. Otherwise the screen shows "You do not have access to <code>." and loads nothing. This is the only change to existing screens.
+On load, if `branch` differs from the active branch: a Super Admin, or a member when the value is an id, is switched to it (the existing `switchBranch`), the param is dropped and the report loads. Otherwise the screen shows "You do not have access to <code>." when the branch is one the user can see, else "You do not have access to this branch." (the app must not reveal the code of a branch the user has no access to), and loads nothing. This is the only change to existing screens.
 
 ## 5. API
 All routes are under `auth:sanctum` + `super` and **outside** `branch`, like `settings`: a schedule carries its own branch scope. A non-Super Admin gets 403 "Super Admin only." There is no DELETE route.
@@ -193,14 +194,14 @@ All routes are under `auth:sanctum` + `super` and **outside** `branch`, like `se
   - `down()` drops the triggers.
 - The models refuse `delete()` (`ImmutableRecordException`).
 
-**Config `config/scheduled_reports.php`:** `attach_max_bytes` 5 MB, `max_recipients` 20, `max_active` 50, `late_minutes` `{daily: 360, weekly: 1440}`, `keep_file_days` 7, `failures_before_pause` 3, `delivery_stale_hours` 24, `email_owner` true. Tests may lower these.
+**Config `config/scheduled_reports.php`:** `attach_max_bytes` 5 MB, `max_recipients` 20, `max_active` 50, `late_minutes` `{daily: 360, weekly: 1440}`, `keep_file_days` 7, `failures_before_pause` 3, `delivery_stale_hours` 24, `sending_stale_minutes` 60, `email_owner` true. Tests may lower these.
 
 **Schedule (`routes/console.php`):** `Schedule::command('reports:dispatch-scheduled')->everyMinute()->withoutOverlapping(10)->onOneServer();`. `exports:prune` (hourly, existing) gains the file step in R12.
 
 ## 6. Business rules
 - **R1 Branch scope and run context.** Exactly one branch in `branch_ids` means the job runs in **branch mode** of that branch (`BranchContext` + spatie team = that branch), so the PDF equals what that branch's accountant exports. Otherwise it runs in **All mode** with `branches[] = branch_ids`, or with none, meaning every branch at run time, including inactive and newly added ones. Cash book needs at least one branch. The job re-runs `ReportService::params($report, {from, to, branches, type|types})` with the run's period. A 422 there fails the run (`invalid`, "The schedule's filters are no longer valid. Edit the schedule."), and a 403 fails it as `owner_lost_access`. It never calls `withoutGlobalScopes()` beyond the export path.
 
-- **R2 Times and periods (Asia/Colombo, `BusinessDate`).** `next_run_at` is the next local `send_time` (on `weekday` for weekly) strictly after the moment of saving, resuming or the previous planned run. It is stored in UTC (07:00 Colombo = 01:30 UTC).
+- **R2 Times and periods (Asia/Colombo, `BusinessDate`).** `next_run_at` is the next local `send_time` (on `weekday` for weekly) strictly after the moment of saving, resuming or the previous planned run. It is stored in UTC (07:00 Colombo = 01:30 UTC). An edit made while a planned time is already due but not yet picked up by the dispatcher keeps that planned time; the times after it follow the new timing (review N7).
   - Daily run planned on local date D: period D-1 to D-1.
   - Weekly run planned on local date D: `to` = the last Sunday strictly before D, `from` = `to` - 6 days.
   - Examples: a run planned Mon 2026-11-23 covers 2026-11-16..2026-11-22. A run planned Sun 2026-11-22 covers 2026-11-09..2026-11-15.
@@ -217,7 +218,9 @@ All routes are under `auth:sanctum` + `super` and **outside** `branch`, like `se
 
   The unique `(schedule_id, planned_at)` plus the row lock stop a double run. The same command also:
   - fails runs `queued`/`running` for more than 120 min (`stale`, "The report was not built. Try again later.", counts as a failed run). This does everything the job's `failed()` does (R9): `report_schedule.run_failed` audit row with code `stale`, `consecutive_failures` + 1, R10 check, S5 `run_failed` bell + email, and its still-`queued` deliveries become `skipped` (`run_failed`) (accounting review A3);
-  - fails deliveries still `queued` after `delivery_stale_hours` (`stale`), each with a `report_schedule.delivery_failed` audit row and S5 `delivery_failed` bell row (accounting review A3).
+  - fails deliveries still `queued` after `delivery_stale_hours` (`stale`), each with a `report_schedule.delivery_failed` audit row and S5 `delivery_failed` bell row (accounting review A3);
+  - fails deliveries `sending` for more than `sending_stale_minutes` (60) as `unknown` (the worker died during the send, or recording `sent` failed): same audit row and bell row, and the email is never sent again (review S1).
+  - Every stale UPDATE repeats the age condition, so a run a worker claims meanwhile is not failed (review S3).
 
   The late window depends on the frequency (accounting review A5): `late_minutes.daily` 360 (6 h), `late_minutes.weekly` 1440 (24 h). A weekly report a few hours late is still the latest complete week and must not be dropped.
 
@@ -233,14 +236,16 @@ All routes are under `auth:sanctum` + `super` and **outside** `branch`, like `se
   - `schedule_paused`: "Schedule paused or archived before sending"
   - `email_changed`: "Email address changed after the report was built" (at send only, accounting review A2)
   - `run_failed`: "The report run failed" (stale run, R4)
+  - delivery failures (`failed`): `mail_error`, `damaged`, `missing`, `stale`, and `unknown`: "The email may have been sent, but the mail server did not confirm it. Check with the recipient." (review S1)
 
   The check runs at three points:
   - **At save (S2):** newly added recipients must pass (422 "<name> cannot receive this report: <reason>."). Recipients already on the list who fail now are kept, flagged in S1 and S3, and skipped at send. Changing the branches so that current recipients fail is allowed; they are flagged too.
   - **At build:** every current recipient gets a delivery row: `queued` if they pass, else `skipped` with the reason. If at least one was skipped, the owner gets one `recipients_skipped` bell row for the run. If nobody passes, no file is built and the run ends `done` with 0 sent ("Nothing sent"). This counts as a failure for R10.
-  - **At send:** `ScheduledReportMail::shouldSend` reloads the user, the schedule and the delivery. It sends only if the delivery is still `queued`, the user still passes, the schedule is still `active`, **and the user's current email equals `deliveries.email`** (case-insensitive). The mail is addressed to `deliveries.email` only, never to an address read later. If the address changed, the delivery is `skipped` (`email_changed`); the next run uses the new address (accounting review A2). Otherwise the delivery becomes `skipped` with the reason, and no email is sent.
+  - **At send:** the mail channel (`ScheduledReportChannel`) reloads the user, the schedule and the delivery. It sends only if the delivery is still `queued`, the user still passes, the schedule is still `active`, **and the user's current email equals `deliveries.email`** (case-insensitive). The mail is addressed to `deliveries.email` only, never to an address read later. If the address changed, the delivery is `skipped` (`email_changed`); the next run uses the new address (accounting review A2). Otherwise the delivery becomes `skipped` with the reason, and no email is sent.
+  - **Sent at most once (review S1):** before the mailer is called the delivery is claimed with a conditional UPDATE `queued -> sending` (`sending_at`). A retry or a second worker that finds `sending` or `sent` sends nothing. If the mailer throws, the claim is released (`sending -> queued`) and the queue retries. If recording `sent` fails after the mailer accepted the email, the job does not fail (no resend); the delivery stays `sending`.
 
 - **R6 Build (`RunScheduledReport`).**
-  1. Claim the run: a conditional UPDATE `queued -> running`. A finished run does nothing (idempotent).
+  1. Claim the run: a conditional UPDATE `queued -> running`. A finished run does nothing (idempotent). A run left `running` for longer than the job timeout (its worker died) may be claimed again by the job's next attempt (review N1).
   2. Check the owner: active and Super Admin. If not, the run fails with `owner_lost_access` and no retry, and the schedule is paused by the system (`paused_reason = owner_lost_access`, `report_schedule.paused` with `by_system`). S5 `paused` goes to every active Super Admin.
   3. Make the deliveries (R5).
   4. Inside one `ReadSnapshot`, as the owner: count rows (`countRows`). With rows <= 1,000, build the PDF with the existing header and views. The "Printed by" line becomes "Scheduled report "<name>", set up by <owner name>. Printed at <time> (Asia/Colombo)." It is followed by `BackgroundExports::extractedLine(data_as_at, planned_at)`. PROVISIONAL and the other header lines are unchanged.
@@ -250,7 +255,7 @@ All routes are under `auth:sanctum` + `super` and **outside** `branch`, like `se
 
   The developer adds a method on `ReportExporter` that returns the PDF bytes from the same `header`/`pdf` code (`pdf()` now returns a Response). Excel is never built.
 
-- **R7 Attach or link.** When `attached` is true, the PDF is attached as `<report>_<branches>_<from>_<to>.pdf`, where `<branches>` is the branch code for a single branch, the codes joined by `-` for up to 3 branches, else `ALL` (for example `income-expense_KDY_2026-11-20_2026-11-20.pdf`), so that branch files cannot be confused when filed (accounting review A7). Synchronous exports keep `ReportExporter::fileName`. Otherwise (more than 1,000 rows, so no PDF was built, or the file is over 5 MB) the email is the S4 "link" text. The link goes to `APP_URL/reports/<report>?from=..&to=..` plus `&branch=<id>` (single branch) or `&branch=all&branches=..` (All mode). Why 5 MB: base64 adds about 37 %, so the email stays under 7 MB, below the common 10 MB server limit. Why no public file link: the same reason as AG-087 R6, a forwarded email must not open financial data without sign-in.
+- **R7 Attach or link.** When `attached` is true, the PDF is attached as `<report>_<branches>_<from>_<to>.pdf`, where `<branches>` is the branch code for a single branch, the codes joined by `-` for up to 3 branches, else `ALL` (for example `income-expense_KDY_2026-11-20_2026-11-20.pdf`), so that branch files cannot be confused when filed (accounting review A7). Synchronous exports keep `ReportExporter::fileName`. Otherwise (more than 1,000 rows, so no PDF was built, or the file is over 5 MB) the email is the S4 "link" text. The link goes to `FRONTEND_URL/reports/<report>?from=..&to=..` plus `&branch=<id>` (single branch) or `&branch=all&branches=..` (All mode), plus the schedule's own filter (`&type=` for I&E when not All, `&types=..` for Transfers; review N4). Why 5 MB: base64 adds about 37 %, so the email stays under 7 MB, below the common 10 MB server limit. Why no public file link: the same reason as AG-087 R6, a forwarded email must not open financial data without sign-in.
 
 - **R8 Integrity at send.** Before attaching, the mail re-reads the file and compares its `sha256`:
   - mismatch: the delivery fails with `damaged`, nothing is sent, the audit row is written and the owner is alerted;
@@ -265,7 +270,7 @@ All routes are under `auth:sanctum` + `super` and **outside** `branch`, like `se
   - A run with at least one delivery sent resets `consecutive_failures` to 0.
   - Owner emails are themselves best effort: if mail is down, the bell row and S1/S3 are how the owner learns.
 
-- **R10 Automatic pause.** After `failures_before_pause` (3) runs in a row that are `failed`, `missed` or "Nothing sent", the schedule is paused by the system (`repeated_failures`). S5 `paused` goes to the owner and the Super Admins.
+- **R10 Automatic pause.** After `failures_before_pause` (3) runs in a row that are `failed`, `missed` or "Nothing sent", the schedule is paused by the system (`repeated_failures`). S5 `paused` goes to the active Super Admins (see S5 for a former owner). When the missed run recorded by the dispatcher is the one that pauses the schedule, the planned time that was still on time is not sent; it is added to that missed run (count and period), so every planned time is recorded (review S2).
 
 - **R11 States.**
   - `active` -> pause -> `paused` (`next_run_at` null); `paused` -> resume -> `active` (R2, no back-fill).
@@ -360,7 +365,7 @@ Fixture:
 **Size**
 17. Given `ReportService::PDF_EXPORT_CAP` would be passed (test: a D1-like cash-book schedule whose period has 1,001 lines), When the run builds, Then no PDF is written, `attached` false, and each mail has no attachment, contains "too many to attach" and a link ending `/reports/cash-book?from=2026-11-20&to=2026-11-20&branch=<KDY id>`.
 18. Given `attach_max_bytes` = 1 KB, When D1 runs, Then the PDF is built (sha256 set) but not attached, and the mail is the link version.
-19. (UI, W1) Given KBA with active branch GAL opens the AC 17 link, Then the switcher changes to KDY and the cash book loads for 2026-11-20. Given GA opens it, Then "You do not have access to KDY." is shown and no report request is sent.
+19. (UI, W1) Given KBA with active branch GAL opens the AC 17 link, Then the switcher changes to KDY and the cash book loads for 2026-11-20. Given GA opens it, Then "You do not have access to this branch." is shown and no report request is sent. (Amended after QA D1: GA has no access to KDY, so the app must not reveal its code.)
 
 **Failures and retries**
 20. Given the build throws a `QueryException` on the first attempt only, Then the run ends `done` with `attempts` 2. Given it throws on both, Then:

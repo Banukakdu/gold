@@ -142,7 +142,7 @@ export class ScheduleFormComponent implements OnInit {
   previewLink = computed(() => {
     this.rev();
     const n = this.next();
-    return n ? reportUrl(this.f.report, n.period_from, n.period_to, [...this.f.branches].sort((a, b) => a - b)) : '';
+    return n ? reportUrl(this.f.report, n.period_from, n.period_to, [...this.f.branches].sort((a, b) => a - b), { type: this.f.type, types: this.f.types }) : '';
   });
 
   async ngOnInit() {
@@ -219,6 +219,8 @@ export class ScheduleFormComponent implements OnInit {
   }
 
   async save() {
+    // QA D3: a second click before the page re-renders must not send a second request.
+    if (this.saving()) return;
     this.saving.set(true);
     this.error.set('');
     this.errs.set({});

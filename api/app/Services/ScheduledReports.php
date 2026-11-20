@@ -73,6 +73,7 @@ class ScheduledReports
         'damaged' => 'The report file was changed after it was built; nothing was sent.',
         'missing' => 'The report file was missing; nothing was sent.',
         'stale' => 'The email was not sent in time.',
+        'unknown' => 'The email may have been sent, but the mail server did not confirm it. Check with the recipient.',
     ];
 
     public const PAUSED_REASONS = [
@@ -146,7 +147,7 @@ class ScheduledReports
      *
      * @param  int[]  $branchIds
      */
-    public function recipientProblem(?User $user, array $branchIds): ?string
+    public function recipientProblem(?User $user, array $branchIds, ?array $index = null): ?string
     {
         if (! $user || $user->status !== 'active') {
             return 'inactive';
@@ -158,6 +159,15 @@ class ScheduledReports
             return 'super_admin_only';
         }
         $branchId = (int) $branchIds[0];
+        if (isset($index[$branchId])) {
+            // The list screens (review S4): the same rule from sets loaded once per request.
+            $i = $index[$branchId];
+            if (! isset($i['members'][$user->id])) {
+                return 'not_member';
+            }
+
+            return isset($i['view'][$user->id], $i['export'][$user->id]) ? null : 'missing_permission';
+        }
         if (! $user->isMemberOf($branchId)) {
             return 'not_member';
         }
@@ -167,6 +177,29 @@ class ScheduledReports
         }
 
         return null;
+    }
+
+    /**
+     * Review S4: for each branch, its members and the holders of report.view and report.export, three queries per
+     * branch, so a list of schedules or users is checked without a query per recipient. Only for screens: the build and
+     * the send read fresh.
+     *
+     * @param  int[]  $branchIds
+     * @return array<int, array{members: array<int, int>, view: array<int, int>, export: array<int, int>}>
+     */
+    public function recipientIndex(array $branchIds): array
+    {
+        $inApp = app(InAppNotifications::class);
+        $out = [];
+        foreach (array_unique(array_map('intval', $branchIds)) as $b) {
+            $out[$b] = [
+                'members' => array_flip(DB::table('branch_user')->where('branch_id', $b)->pluck('user_id')->map(fn ($v) => (int) $v)->all()),
+                'view' => array_flip($inApp->holderIdsOf(['report.view'], $b)),
+                'export' => array_flip($inApp->holderIdsOf(['report.export'], $b)),
+            ];
+        }
+
+        return $out;
     }
 
     /** The plain text of a reason code, with the branch code filled in. */
@@ -185,8 +218,10 @@ class ScheduledReports
         $ids = $this->branchIdsFrom($input['branches'] ?? []);
         $code = count($ids) === 1 ? Branch::whereKey($ids[0])->value('code') : null;
 
-        return User::orderBy('name')->orderBy('id')->get()->map(function (User $u) use ($ids, $code) {
-            $problem = $this->recipientProblem($u, $ids);
+        $index = count($ids) === 1 ? $this->recipientIndex($ids) : null;
+
+        return User::orderBy('name')->orderBy('id')->get()->map(function (User $u) use ($ids, $code, $index) {
+            $problem = $this->recipientProblem($u, $ids, $index);
 
             return ['id' => $u->id, 'name' => $u->name, 'email' => $u->email, 'is_super_admin' => (bool) $u->is_super_admin,
                 'status' => $u->status, 'eligible' => $problem === null, 'reason' => self::reasonText($problem, $code)];
@@ -257,8 +292,10 @@ class ScheduledReports
                 ReportScheduleRecipient::create(['schedule_id' => $s->id, 'user_id' => $uid, 'added_by' => $actor->id, 'added_at' => $now]);
             }
             $timing = array_intersect($changed, ['frequency', 'weekday', 'send_time']);
-            if ($timing && $s->status === ReportSchedule::ACTIVE) {
-                // R2: from the moment of saving. Not audited separately: it follows from the audited fields.
+            if ($timing && $s->status === ReportSchedule::ACTIVE && ! ($s->next_run_at && $s->next_run_at->lte($now))) {
+                // R2: from the moment of saving. Not audited separately: it follows from the audited fields. Review N7:
+                // a planned time already due (the dispatcher has not picked it up yet) is kept; the dispatcher sends or
+                // records it, and the times after it follow the new timing.
                 $s->next_run_at = self::nextRunAt($s->frequency, $s->weekday, $s->send_time, $now);
             }
             $s->updated_by = $actor->id;
@@ -516,27 +553,66 @@ class ScheduledReports
             ->orderBy('name')->orderBy('id')->get();
     }
 
-    /** The `schedule` resource. */
-    public function present(ReportSchedule $s, ?Collection $branches = null, ?Collection $users = null): array
+    /**
+     * Review S4: the list resource with a fixed number of queries: recipients, users, last runs, their delivery counts
+     * and the recipient index of the single-branch schedules, each loaded once.
+     *
+     * @param  Collection<int, ReportSchedule>  $schedules
+     */
+    public function presentMany(Collection $schedules): array
     {
-        $branches ??= Branch::all()->keyBy('id');
+        $ids = $schedules->pluck('id')->all();
+        if (! $ids) {
+            return [];
+        }
+        $recipients = ReportScheduleRecipient::whereIn('schedule_id', $ids)->whereNull('removed_at')->orderBy('id')->get()->groupBy('schedule_id');
+        $userIds = $recipients->collapse()->pluck('user_id')
+            ->concat($schedules->flatMap(fn (ReportSchedule $s) => [$s->owner_id, $s->created_by, $s->updated_by, $s->archived_by]))
+            ->filter()->unique()->values()->all();
+        $latest = ReportScheduleRun::whereIn('schedule_id', $ids)->selectRaw('schedule_id, MAX(planned_at) as last_planned')->groupBy('schedule_id');
+        $lastRuns = ReportScheduleRun::joinSub($latest, 'lr', fn ($j) => $j->on('lr.schedule_id', '=', 'report_schedule_runs.schedule_id')
+            ->on('lr.last_planned', '=', 'report_schedule_runs.planned_at'))->select('report_schedule_runs.*')->get()->keyBy('schedule_id');
+        $counts = $this->countsFor($lastRuns->pluck('id')->all());
+        $single = $schedules->map(fn (ReportSchedule $s) => $s->branchIds())->filter(fn ($b) => count($b) === 1)->map(fn ($b) => $b[0])->values()->all();
+        $pre = [
+            'branches' => Branch::all()->keyBy('id'),
+            'users' => User::whereIn('id', $userIds)->get()->keyBy('id'),
+            'index' => $this->recipientIndex($single),
+        ];
+
+        return $schedules->map(fn (ReportSchedule $s) => $this->present($s, $pre + [
+            'recipients' => $recipients[$s->id] ?? collect(),
+            'last' => $lastRuns[$s->id] ?? null,
+            'counts' => isset($lastRuns[$s->id]) ? $counts[$lastRuns[$s->id]->id] : null,
+        ]))->values()->all();
+    }
+
+    /**
+     * The `schedule` resource. $pre: data loaded once for a list (presentMany).
+     *
+     * @param  array{branches?: Collection, users?: Collection, index?: array, recipients?: Collection, last?: ?ReportScheduleRun, counts?: ?array}  $pre
+     */
+    public function present(ReportSchedule $s, array $pre = []): array
+    {
+        $branches = $pre['branches'] ?? Branch::all()->keyBy('id');
         $ids = $s->branchIds();
         $code = count($ids) === 1 ? ($branches[$ids[0]]->code ?? null) : null;
-        $recipientRows = ReportScheduleRecipient::where('schedule_id', $s->id)->whereNull('removed_at')->orderBy('id')->get();
+        $recipientRows = $pre['recipients'] ?? ReportScheduleRecipient::where('schedule_id', $s->id)->whereNull('removed_at')->orderBy('id')->get();
         $userIds = [...$recipientRows->pluck('user_id')->all(), $s->owner_id, $s->created_by, $s->updated_by, $s->archived_by];
-        $users = ($users ?? collect())->union(User::whereIn('id', array_filter($userIds))->get()->keyBy('id'));
+        $users = $pre['users'] ?? User::whereIn('id', array_filter($userIds))->get()->keyBy('id');
+        $index = $pre['index'] ?? null;
         $name = fn (?int $id) => $id ? ['id' => $id, 'name' => $users[$id]->name ?? "#{$id}"] : null;
         $next = $s->status === ReportSchedule::ACTIVE && $s->next_run_at ? self::period($s->frequency, $s->next_run_at) : null;
 
-        $recipients = $recipientRows->map(function (ReportScheduleRecipient $r) use ($users, $ids, $code) {
+        $recipients = $recipientRows->map(function (ReportScheduleRecipient $r) use ($users, $ids, $code, $index) {
             $u = $users[$r->user_id] ?? null;
-            $problem = $this->recipientProblem($u, $ids);
+            $problem = $this->recipientProblem($u, $ids, $index);
 
             return ['id' => $r->user_id, 'name' => $u?->name, 'email' => $u?->email, 'status' => $u?->status,
                 'is_super_admin' => (bool) $u?->is_super_admin, 'eligible' => $problem === null, 'reason' => self::reasonText($problem, $code)];
         })->sortBy(fn ($r) => mb_strtolower((string) $r['name']))->values()->all();
 
-        $last = ReportScheduleRun::where('schedule_id', $s->id)->orderByDesc('planned_at')->first();
+        $last = array_key_exists('last', $pre) ? $pre['last'] : ReportScheduleRun::where('schedule_id', $s->id)->orderByDesc('planned_at')->first();
 
         return [
             'id' => $s->id,
@@ -568,7 +644,7 @@ class ScheduledReports
             'recipients' => $recipients,
             'cannot_receive' => count(array_filter($recipients, fn ($r) => ! $r['eligible'])),
             'last_run' => $last ? ['id' => $last->id, 'planned_at' => $last->planned_at?->toIso8601ZuluString(), 'status' => $last->status]
-                + $this->counts($last) : null,
+                + ($pre['counts'] ?? $this->counts($last)) : null,
         ];
     }
 
@@ -587,13 +663,34 @@ class ScheduledReports
         return '';
     }
 
-    /** @return array{sent: int, skipped: int, failed: int, queued: int} */
+    /** @return array{sent: int, skipped: int, failed: int, queued: int} `queued` includes deliveries being sent */
     public function counts(ReportScheduleRun $run): array
     {
-        $by = ReportScheduleDelivery::where('run_id', $run->id)->selectRaw('status, COUNT(*) as n')->groupBy('status')->pluck('n', 'status');
+        return $this->countsFor([$run->id])[$run->id];
+    }
 
-        return ['sent' => (int) ($by['sent'] ?? 0), 'skipped' => (int) ($by['skipped'] ?? 0), 'failed' => (int) ($by['failed'] ?? 0),
-            'queued' => (int) ($by['queued'] ?? 0)];
+    /**
+     * @param  string[]  $runIds
+     * @return array<string, array{sent: int, skipped: int, failed: int, queued: int}>
+     */
+    public function countsFor(array $runIds): array
+    {
+        $out = [];
+        foreach ($runIds as $id) {
+            $out[$id] = ['sent' => 0, 'skipped' => 0, 'failed' => 0, 'queued' => 0];
+        }
+        if (! $runIds) {
+            return $out;
+        }
+        $rows = ReportScheduleDelivery::whereIn('run_id', $runIds)->selectRaw('run_id, status, COUNT(*) as n')->groupBy('run_id', 'status')->get();
+        foreach ($rows as $r) {
+            $key = $r->status === ReportScheduleDelivery::SENDING ? 'queued' : $r->status;
+            if (isset($out[$r->run_id][$key])) {
+                $out[$r->run_id][$key] += (int) $r->n;
+            }
+        }
+
+        return $out;
     }
 
     /** The `run` resource: no file path and no sha256. */

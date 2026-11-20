@@ -5,7 +5,6 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Models\Branch;
 use App\Models\ReportScheduleRun;
-use App\Models\User;
 use App\Services\ScheduledReports;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -22,10 +21,8 @@ class ReportScheduleController extends Controller
     public function index(Request $request)
     {
         $status = $request->validate(['status' => ['nullable', Rule::in(['current', 'archived', 'all'])]])['status'] ?? 'current';
-        $branches = Branch::all()->keyBy('id');
-        $users = User::all()->keyBy('id');
 
-        return ['data' => $this->schedules->list($status)->map(fn ($s) => $this->schedules->present($s, $branches, $users))->values()];
+        return ['data' => $this->schedules->presentMany($this->schedules->list($status))];
     }
 
     public function show(int $id)
