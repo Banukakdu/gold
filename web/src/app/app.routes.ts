@@ -52,6 +52,9 @@ export const routes: Routes = [
         loadComponent: () => import('./features/year-end/year-end.component').then(m => m.YearEndComponent) },
       { path: 'settings', canActivate: [superAdminGuard],
         loadComponent: () => import('./features/settings/settings.component').then(m => m.SettingsComponent) },
+      // AG-093 S1 Backups (docs/specs/backups.md): read-only status, Super Admin only.
+      { path: 'backups', canActivate: [superAdminGuard],
+        loadComponent: () => import('./features/backups/backups.component').then(m => m.BackupsComponent) },
       { path: 'branches', canActivate: [superAdminGuard],
         loadComponent: () => import('./features/branches/branch-list.component').then(m => m.BranchListComponent) },
       { path: 'users', canActivate: [permissionGuard('user.view')],

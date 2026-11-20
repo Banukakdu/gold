@@ -28,6 +28,8 @@ interface Preview {
   fiscal_year: { start_year: number; label: string; short_label: string; start: string; end: string; closed: boolean };
   branches: BranchPreview[]; total_net: string; total_ie_net: string; retained_earnings_movement: string;
   checks: { code: string; message: string }[];
+  /** AG-093 R15 (backups review F9): information only, never blocks the close. */
+  backup_warning?: string | null;
 }
 
 const STATUS: Record<Status, string> = { open: 'Open', ready: 'Ready to close', closed: 'Closed', reopened: 'Reopened', no_result: 'No result to close' };
@@ -144,6 +146,7 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 
             </tbody>
           </table>
         } @else { <p class="muted">Loading...</p> }
+        @if (closePreview()?.backup_warning; as w) { <div class="warn">{{ w }}</div> }
         <p>This posts closing entries dated {{ settings.date(y.end) }} in every branch and keeps {{ monthOf(y.end) }} locked for all branches.
           It can only be undone by reopening the year.</p>
         <label>Type {{ short(y) }} to confirm <input name="confirm" [(ngModel)]="confirmText" autocomplete="off" /></label>

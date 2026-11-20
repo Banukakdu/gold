@@ -54,7 +54,8 @@ class IndexMigrationTest extends TestCase
         $this->migration()->up();
         $this->assertEqualsCanonicalizing($before, $this->indexes());
 
-        $this->artisan('migrate:rollback', ['--step' => 1, '--force' => true])->assertExitCode(0);
+        // Only this migration (later migrations, e.g. AG-093 backups, are not rolled back).
+        $this->artisan('migrate:rollback', ['--path' => 'database/migrations/2026_11_24_000000_transaction_search_indexes.php', '--force' => true])->assertExitCode(0);
         $after = $this->indexes();
         $this->assertNotContains(self::DATE_ID, $after);
         $this->assertNotContains(self::RELATED, $after);

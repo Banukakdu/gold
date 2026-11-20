@@ -204,13 +204,35 @@ final class LedgerChecks
         return $out;
     }
 
-    /** @return array<int, int> ledger balance (debit - credit, cents) by account id */
-    public static function accountBalances(): array
+    /**
+     * @param  int|null  $maxId  only lines with id <= this (AG-093 control.json: the rows a backup is sure to hold)
+     * @return array<int, int> ledger balance (debit - credit, cents) by account id
+     */
+    public static function accountBalances(?int $maxId = null): array
     {
         $dr = Money::sqlCents('debit');
         $cr = Money::sqlCents('credit');
 
-        return DB::table('ledger_entries')->groupBy('account_id')->selectRaw("account_id, SUM($dr) - SUM($cr) as b")
+        return DB::table('ledger_entries')->when($maxId !== null, fn ($q) => $q->where('id', '<=', $maxId))
+            ->groupBy('account_id')->selectRaw("account_id, SUM($dr) - SUM($cr) as b")
             ->pluck('b', 'account_id')->map(fn ($v) => (int) $v)->all();
+    }
+
+    /**
+     * AG-093 control.json (backups review F2): sum of debits and sum of credits (cents) per branch code, over lines
+     * with id <= $maxId when given. The books balance when debit = credit in every branch (V3).
+     *
+     * @return array<string, array{debit: int, credit: int}>
+     */
+    public static function sumsByBranch(?int $maxId = null): array
+    {
+        $dr = Money::sqlCents('le.debit');
+        $cr = Money::sqlCents('le.credit');
+
+        return DB::table('ledger_entries as le')->join('branches as b', 'b.id', '=', 'le.branch_id')
+            ->when($maxId !== null, fn ($q) => $q->where('le.id', '<=', $maxId))
+            ->groupBy('le.branch_id', 'b.code')->orderBy('b.code')
+            ->selectRaw("b.code as branch, SUM($dr) as debit, SUM($cr) as credit")->get()
+            ->mapWithKeys(fn ($r) => [(string) $r->branch => ['debit' => (int) $r->debit, 'credit' => (int) $r->credit]])->all();
     }
 }

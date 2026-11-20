@@ -4,6 +4,7 @@ use App\Http\Controllers\Api\V1\AccountController;
 use App\Http\Controllers\Api\V1\AttachmentController;
 use App\Http\Controllers\Api\V1\AuditLogController;
 use App\Http\Controllers\Api\V1\AuthController;
+use App\Http\Controllers\Api\V1\BackupController;
 use App\Http\Controllers\Api\V1\BranchController;
 use App\Http\Controllers\Api\V1\CategoryController;
 use App\Http\Controllers\Api\V1\ChartOfAccountsController;
@@ -38,6 +39,9 @@ Route::prefix('v1')->group(function () {
             Route::put('settings', [SettingsController::class, 'update']);
             Route::post('settings/logo', [SettingsController::class, 'uploadLogo'])->middleware('throttle:attachments-upload');
             Route::post('settings/logo/remove', [SettingsController::class, 'removeLogo']);
+            // AG-093 S1 backups (docs/specs/backups.md section 5): read-only. There is deliberately no POST, PUT or
+            // DELETE route: backups are started, restored and pruned on the server only.
+            Route::get('backups', [BackupController::class, 'index']);
         });
 
         // Everything below runs in the context of the branch in X-Branch-Id

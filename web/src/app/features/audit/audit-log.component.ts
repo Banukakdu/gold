@@ -66,7 +66,7 @@ function show(v: unknown): string {
             <tr (click)="open(r)" style="cursor:pointer" [class.sub]="selected()?.id === r.id">
               <td class="mono">{{ r.created_at | appDateTime }}</td>
               <td>{{ r.branch?.code ?? '—' }}</td>
-              <td>{{ r.user?.name ?? '—' }} @if (r.user?.tag) { <span class="tag" data-s="inactive">{{ r.user?.tag }}</span> }</td>
+              <td>{{ r.user?.name ?? (r.event.startsWith('backup.') ? 'System' : '—') }} @if (r.user?.tag) { <span class="tag" data-s="inactive">{{ r.user?.tag }}</span> }</td>
               <td>{{ r.event_label }}</td>
               <td class="mono">{{ r.subject }}</td>
               <td>{{ r.summary }}</td>
@@ -117,7 +117,7 @@ export class AuditLogComponent implements OnInit {
   private http = inject(HttpClient);
   groups: [string, string][] = [['', 'All events'], ['transactions', 'Transactions'], ['voids', 'Voids and reversals'], ['users', 'Users'],
     ['roles', 'Roles'], ['accounts', 'Accounts'], ['branches', 'Branches'], ['periods', 'Period locks'], ['reports', 'Reports'], ['logins', 'Logins'],
-    ['attachments', 'Attachments'], ['settings', 'Settings'], ['year_end', 'Year-end'], ['categories', 'Categories']];
+    ['attachments', 'Attachments'], ['settings', 'Settings'], ['year_end', 'Year-end'], ['categories', 'Categories'], ['backups', 'Backups']];
   f = { from: colomboToday().slice(0, 8) + '01', to: colomboToday(), event_group: '', user_id: '', self: false, ref_no: '' };
   branches: string[] = [];
   page = signal<AuditPage | null>(null);

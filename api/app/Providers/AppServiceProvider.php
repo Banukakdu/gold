@@ -2,11 +2,16 @@
 
 namespace App\Providers;
 
+use App\Services\Backups\BackupException;
+use App\Services\Backups\DatabaseDumper;
+use App\Services\Backups\MySqlDumper;
+use App\Services\Backups\SqliteDumper;
 use App\Support\BranchContext;
 use App\Support\Minutes;
 use App\Support\Settings;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Validation\Rules\Password;
@@ -18,6 +23,12 @@ class AppServiceProvider extends ServiceProvider
         $this->app->scoped(BranchContext::class);
         // AG-092 R1: settings are read once per request (memoised); a saved Setting flushes the memo.
         $this->app->scoped(Settings::class);
+        // AG-093 R2: the dumper of the default connection's driver. Tests bind a fake instead.
+        $this->app->bind(DatabaseDumper::class, fn () => match (DB::connection()->getDriverName()) {
+            'mysql' => new MySqlDumper,
+            'sqlite' => new SqliteDumper,
+            default => throw new BackupException('Backups support mysql and sqlite only.', 'precheck'),
+        });
     }
 
     public const ATTACHMENT_UPLOADS_PER_MINUTE = 30;
