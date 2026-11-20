@@ -40,9 +40,12 @@ Reuse what exists:
 | Super Admin (`users.is_super_admin`) | yes | **yes** | yes (not their own) | yes |
 | Branch Admin template (`*`, which includes `user.create`, `user.edit`, `role.manage`) | yes | **yes** | no | no |
 | Custom role with any of `user.create`, `user.edit`, `role.manage` | yes | **yes** | no | no |
+| Custom role with `transfer.approve` or `expense.approve` (accounting review 1) | yes | **yes** | no | no |
 | Accountant, Cashier, Viewer templates (none of those keys) | yes (optional) | no | no | no |
 
-**Admin (for enforcement, R8).** The user is active and either is a Super Admin, or holds an **active** role in a branch they are a member of (`branch_user` row) whose permissions include **at least one** of `user.create`, `user.edit` or `role.manage`. These are the keys that let someone create logins or change access.
+**Admin (for enforcement, R8).** The user is active and either is a Super Admin, or holds an **active** role in a branch they are a member of (`branch_user` row) whose permissions include **at least one** of `TwoFactorPolicy::ADMIN_KEYS` = `user.create`, `user.edit`, `role.manage`, `transfer.approve`, `expense.approve`. The first three let someone create logins or change access. The two approve keys are the second person in a maker-checker control: if an approver's password alone is enough, one stolen password defeats the control (accounting review 1).
+- Void, reverse and edit keys (Accountant template) do **not** make a user an admin. They are covered by the `self` flag and the audit review (controls finding 7). They may turn 2FA on themselves.
+- The key list is one constant, so a later key that grants access or approval is added in one place.
 - This set is wider than `BranchAdmins` (which needs both `user.edit` and `role.manage`, for the last-admin rule). Someone who can only create users can still make a second login for themselves (users-and-roles finding 9). See Q2.
 - The check runs per user across all their branches, not per active branch. 2FA is about the person, not the branch.
 - Implemented once as `App\Support\TwoFactorPolicy::isAdmin(User)` and `requiredFor(User)` (= setting on and `isAdmin`).
@@ -91,7 +94,8 @@ Users list and user detail: the 2FA status column, row and reset button are retu
 1. The user asks a Super Admin.
 2. The Super Admin opens Users, then the user, then "Two-factor: On", then "Reset two-factor".
 3. The Super Admin enters their own password (and their own code, if they have 2FA), and a reason of 10 to 500 characters, then confirms.
-4. The user's 2FA is cleared, every session of the user is signed out, the user is emailed, and the other Super Admins are alerted.
+4. The user's 2FA is cleared, every session of the user is signed out, any 2FA lock is cleared, the user is emailed, and the other Super Admins are alerted.
+   - If the user had a 2FA lock in the last 7 days and has not reset their password since it started, the reset is refused (R16). Someone else knows their password, so a reset now would hand the account to that person.
 5. At the next sign-in the user goes through F3 if they are an admin and the setting is on. Otherwise they sign in with the password only.
 
 **F7 Turn off 2FA (not required).**
@@ -106,7 +110,7 @@ Users list and user detail: the 2FA status column, row and reset button are retu
 1. Settings, section "Sign-in security".
 2. Tick "Require two-factor sign-in for admins".
 3. A note shows "6 admins have not set it up yet" with their names. They will be asked to set it up at their next request or sign-in.
-4. Save. This is refused if the Super Admin has no 2FA themselves (R8).
+4. Save. Changing this setting (on or off) asks for the Super Admin's password and current code. Turning it on is refused if the Super Admin has no 2FA themselves (R8).
 5. The other Super Admins are alerted.
 
 **F10 The only Super Admin loses phone and codes.** Someone with server access runs `php artisan auth:two-factor-reset admin@x.com --reason="Lost phone, verified in person"` (section 5, C1).
@@ -195,10 +199,10 @@ New section "Sign-in security":
 
 | Field | Type | Rules |
 |---|---|---|
-| Require two-factor sign-in for admins | checkbox | Default off. Help text: "Admins are Super Admins and anyone whose role can create users, edit users or manage roles in any branch. They must set up two-factor sign-in at their next sign-in or request." |
+| Require two-factor sign-in for admins | checkbox | Default off. Help text: "Admins are Super Admins and anyone whose role can create users, edit users, manage roles, or approve transfers or expenses in any branch. They must set up two-factor sign-in at their next sign-in or request." |
 
 - Under it: "N admins have not set it up yet:" and up to 50 names (`name <email>`, each linking to the user detail), plus "and M more" when there are more. When everyone has it: "Every admin has two-factor sign-in."
-- Save uses the existing Settings save, with only the changed keys.
+- Save uses the existing Settings save, with only the changed keys. When this checkbox changed, Save first opens the step-up dialog (S5 fields: password, and code when the Super Admin has 2FA on) and sends them as `password` and `code`.
 - Error 422 `two_factor_required_for_admins`: "Turn on two-factor sign-in for your own account first." (link to `/account/security`).
 - "Last changed by" uses the existing behaviour.
 
@@ -215,6 +219,8 @@ New section "Sign-in security":
   - the button "Reset two-factor" (only when On, and not for the Super Admin's own account).
 - Dialog "Reset two-factor for {name}":
   - text: "This turns off their two-factor sign-in, removes their recovery codes and signs them out on every device. If they are an admin and two-factor is required, they must set it up again at their next sign-in.";
+  - when the user had a 2FA lock in the last 7 days, an amber line above the fields: "Someone entered this user's password without the code on {date time}. They must reset their password before two-factor can be reset.";
+  - the Reason help text: "Say how you checked it was really them (for example: in person, phone call to their known number).";
   - fields: Reason (textarea, required, 10–500), Your password (required), Your code (6 digits, required only if the Super Admin has 2FA on);
   - buttons "Reset" and "Cancel";
   - errors under the fields, or in `.alert` for 403/422.
@@ -262,13 +268,13 @@ In cases 1–3 the password lock counter is cleared, as for a correct password t
 ### New, Super Admin (`auth:sanctum` + `super`, outside `branch`)
 | ID | Method, path | Request | Response | Errors |
 |---|---|---|---|---|
-| A1 | `POST /users/{user}/two-factor/reset` | `reason` (10–500, trimmed), `password` (actor's), `code` (actor's, required when the actor has 2FA on) | 200 `{tokens_revoked}` | 403 "Super Admin only." 404 unknown user. 422 `user` "Use Security to change your own two-factor sign-in." (self). 422 `user` "Two-factor sign-in is not on for this user." 422 `password`/`code`/`reason`. 429 (R6, counted on the actor). |
+| A1 | `POST /users/{user}/two-factor/reset` | `reason` (10–500, trimmed), `password` (actor's), `code` (actor's, required when the actor has 2FA on) | 200 `{tokens_revoked}` | 403 "Super Admin only." 404 unknown user. 422 `user` "Use Security to change your own two-factor sign-in." (self). 422 `user` "Two-factor sign-in is not on for this user." 422 `user` "Someone entered this user's password without the code on {date}. Ask them to reset their password first, then reset two-factor." (R16). 422 `password`/`code`/`reason`. 429 (R6, counted on the actor). |
 
 ### Changed endpoints
 - **`GET /me`** adds `two_factor: {enabled, required, recovery_codes_left}`.
 - **`GET /users`, `GET /users/{user}`**: only when the caller is a Super Admin, each user adds `two_factor: {enabled, confirmed_at, required, recovery_codes_left}`. For everyone else the key is absent.
 - **`GET /settings`** adds `two_factor_required_for_admins: bool` and `two_factor_pending_admins: {count, users: [{id, name, email}] (max 50, by name)}`.
-- **`PUT /settings`** accepts `two_factor_required_for_admins` (boolean). It is added to `SettingsController::EDITABLE` and stored as `0`/`1`. Turning it **on** needs the actor's own 2FA on (422, S6). It writes the existing `settings.updated` row and then sends the R12 alert.
+- **`PUT /settings`** accepts `two_factor_required_for_admins` (boolean). It is added to `SettingsController::EDITABLE` and stored as `0`/`1`. Changing it (on or off) needs `password` and, when the actor has 2FA on, `code` (422 `password`/`code`; R5 and R6 apply). Turning it **on** needs the actor's own 2FA on (422, S6). It writes the existing `settings.updated` row and then sends the R12 alert.
 - **`POST /auth/logout`**: unchanged.
 - **AuditLogController**: add the labels in R11. The "Logins" group (`auth.` prefix) covers them.
 
@@ -276,7 +282,10 @@ In cases 1–3 the password lock counter is cleared, as for a correct password t
 - **C1 `php artisan auth:two-factor-reset {email} --reason=`**:
   - a reason of 10–500 characters is required (it asks if the option is missing);
   - an unknown email exits 1 with "No user with this email.", and a user with 2FA off exits 1 with "Two-factor sign-in is not on for this user.";
-  - otherwise it does the same as A1 with a null actor and `via: "console"`, then the R12 emails.
+  - it shows the user's name, email, Super Admin flag and last 2FA lock, then asks "Type the email again to confirm" (with `--no-interaction` it exits 1 unless `--confirm={email}` matches);
+  - the R16 recent-lock rule applies; the message names `auth:reset-password` as the way to reset the password first;
+  - otherwise it does the same as A1 with a null actor and `via: "console"`, and the audit row adds `os_user` (`get_current_user()` / `posix_geteuid` name) and `host` (`gethostname()`);
+  - then the R12 emails. The alert goes to **every** active Super Admin other than the target (there is no actor to exclude). It never runs silently: there is no option that skips the audit row or the emails.
 
 ### New code
 - **`App\Support\Totp`** (pure PHP, no package):
@@ -312,18 +321,21 @@ In cases 1–3 the password lock counter is cleared, as for a correct password t
 
    A code is valid when `used_at` and `superseded_at` are both null.
 3. **`two_factor_challenges`**:
-   - `id`, `user_id` (FK);
+   - `id`, `user_id` (FK users, no cascade);
    - `token_hash` char(64), unique (sha256 of the plain token);
    - `purpose` (`verify`|`enrol`);
    - `attempts` tinyint default 0, `starts` tinyint default 0;
    - `expires_at`, `consumed_at` null;
    - `ip`, `user_agent`, `created_at`.
+
+   A challenge is open when `consumed_at` is null and `expires_at` is in the future. An expired challenge is simply refused; nothing has to be done to it.
 4. **`settings`** row `two_factor_required_for_admins` = `0`, inserted where missing.
 
 No column or row is deleted:
 - Turning 2FA off or resetting it sets the secret columns to null (the secret must not be kept). The recovery codes get `superseded_at`.
 - A consumed challenge gets `consumed_at`.
-- `auth:prune-two-factor-challenges` (daily, scheduler) removes challenge rows older than 30 days. These are short-lived sign-in records like `password_reset_tokens`, and the audit log keeps the history (Q5).
+- Challenge rows are **kept** (accounting review 6). There is no prune command and no schedule. They hold no secret (only the sha256 of a dead token), and they are the per-attempt evidence the audit log does not hold: IP, user agent, wrong-code count and when each sign-in step was used. Growth is one row per 2FA sign-in, a few thousand rows a year.
+- The pending secret is set to null when it is confirmed, replaced, or when 2FA is turned off or reset.
 
 ## 6. Business rules and edge cases
 - **R1 TOTP parameters.**
@@ -363,11 +375,12 @@ No column or row is deleted:
     - write one `auth.two_factor_locked` row;
     - email the user "Someone entered your password but not the code. If this was not you, reset your password now.";
     - alert the other Super Admins if the user is an admin (R12).
-  - A successful code clears the per-user counter.
-  - A password reset (AG-002) does **not** clear the 2FA lock.
+  - **Extended lock (accounting review 3).** The short lock alone allows about 960 guesses a day, roughly a 0.3% chance a day (8% a month) of guessing a code for someone who has the password. So per user: 30 wrong codes or step-up passwords in 24 hours (rolling, counted separately from the 15-minute counter) start a **24-hour** lock from that moment. It behaves like the short lock (same 429 text with the time left, same "says nothing before the password" rule). It writes `auth.two_factor_locked` with `level: "extended"`, emails the user, and alerts the other Super Admins for **every** user, not only admins.
+  - A successful code clears the 15-minute counter only. The 24-hour counter runs out on its own.
+  - A password reset (AG-002) does **not** clear the 2FA lock. Only time, or a Super Admin reset (A1/C1) after the password has been reset (R16), clears it.
 - **R7 Recovery codes.**
   - 10 per batch. Format `xxxxx-xxxxx` from `23456789abcdefghjkmnpqrstuvwxyz` (31 characters, about 49 bits).
-  - Stored as HMAC-SHA256 only. The plain codes are returned once (P3, M3 first enable, M4) and never again.
+  - Stored as HMAC-SHA256 only, keyed with a sub-key derived from APP_KEY for this purpose (`hash_hmac('sha256', 'two-factor-recovery', APP_KEY)`), not APP_KEY itself. Checking a code also tries the sub-keys of `APP_PREVIOUS_KEYS`, so rotating APP_KEY does not break recovery codes. The plain codes are returned once (P3, M3 first enable, M4) and never again.
   - Typed input is normalised (case and dash ignored).
   - Regenerating supersedes every unused code of the user.
   - Using one sends the user an email "A recovery code was used to sign in. N left."
@@ -404,19 +417,22 @@ No column or row is deleted:
 | `auth.two_factor_recovery_regenerated` | Recovery codes replaced | `{unused: n}` | `{recovery_codes: 10}` |
 | `auth.two_factor_recovery_used` | Recovery code used | — | `{remaining, context: "sign_in"\|"move"\|"disable"}` |
 | `auth.two_factor_disabled` | 2FA turned off | `{confirmed_at}` | `{superseded_codes: n}` |
-| `auth.two_factor_reset` | 2FA reset | `{confirmed_at}` | `{reason, via: "app"\|"console", tokens_revoked, superseded_codes}` |
-| `auth.two_factor_locked` | 2FA locked | — | `{failures: 10}` |
+| `auth.two_factor_reset` | 2FA reset | `{confirmed_at, recovery_codes_left, last_locked_at}` | `{reason, via: "app"\|"console", tokens_revoked, superseded_codes, challenges_consumed, lock_cleared: bool, os_user, host}` (`os_user`, `host` on console only) |
+| `auth.two_factor_locked` | 2FA locked | — | `{level: "short"\|"extended", failures: 10\|30, until, ips: [distinct IPs of the failures, max 20]}` |
 | `auth.login` (changed) | Login | — | `{two_factor: "totp"\|"recovery"\|"enrolled"\|null}` |
 | `settings.updated` (existing) | — | `{two_factor_required_for_admins: false}` | `{… true}` |
 
-  Wrong codes are not written one by one. They are counted, and the lock row is the record.
+  Wrong codes are not written one by one. They are counted, and the lock row is the record. The `attempts` column of each kept challenge row (section 5) holds the count per sign-in.
+  - Lock rows and P1/P3 rows are written with the actor = the user (`auth()->setUser`), like `auth.login`. A1 refusals for wrong password or code are counted (R6), not written.
+  - Changes to who is an admin need no 2FA event: they are already recorded by `user.role_assigned` and `role.updated`.
 - **R12 Emails.** Queued, `afterCommit`. A mail failure is reported and never fails the request (as `AccessAlerts`).
   - To the user (`TwoFactorChangedNotification`), for each of: turned on, moved to a new phone, recovery codes replaced, recovery code used (with N left), turned off, reset by {Super Admin name} or "by the server console", and lock started. Each mail has the time (Asia/Colombo) and IP, and the line "If this was not you, contact your administrator at once."
   - To every **other** active Super Admin (`AccessAlerts::twoFactor`):
     - 2FA turned off by an admin;
     - 2FA reset by anyone (target, actor, reason);
-    - a lock started for an admin;
-    - the setting turned on or off (actor).
+    - a lock started for an admin, and an extended lock for anyone;
+    - the setting turned on or off (actor);
+    - the first 2FA set-up by a user after a reset (A1 or C1): "{name} set up two-factor sign-in again after a reset, from IP {ip}" (closes the loop on every reset).
 
     They are not sent for turning 2FA on or moving phone, and nothing goes to Branch Admins.
 - **R13 Password reset (AG-002).**
@@ -437,7 +453,9 @@ No column or row is deleted:
   - Super Admins only, never their own account (they use M2/M5, or another Super Admin, or C1).
   - A Super Admin may reset another Super Admin. Every other Super Admin is alerted, including the target.
   - The actor proves presence with their password, and their code when their 2FA is on.
-  - A reason is required.
+  - A reason is required. The help text asks how the person's identity was checked.
+  - **Recent lock (accounting review 2).** If the target has an `auth.two_factor_locked` row in the last 7 days and no `auth.password_reset` row after the latest lock started, A1 and C1 refuse (422 / exit 1). A lock means someone else had the password. Resetting 2FA first would let that person sign in with the password only (or, for an admin, enrol their own phone through F3). The user resets the password first (Forgot password, or `auth:reset-password` for a Super Admin), then the reset is allowed and clears the lock.
+  - A reset clears both 2FA locks (short and extended) for the target.
 - **R17 Email change** (E4, existing). 2FA is unchanged. The label in the user's app keeps the old email (cosmetic). They can "Move to a new phone" to refresh it.
 - **R18 Branch isolation.**
   - 2FA data is per user, not per branch. No model here uses `BranchScoped`.
@@ -515,6 +533,7 @@ Tests use `Notification::fake()`, a sync queue and `Carbon::setTestNow`. "Code a
 43. Given the setting is on, when users log in with the right password and 2FA off, then:
     - a KDY Branch Admin gets `{two_factor:"enrol"}`;
     - a user whose custom role has only `user.create` gets `enrol`;
+    - a user whose custom role has only `transfer.approve` (or only `expense.approve`) gets `enrol`;
     - an Accountant gets `{token}`;
     - a user whose only admin role is **inactive** gets `{token}`.
 44. Given an enrol challenge, when P2 then P3 are called with a valid code, then 200 with `token` and 10 `recovery_codes`. `auth.two_factor_enabled` has `forced:true`, and `auth.login` has `two_factor:"enrolled"`.
@@ -545,9 +564,39 @@ Tests use `Notification::fake()`, a sync queue and `Carbon::setTestNow`. "Code a
    - **Assume** the decision is pending. The key is always shown, and the QR lives only in S7.
    - If approved: one small MIT, dependency-free, client-side library, with the lock file committed.
    - Never an online QR service (the secret would leave the system).
-2. **Who counts as "admin" (product owner).** **Assume** Super Admins plus anyone with an active role holding any of `user.create`, `user.edit` or `role.manage` (section 2). The alternative is the narrower `BranchAdmins` definition (both `user.edit` and `role.manage`), which would leave users who can only create users unprotected.
+2. **Who counts as "admin".** **Decided (accounting review 1):** Super Admins plus anyone with an active role holding any of `user.create`, `user.edit`, `role.manage`, `transfer.approve` or `expense.approve` (section 2). The narrower `BranchAdmins` definition (both `user.edit` and `role.manage`) would leave users who can only create users unprotected, and leaving approvers out would let one stolen password defeat a maker-checker control. With the shipped templates only Branch Admin (`*`) holds these keys, so the default set of people asked for 2FA is unchanged.
 3. **AG-002 Super Admin email reset switch (product owner).** The password-reset review said to revisit the default when 2FA ships. **Assume** no change in this item: `AUTH_SUPER_ADMIN_EMAIL_RESET` stays `false` by default. 2FA does not turn off with a password reset (R13), so turning the switch on later is lower risk.
-4. **Recovery code hashing.** **Assume** HMAC-SHA256 with the app key, not bcrypt. The codes have about 49 bits of entropy and are rate-limited, and bcrypt would mean up to 10 slow checks per attempt.
-5. **Pruning challenge rows.** **Assume** a 30-day prune of `two_factor_challenges`. They are sign-in records like `password_reset_tokens`, not business records, and the audit log keeps the history.
-6. **Lock scope.** The 2FA lock is per user, not per IP. Someone who already knows the password could lock the real user out for 15 minutes. **Assume** this is acceptable, because the lock emails the user to change their password and alerts Super Admins about admins.
-7. **Turning the setting on with existing sessions.** **Assume** sessions are not revoked. They are limited by the middleware until setup (R9), so nobody loses unsaved work.
+4. **Recovery code hashing.** **Confirmed (accounting review 7):** HMAC-SHA256 with a sub-key of the app key (R7), not bcrypt. The codes have about 49 bits of entropy and are rate-limited, and bcrypt would mean up to 10 slow checks per attempt.
+5. **Pruning challenge rows.** **Decided (accounting review 6): no prune.** Challenge rows are kept (section 5). CLAUDE.md allows no hard delete, and the rows are the only per-attempt evidence (IP, user agent, wrong-code count). Nothing needs deleting: an expired row is refused by its `expires_at`.
+6. **Lock scope.** The 2FA lock is per user, not per IP. Someone who already knows the password could lock the real user out for 15 minutes. **Confirmed (accounting review 3)**, because the lock is only reachable after the right password, emails the user to change their password and alerts Super Admins about admins. The extended lock (R6) is added so the per-user lock also limits guessing over days.
+7. **Turning the setting on with existing sessions.** **Confirmed (accounting review 8):** sessions are not revoked. They are limited by the middleware until setup (R9), so nobody loses unsaved work.
+
+## Accounting review
+Reviewer: accountant, 2026-11-20. Focus: who must use 2FA, ways one person could get round it, lockout, alerts, audit trail and retention. Read with CLAUDE.md, `users-and-roles.md`, `password-reset.md`, `notifications.md`, `settings.md`, `controls.md`, and `PermissionSeeder` (catalogue and templates). The agreed changes are already folded into the body above.
+
+**Fine as written (no change):** no new permission key, with reset and setting behind `super` (a new key would reach every Branch Admin through `*`); Branch Admins cannot reset 2FA and do not see who has it; no token before the second step (R4); replay protection (R5); the per-request admin check (R8/R9), so role changes take effect at once with no hook; a password reset does not turn 2FA off (R13); deactivation consumes challenges (R14); no secret, code or hash in any audit row (R11); `branch_id` null on 2FA rows, so only Super Admins read them (controls Q5). Double entry, period locks, inter-branch figures and reports are not touched: this item makes no posting.
+
+**Findings**
+1. **MUST - Approvers count as admins.** Add `transfer.approve` and `expense.approve` to the admin keys (section 2, `TwoFactorPolicy::ADMIN_KEYS`). An approver is the second person in a maker-checker control. If their password alone is enough, one phished password lets a maker approve their own transfer or expense under the approver's name, and the audit trail shows the wrong person. With the shipped templates only Branch Admin (`*`) holds these keys, so the default population does not change; the rule closes the gap for custom "Approver" roles. The rest of the BA's definition is confirmed: any one of `user.create`, `user.edit`, `role.manage`, across all memberships, active roles only. Void, reverse and edit keys are **not** added: that would force 2FA on every Accountant, which is beyond "admins" in AG-005, and those actions already have the `self` flag and the month-end audit review (controls finding 7). Users with them can still turn 2FA on. AC 43 (new bullet), AC 60.
+2. **MUST - No reset while someone else may hold the password.** A 2FA lock means someone entered the right password. If a Super Admin then resets 2FA (or the operator runs C1), that person can sign in with the password only, and an admin's account would be enrolled on **their** phone through F3. So A1 and C1 refuse when the target has a lock in the last 7 days and no password reset after it (R16, S8 warning, A1 error text). After the password reset, the reset is allowed and clears the lock. The reason help text asks how identity was checked. AC 61.
+3. **MUST - Extended lock.** 10 wrong codes per 15 minutes still allows about 960 guesses a day: roughly a 0.3% daily (8% monthly) chance for someone who already has the password. Add a 24-hour lock at 30 failures in 24 hours, alerted to Super Admins for every user (R6, R11, R12). Per user, not per IP, is confirmed (Q6): the lock is reachable only after the right password, so the denial-of-service risk is the user's own compromised password, and the email tells them to change it. AC 62.
+4. **MUST - The console reset is never silent and is attributable.** C1 writes `auth.two_factor_reset` with `via: "console"`, the OS user and host, emails the target and alerts every other active Super Admin; no option skips any of these. It asks for the email to be typed again (or `--confirm`). Anyone with server access can already change the database, so C1 adds no new power; the point is that the normal route leaves a full record. AC 63.
+5. **MUST - Step-up to change the enforcement setting.** Turning "Require two-factor sign-in for admins" on **or off** needs the Super Admin's password and current code, like A1. Without it, a stolen Super Admin session (no password, no phone) could switch the control off. Turning it off still alerts the other Super Admins (R12). AC 64.
+6. **MUST - Challenge rows are kept, not pruned.** The 30-day prune is a hard delete and CLAUDE.md allows none. The only pending exception (AG-094 notifications) is for the product owner and is not a precedent. No strong reason exists here: the rows hold no secret, an expired row is refused by `expires_at`, growth is small, and the rows are useful evidence (IP, user agent, wrong-code count per sign-in) that the audit log deliberately does not hold. Remove `auth:prune-two-factor-challenges`; FK without cascade (section 5, Q5). No CLAUDE.md change is needed. AC 65.
+7. **SHOULD - Recovery code hashing (Q4): HMAC-SHA256 confirmed.** bcrypt would add nothing: an attacker who has the database **and** APP_KEY can already decrypt the TOTP secrets, and without APP_KEY a 49-bit code behind an HMAC cannot be tested offline. Two conditions: use a purpose sub-key of APP_KEY, and try `APP_PREVIOUS_KEYS` when checking, so a key rotation does not quietly cut everyone off from recovery (R7). AC 66.
+8. **SHOULD - Existing sessions when enforcement starts (Q7): not revoking is confirmed.** The middleware stops every route except the allow list, so an old session can do nothing but set up 2FA or log out, and setup needs the password.
+9. **SHOULD - Close the loop on resets.** The first 2FA set-up after a reset is alerted to the other Super Admins with the IP (R12), so whoever approved the reset sees that the right person came back.
+10. **SHOULD - Audit detail.** The reset row records the earlier state (`recovery_codes_left`, `last_locked_at`), `challenges_consumed` and `lock_cleared`; the lock row records its level, end time and the IPs used (R11). The pending secret is nulled on confirm, replace, disable and reset (section 5).
+11. **SHOULD - Go-live note.** Every independent alert in this item goes to "other active Super Admins". With only one Super Admin, those alerts reach nobody else, and the only reader of a reset or a switch-off is the person who did it. Recommend at least two active Super Admins (for example the owner and the external accountant), as `password-reset.md` already does for the email-reset switch. A queue worker and a real mailer must run (users-and-roles sign-off).
+
+**Product-owner questions left as the BA wrote them:** Q1 (QR library) and Q3 (AG-002 Super Admin email-reset switch). From the controls side, Q3 should stay `false` until finding 2 is delivered.
+
+**Acceptance criteria (added)**
+60. Given the setting is on and a user whose only role in KDY is a custom role with `expense.approve` and no other admin key, when they log in with the right password and 2FA off, then `{two_factor:"enrol"}`, and their existing token gets 403 `two_factor_enrolment_required`. A user whose role has `income.void`, `expense.void` and `transfer.reverse` but no admin key gets `{token}`.
+61. Given Cashier C with 2FA on and an `auth.two_factor_locked` row 2 days ago, when Super Admin A calls A1 with valid password, code and reason, then 422 `user` "Someone entered this user's password without the code on {date}…" and nothing changes; `php artisan auth:two-factor-reset` for C also exits 1. After C completes a password reset, the same A1 returns 200, C's lock is cleared, and the reset row has `lock_cleared: true`. With the lock 8 days ago and no password reset, A1 succeeds.
+62. Given a user with the right password who sends 30 wrong codes within 24 hours (across several short locks), then the next login with the right password returns 429 with about 24 hours left, one `auth.two_factor_locked` row has `level:"extended"`, the user is emailed, and every other active Super Admin is alerted even when the user is a Cashier. At lock start + 24 h + 1 s, the right password returns a challenge.
+63. Given C1 for Super Admin B with two other active Super Admins A and D, then the audit row has a null actor, `via:"console"`, a non-empty `os_user` and `host`, B gets the reset email, and A and D get the alert. With `--no-interaction` and no matching `--confirm`, it exits 1 and nothing changes.
+64. Given Super Admin S with 2FA on, when `PUT /settings {two_factor_required_for_admins:false}` is sent without `password`/`code` or with a wrong one, then 422 and the setting is unchanged. With both correct, 200, one `settings.updated` row, and the other Super Admins are alerted. The same applies to turning it on.
+65. Given challenges created 31 and 400 days ago (consumed, expired or open), when the scheduler and every console command have run, then every row is still in `two_factor_challenges` with its `attempts`, `ip` and `user_agent`. No command, schedule or route deletes from this table (grep for `two_factor_challenges` with `delete` finds nothing in `app/` or `routes/`), and an expired challenge is refused with 422 `challenge_token`.
+66. Given recovery codes created under key K1, when APP_KEY is rotated to K2 with `APP_PREVIOUS_KEYS=K1`, then an unused code still signs in, and `code_hash` is not `hash_hmac('sha256', code, APP_KEY)` with the raw key.
+67. Given a reset of C, when C next sets up 2FA (F3 or F1), then the other Super Admins get "C set up two-factor sign-in again after a reset, from IP {ip}". A second set-up later sends no such alert.
