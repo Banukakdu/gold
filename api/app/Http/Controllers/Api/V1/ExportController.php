@@ -20,25 +20,36 @@ class ExportController extends Controller
 
     public function index(Request $request)
     {
+        $this->active($request);
         $page = Export::where('user_id', $request->user()->id)
             ->where('requested_at', '>=', now()->subDays((int) config('exports.list_days', 30)))
             ->orderByDesc('requested_at')->orderByDesc('id')
             ->paginate(self::PER_PAGE);
 
+        $branches = BackgroundExports::branchesOf($page->getCollection());
+
         return [
-            'data' => $page->getCollection()->map(fn (Export $e) => $this->exports->present($e))->values()->all(),
+            'data' => $page->getCollection()->map(fn (Export $e) => $this->exports->present($e, $branches))->values()->all(),
             'meta' => ['current_page' => $page->currentPage(), 'last_page' => $page->lastPage(), 'per_page' => $page->perPage(), 'total' => $page->total()],
         ];
     }
 
     public function show(Request $request, string $exportId)
     {
+        $this->active($request);
+
         return $this->exports->present($this->own($request, $exportId));
     }
 
     public function download(Request $request, string $exportId)
     {
         return $this->exports->download($request, $this->own($request, $exportId));
+    }
+
+    /** The `branch` middleware's first check, kept for the list (download records an inactive user's attempt instead). */
+    private function active(Request $request): void
+    {
+        abort_if($request->user()->status !== 'active', response()->json(['message' => 'Account inactive.'], 403));
     }
 
     private function own(Request $request, string $id): Export

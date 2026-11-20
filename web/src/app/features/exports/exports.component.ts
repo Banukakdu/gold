@@ -1,6 +1,7 @@
 import { Component, DestroyRef, OnInit, inject, signal } from '@angular/core';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { ActivatedRoute, Router } from '@angular/router';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { firstValueFrom } from 'rxjs';
 import { errorText } from '../../core/api.interceptor';
 import { SettingsService } from '../../core/settings.service';
@@ -43,25 +44,29 @@ export function expiresIn(iso: string | null, now = Date.now()): string {
     <div class="card">
       <table class="list">
         <thead><tr>
-          <th>Requested</th><th>Export</th><th>Format</th><th>Branches</th><th>Period</th><th class="num">Rows</th><th>Status</th>
-          <th>Data extracted</th><th>Expires</th><th class="num">Size</th><th></th>
+          <th class="ex-wide">Requested</th><th>Export</th><th class="ex-wide">Format</th><th class="ex-wide">Branches</th><th class="ex-wide">Period</th>
+          <th class="num ex-wide">Rows</th><th>Status</th><th class="ex-wide">Data extracted</th><th class="ex-wide">Expires</th><th class="num ex-wide">Size</th><th></th>
         </tr></thead>
         <tbody>
           @for (r of page()?.data; track r.id) {
             <tr [class.sub]="r.id === highlight()" [attr.id]="'export-' + r.id">
-              <td class="mono">{{ settings.dateTime(r.requested_at) }}</td>
-              <td>{{ r.title }}</td>
-              <td>Excel</td>
-              <td>{{ r.branches_label }}</td>
-              <td>{{ r.period_label }}</td>
-              <td class="num">{{ r.rows.toLocaleString('en-US') }}</td>
+              <td class="mono ex-wide">{{ settings.dateTime(r.requested_at) }}</td>
+              <td>{{ r.title }}
+                <!-- QA L2: at phone width the detail columns fold into one line under the title. -->
+                <div class="muted small ex-narrow">{{ r.branches_label }} · {{ r.period_label }} · {{ r.rows.toLocaleString('en-US') }} rows
+                  @if (r.status === 'ready') { · {{ fileSize(r.size_bytes) }} · expires {{ expires(r) }} }</div>
+              </td>
+              <td class="ex-wide">Excel</td>
+              <td class="ex-wide">{{ r.branches_label }}</td>
+              <td class="ex-wide">{{ r.period_label }}</td>
+              <td class="num ex-wide">{{ r.rows.toLocaleString('en-US') }}</td>
               <td>
                 <span class="tag" [attr.data-s]="'ex-' + r.status">{{ label(r.status) }}</span>
                 @if (r.status === 'failed' && r.error) { <div class="muted small">{{ r.error }}</div> }
               </td>
-              <td class="mono">{{ r.status === 'ready' ? settings.dateTime(r.data_as_at) : '' }}</td>
-              <td>{{ r.status === 'ready' ? expires(r) : '' }}</td>
-              <td class="num">{{ r.status === 'ready' ? fileSize(r.size_bytes) : '' }}</td>
+              <td class="mono ex-wide">{{ r.status === 'ready' ? settings.dateTime(r.data_as_at) : '' }}</td>
+              <td class="ex-wide">{{ r.status === 'ready' ? expires(r) : '' }}</td>
+              <td class="num ex-wide">{{ r.status === 'ready' ? fileSize(r.size_bytes) : '' }}</td>
               <td>
                 @if (r.status === 'ready') {
                   <button type="button" class="ghost" [disabled]="downloading() === r.id" (click)="download(r)">{{ downloading() === r.id ? 'Downloading...' : 'Download' }}</button>
@@ -100,12 +105,16 @@ export class ExportsComponent implements OnInit {
   downloading = signal<string | null>(null);
   private timer: ReturnType<typeof setTimeout> | null = null;
   private current = 1;
+  private destroyed = false;
+  /** The message on screen is a failed load's (cleared by the next good one), not a download's (kept). */
+  private loadFailed = false;
   private onVisible = () => { if (document.visibilityState === 'visible') this.schedule(); };
 
   ngOnInit() {
     this.highlight.set(this.route.snapshot.queryParamMap.get('id'));
     document.addEventListener('visibilitychange', this.onVisible);
     this.destroyRef.onDestroy(() => {
+      this.destroyed = true;
       document.removeEventListener('visibilitychange', this.onVisible);
       this.stop();
     });
@@ -116,18 +125,24 @@ export class ExportsComponent implements OnInit {
   expires(r: ExportRow) { return expiresIn(r.expires_at); }
   fileSize(b: number | null) { return size(b); }
 
-  load(n: number) {
+  /**
+   * Load a page. $keepMsg keeps the message on screen (a download error, QA B2): the refresh after it only brings the
+   * row's new state (Failed, Expired). A response that arrives after the page is left is dropped (reviewer m4).
+   */
+  load(n: number, keepMsg = false) {
     this.current = n;
     this.stop();
-    this.http.get<Page>('/api/v1/exports', { params: { page: n } }).subscribe({
+    this.http.get<Page>('/api/v1/exports', { params: { page: n } }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: p => {
         this.page.set(p);
-        this.msg.set('');
+        if (!keepMsg || this.loadFailed) this.msg.set('');
+        this.loadFailed = false;
         const id = this.highlight();
-        if (id && n === 1) setTimeout(() => document.getElementById('export-' + id)?.scrollIntoView({ block: 'center' }));
+        if (id && n === 1 && !keepMsg) setTimeout(() => document.getElementById('export-' + id)?.scrollIntoView({ block: 'center' }));
         this.schedule();
       },
-      error: e => { this.msg.set(errorText(e)); },
+      // A failed poll keeps polling (the next one may succeed); the message stays until a load succeeds.
+      error: e => { this.msg.set(errorText(e)); this.loadFailed = true; this.schedule(); },
     });
   }
 
@@ -135,8 +150,8 @@ export class ExportsComponent implements OnInit {
   private schedule() {
     this.stop();
     const active = (this.page()?.data ?? []).some(r => r.status === 'queued' || r.status === 'running');
-    if (!active || document.visibilityState !== 'visible') return;
-    this.timer = setTimeout(() => this.load(this.current), POLL_MS);
+    if (this.destroyed || !active || document.visibilityState !== 'visible') return;
+    this.timer = setTimeout(() => this.load(this.current, true), POLL_MS);
   }
 
   private stop() {
@@ -166,7 +181,8 @@ export class ExportsComponent implements OnInit {
         try { msg = JSON.parse(await err.error.text())?.message ?? msg; } catch { /* keep default */ }
       }
       this.msg.set(msg);
-      this.load(this.current);
+      // QA B2: the message stays; the row shows its new state (Failed after a missing file, Expired after a 410).
+      this.load(this.current, true);
     } finally {
       this.downloading.set(null);
     }

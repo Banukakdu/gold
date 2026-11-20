@@ -33,7 +33,9 @@ class ReportController extends Controller
         $params = $this->reports->params('cash-book', $request->all());
         $rows = $this->reports->cashBookRows($params);
         if ($rows > ReportService::EXPORT_CAP) {
-            return response()->json(['message' => 'This cash book has '.number_format($rows).' lines; the limit is '.number_format(ReportService::EXPORT_CAP).'. Narrow the date range, branches or accounts.'], 422);
+            // AG-087 QA L1: the screen's cap only; Excel takes the full book (in the background), so the text says so.
+            return response()->json(['message' => 'This cash book has '.number_format($rows).' lines, too many to show on screen (the limit is '
+                .number_format(ReportService::EXPORT_CAP).'). Narrow the date range, branches or accounts, or export it to Excel.'], 422);
         }
 
         return $this->reports->cashBook($params);

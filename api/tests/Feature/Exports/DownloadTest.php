@@ -5,6 +5,8 @@ namespace Tests\Feature\Exports;
 use App\Models\AuditLog;
 use App\Models\Export;
 use App\Models\User;
+use App\Services\BackgroundExports;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 
 /** docs/specs/background-exports.md ACs 15-20, 31 and 35 (R6, accounting review findings 3, 4 and 8). */
@@ -16,6 +18,40 @@ class DownloadTest extends ExportsTestCase
         $this->work();
 
         return $this->latest();
+    }
+
+    /** Reviewer m1: the export routes are outside the branch middleware, so every refusal reaches the audit. */
+    public function test_m1_refused_with_the_lost_branch_header_and_when_inactive(): void
+    {
+        $e = $this->ready();
+        $this->ak->branches()->detach($this->kdy->id);
+        $this->download($this->ak, $e->id, $this->kdy->id)->assertForbidden()->assertJsonPath('message', 'You no longer have access to this export.');
+        $this->ak->branches()->attach($this->kdy->id);
+        $this->ak->update(['status' => 'inactive']);
+        $this->download($this->ak, $e->id)->assertForbidden();
+        $this->actingAs($this->ak)->getJson('/api/v1/exports')->assertForbidden()->assertJsonPath('message', 'Account inactive.');
+        $this->assertSame(['not_member', 'inactive'], AuditLog::where('event', 'export.download_denied')->orderBy('id')->get()
+            ->map(fn ($a) => $a->new_values['reason'])->all());
+        $this->assertSame(0, $e->fresh()->download_count);
+    }
+
+    /** Reviewer m5: prune expires the export between the download's checks and opening the file: 410, never a 500. */
+    public function test_m5_download_racing_prune(): void
+    {
+        $e = $this->ready();
+        $seen = Export::find($e->id);
+        $this->travel(25)->hours();
+        $this->artisan('exports:prune');
+        $this->travel(-25)->hours();
+        $this->assertTrue($seen->isDownloadable(), 'the request still holds the ready row');
+
+        $request = Request::create("/api/v1/exports/{$e->id}/download");
+        $request->setUserResolver(fn () => $this->ak);
+        $r = app(BackgroundExports::class)->download($request, $seen);
+        $this->assertSame(410, $r->getStatusCode());
+        $this->assertStringContainsString('This export expired on', $r->getContent());
+        $this->assertSame([Export::EXPIRED, 0], [$e->fresh()->status, AuditLog::where('event', 'export.failed')->count()]);
+        $this->assertSame(0, AuditLog::where('event', 'export.downloaded')->count());
     }
 
     public function test_ac15_download_and_repeat(): void

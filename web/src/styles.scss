@@ -257,3 +257,10 @@ tr.tr-red td { background: #fbeceb; }
 .tag[data-s='ex-running'] { background: #e1ebf7; color: #2a5d9f; }
 .tag[data-s='ex-ready'] { background: #dff1e6; color: var(--pos); }
 .tag[data-s='ex-failed'] { background: #f4e1df; color: var(--neg); }
+
+/* AG-087 Exports page at phone width (QA L2): Status and Download stay in view; the details fold under the title. */
+.ex-narrow { display: none; }
+@media (max-width: 760px) {
+  .ex-wide { display: none; }
+  .ex-narrow { display: block; }
+}

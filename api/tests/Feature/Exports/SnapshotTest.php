@@ -2,14 +2,20 @@
 
 namespace Tests\Feature\Exports;
 
+use App\Jobs\RunExport;
 use App\Models\AuditLog;
 use App\Models\Export;
 use App\Models\Transaction;
+use App\Notifications\ExportFailedNotification;
 use App\Services\LedgerService;
 use App\Support\ReadSnapshot;
 use Illuminate\Database\QueryException;
+use Illuminate\Queue\DatabaseQueue;
+use Illuminate\Queue\TimeoutExceededException;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Notification;
+use Illuminate\Support\Facades\Storage;
 
 /**
  * docs/specs/background-exports.md ACs 7 and 37 (R3, accounting review findings 1, 2 and 12) against a real snapshot:
@@ -35,11 +41,14 @@ class SnapshotTest extends ExportsTestCase
         }
         $this->beforeRefreshingDatabase();
         $this->artisan('migrate:fresh');
-        config(['database.connections.writer' => config("database.connections.{$name}")]);
+        config(['database.connections.writer' => config("database.connections.{$name}"),
+            'database.connections.exports_queue' => config("database.connections.{$name}")]);
+        DB::purge('exports_queue');
 
         $this->beforeApplicationDestroyed(function () use ($driver, $name) {
             ReadSnapshot::abandon();
             DB::purge('writer');
+            DB::purge('exports_queue');
             if ($driver === 'mysql') {
                 // Leave the schema empty for the tests that follow (they expect a freshly migrated database).
                 $this->artisan('migrate:fresh');
@@ -136,6 +145,42 @@ class SnapshotTest extends ExportsTestCase
         $this->assertContains(3500.0, $values, 'total income without the voided 100.00');
         $this->assertNotContains(3600.0, $values);
         $this->assertNotContains('Line 1', $values);
+    }
+
+    /**
+     * Reviewer M1: the worker's timeout fails the job while the build holds the snapshot. The queue deletes its job on
+     * its own connection, failed() ends the snapshot and records the timeout once; the build then cannot mark it ready.
+     */
+    public function test_m1_a_timeout_inside_the_snapshot_fails_the_export_at_once(): void
+    {
+        Notification::fake();
+        $this->requestEight()->assertStatus(202);
+        $id = $this->latest()->id;
+        $queue = new DatabaseQueue(DB::connection('exports_queue'), 'jobs', 'exports', 900);
+        $queue->setContainer($this->app);
+        $queue->setConnectionName('exports');
+        $queue->push(new RunExport($id));
+        $job = $queue->pop('exports');
+        $this->assertNotNull($job);
+
+        ReadSnapshot::$hook = function (string $point) use ($job) {
+            if ($point === 'counted') {
+                $this->assertTrue(ReadSnapshot::isOpen());
+                $job->fail(new TimeoutExceededException('RunExport has timed out.'));
+                $this->assertFalse(ReadSnapshot::isOpen(), 'failed() ends the snapshot first');
+            }
+        };
+        $job->fire();
+
+        $e = Export::find($id);
+        $this->assertSame([Export::FAILED, 'timeout', 'The export took too long. Narrow the filters.'], [$e->status, $e->failure_code, $e->error]);
+        $this->assertTrue($job->isDeleted());
+        $this->assertSame(0, DB::connection('exports_queue')->table('jobs')->count());
+        $this->assertSame(1, AuditLog::where('event', 'export.failed')->count());
+        $this->assertSame(0, AuditLog::where('event', 'export.ready')->count());
+        $this->assertSame([], Storage::disk(Export::DISK)->allFiles());
+        Notification::assertSentToTimes($this->ak, ExportFailedNotification::class, 1);
+        $this->assertSame(0, DB::connection()->transactionLevel());
     }
 
     public function test_ac37_the_synchronous_export_reads_inside_the_read_only_snapshot(): void

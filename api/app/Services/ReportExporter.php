@@ -195,7 +195,8 @@ class ReportExporter
             $sheets[] = ['built' => count($s['rows']), 'written' => $w->sheet($s['title'], $head['lines'], $s['columns'], $s['rows'], $s['notes'] ?? [])];
         }
 
-        return ['rows' => $rows, 'built' => $this->builtRows($name, $data), 'sheets' => $sheets, 'unfooted' => $this->unfooted($name, $data)];
+        return ['rows' => $rows, 'built' => $this->builtRows($name, $data), 'sheets' => $sheets,
+            'unfooted' => [...$this->unfooted($name, $data), ...$this->unconfirmed($name, $p, $data)]];
     }
 
     /**
@@ -230,6 +231,29 @@ class ReportExporter
                 : array_map(fn ($k) => $check("consolidated {$k}", $c($d['totals'][$k]), $sum($d['rows'], fn ($r) => $r[$k])), ['elimination', 'dr', 'cr']),
             default => null,
         };
+
+        return $bad;
+    }
+
+    /**
+     * Reviewer m7: checks against a second, independent query in the same snapshot, where the row count alone is not
+     * one. Cash book and transfers count with their own COUNT query already (countRows); income and expense counts
+     * lines of the built report, so its printed totals are checked against one ungrouped SUM.
+     *
+     * @return string[]
+     */
+    public function unconfirmed(string $name, ReportParams $p, array $d): array
+    {
+        if ($name !== 'income-expense') {
+            return [];
+        }
+        $sums = $this->reports->incomeExpenseTotals($p);
+        $bad = [];
+        foreach (['income', 'expense'] as $t) {
+            if ($d[$t] !== null && Money::toCents((string) $d[$t]['total']) !== ($sums[$t] ?? 0)) {
+                $bad[] = "{$t} total differs from the ledger sum";
+            }
+        }
 
         return $bad;
     }

@@ -271,6 +271,25 @@ class ReportService
         return $out;
     }
 
+    /**
+     * AG-087 finding 5 (reviewer m7): the period totals by type from one ungrouped SUM, independent of the category
+     * grouping and the tree the report is built from. The export compares them with the totals it prints. Cents.
+     *
+     * @return array<string, int>
+     */
+    public function incomeExpenseTotals(ReportParams $p): array
+    {
+        $types = $p->extra['type'] === 'all' ? [Transaction::INCOME, Transaction::EXPENSE] : [$p->extra['type']];
+        $x = $this->cents('t.amount');
+
+        return $this->countedTransactions($types)
+            ->whereIn('t.branch_id', $p->branchIds())
+            ->whereDate('t.txn_date', '>=', $p->from)->whereDate('t.txn_date', '<=', $p->to)
+            ->groupByRaw('COALESCE(o.type, t.type)')
+            ->selectRaw("COALESCE(o.type, t.type) as etype, SUM(CASE WHEN t.type = 'reversal' THEN -$x ELSE $x END) as cents")
+            ->pluck('cents', 'etype')->map(fn ($v) => (int) $v)->all();
+    }
+
     /** Detail rows in an income/expense export: one per sub-category line. */
     public function incomeExpenseRows(array $r): int
     {

@@ -3,6 +3,7 @@
 namespace Tests\Feature\Exports;
 
 use App\Exceptions\ExportFailure;
+use App\Exports\XlsxStreamWriter;
 use App\Jobs\RunExport;
 use App\Models\AuditLog;
 use App\Models\Export;
@@ -10,6 +11,7 @@ use App\Models\Setting;
 use App\Models\Transaction;
 use App\Models\User;
 use App\Notifications\ExportFailedNotification;
+use App\Notifications\ExportReadyNotification;
 use App\Services\BackgroundExports;
 use App\Services\LedgerService;
 use App\Services\ReportExporter;
@@ -232,6 +234,51 @@ class JobTest extends ExportsTestCase
         $this->assertSame([Export::FAILED, 'timeout', 'The export took too long. Narrow the filters.'], [$e->status, $e->failure_code, $e->error]);
         $job = new RunExport($e->id);
         $this->assertSame([2, 60, 600, true], [$job->tries, $job->backoff, $job->timeout, $job->failOnTimeout]);
+        // Reviewer M1: the queue's bookkeeping runs on its own connection, never the one holding the snapshot.
+        $this->assertSame('exports_queue', config('queue.connections.exports.connection'));
+        $this->assertNotNull(config('database.connections.exports_queue'));
+    }
+
+    /** Reviewer M2: prune fails a running export while it builds; the failure stands and nothing says ready. */
+    public function test_m2_prune_during_the_build_wins_once(): void
+    {
+        Notification::fake();
+        $this->requestEight()->assertStatus(202);
+        ReadSnapshot::$hook = function (string $point) {
+            if ($point === 'counted') {
+                // A live attempt is never stale: 24 minutes after its start, prune leaves it alone.
+                $this->travel(24)->minutes();
+                $this->artisan('exports:prune')->assertSuccessful();
+                $this->assertSame(Export::RUNNING, $this->latest()->status);
+                $this->travel(2)->minutes();
+                $this->artisan('exports:prune')->assertSuccessful();
+            }
+        };
+        $this->work();
+
+        $e = $this->latest();
+        $this->assertSame([Export::FAILED, 'stale', null, null], [$e->status, $e->failure_code, $e->file_path, $e->sha256]);
+        $this->assertSame(1, AuditLog::where('event', 'export.failed')->count());
+        $this->assertSame(0, AuditLog::where('event', 'export.ready')->count());
+        $this->assertSame([], Storage::disk(Export::DISK)->allFiles());
+        Notification::assertSentToTimes($this->ak, ExportFailedNotification::class, 1);
+        Notification::assertNotSentTo($this->ak, ExportReadyNotification::class);
+
+        // The worker's failed() after the build (a timeout, the last attempt) changes nothing either.
+        (new RunExport($e->id))->failed(new TimeoutExceededException('timed out'));
+        $this->assertSame(['stale', 1], [$e->fresh()->failure_code, AuditLog::where('event', 'export.failed')->count()]);
+        Notification::assertSentToTimes($this->ak, ExportFailedNotification::class, 1);
+    }
+
+    public function test_m2_a_stale_queued_export_is_not_built_when_the_worker_reaches_it(): void
+    {
+        $this->requestEight()->assertStatus(202);
+        $this->travel(121)->minutes();
+        $this->artisan('exports:prune')->assertSuccessful();
+        $this->work();
+        $e = $this->latest();
+        $this->assertSame([Export::FAILED, 'stale', 0, null], [$e->status, $e->failure_code, $e->attempts, $e->started_at]);
+        $this->assertSame(['export.requested', 'export.failed'], AuditLog::where('event', 'like', 'export.%')->orderBy('id')->pluck('event')->all());
     }
 
     public function test_ac14_a_finished_export_is_not_built_again(): void
@@ -292,6 +339,18 @@ class JobTest extends ExportsTestCase
         $path = Storage::disk(Export::DISK)->path($e->file_path);
         $this->assertSame('0600', substr(sprintf('%o', fileperms($path)), -4));
         $this->assertSame([], $seen, 'nothing is written before the build');
+        // Reviewer m2: the .part file itself is 0600 from the start, whatever the process umask.
+        $part = sys_get_temp_dir().'/ag-mode-'.getmypid().'.xlsx.part';
+        $umask = umask(0022);
+        try {
+            $w = new XlsxStreamWriter($part);
+            $w->sheet('Probe', ['Probe'], [['Ref', 'text']], [['cells' => ['x'], 'bold' => false]]);
+            $w->close();
+            $this->assertSame('0600', substr(sprintf('%o', fileperms($part)), -4));
+        } finally {
+            umask($umask);
+            @unlink($part);
+        }
         $this->assertSame('private', config('filesystems.disks.exports.visibility'));
         $this->assertFalse(config('filesystems.disks.exports.serve'));
         $this->assertStringNotContainsString(public_path(), config('filesystems.disks.exports.root'));

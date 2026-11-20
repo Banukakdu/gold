@@ -288,7 +288,10 @@ email when it is ready or has failed. PDF is never queued (it keeps its 1,000-ro
 1. **Worker.** `php artisan queue:work exports --queue=exports --timeout=600 --memory=1024`, under the process manager,
    **one process**, next to the normal `queue:work` (so emails never wait behind an export). The `exports` queue
    connection (`config/queue.php`, database driver, `retry_after` 900) exists so that a running export is never started
-   a second time. Without this worker, queued exports fail as "did not run" after 2 hours. Locally,
+   a second time. Its jobs table is reached through `exports_queue`, a second connection to the same database (made
+   from the default one; `EXPORTS_QUEUE_DB_CONNECTION` names another), because the export's read snapshot holds the
+   default connection. Without this worker, queued exports fail as "did not run" after 2 hours (a running one after
+   25 minutes without progress: the job timeout plus `retry_after`). Locally,
    `EXPORTS_QUEUE_DRIVER=sync` in `api/.env` builds the file inside the request instead (like `QUEUE_CONNECTION=sync`).
 2. **Cron.** `exports:prune` runs hourly from the scheduler (`php artisan schedule:run` every minute, as for backups):
    files expire 24 h after they are ready, stale exports fail, orphan files go after 25 h. It is the only code that

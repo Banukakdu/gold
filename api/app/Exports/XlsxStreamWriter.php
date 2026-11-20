@@ -109,6 +109,23 @@ final class XlsxStreamWriter
             return;
         }
         $this->closed = true;
+        // AC 33 (reviewer m2): the file holds the books, so it is created 0600, never readable by others even for a
+        // moment (libzip writes a temporary file under the process umask and renames it over the target).
+        $umask = umask(0077);
+        try {
+            $ok = $this->write();
+        } finally {
+            umask($umask);
+        }
+        @chmod($this->path, 0600);
+        $this->cleanup();
+        if (! $ok) {
+            throw new RuntimeException('The export file could not be written.');
+        }
+    }
+
+    private function write(): bool
+    {
         $zip = new ZipArchive;
         if ($zip->open($this->path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
             throw new RuntimeException('The export file could not be created.');
@@ -140,11 +157,8 @@ final class XlsxStreamWriter
         foreach ($this->sheets as $i => $s) {
             $zip->addFile($s['file'], 'xl/worksheets/sheet'.($i + 1).'.xml');
         }
-        $ok = $zip->close();
-        $this->cleanup();
-        if (! $ok) {
-            throw new RuntimeException('The export file could not be written.');
-        }
+
+        return $zip->close();
     }
 
     /** Remove the temporary sheet files (also after a failure). */

@@ -204,7 +204,7 @@ class ReportExportTest extends ReportTestCase
         $q = $this->bulkLines(5001);
         $this->actingAs($this->acct)->withHeader('X-Branch-Id', (string) $this->kdy->id)
             ->getJson('/api/v1/reports/cash-book?'.http_build_query($q))->assertStatus(422)
-            ->assertJsonPath('message', 'This cash book has 5,001 lines; the limit is 5,000. Narrow the date range, branches or accounts.');
+            ->assertJsonPath('message', 'This cash book has 5,001 lines, too many to show on screen (the limit is 5,000). Narrow the date range, branches or accounts, or export it to Excel.');
     }
 
     /** QA bug 2: cash book Type column shows labels; day totals are formatted. QA bug 4: em dash drawn with DejaVu Sans. */

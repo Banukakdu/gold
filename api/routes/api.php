@@ -46,6 +46,13 @@ Route::prefix('v1')->group(function () {
             Route::get('backups', [BackupController::class, 'index']);
         });
 
+        // AG-087 background exports (docs/specs/background-exports.md section 5): the requester's own only (404
+        // otherwise). Outside `branch` (reviewer m1): they never use the active branch, and download re-checks access
+        // against the export's stored branch context, so a user who lost that branch still reaches the audited 403.
+        Route::get('exports', [ExportController::class, 'index']);
+        Route::get('exports/{exportId}', [ExportController::class, 'show']);
+        Route::get('exports/{exportId}/download', [ExportController::class, 'download']);
+
         // Everything below runs in the context of the branch in X-Branch-Id
         Route::middleware('branch')->group(function () {
             Route::get('dashboard', DashboardController::class)->middleware('perm:report.dashboard');
@@ -58,12 +65,6 @@ Route::prefix('v1')->group(function () {
             Route::get('reports/cash-flow', [ReportController::class, 'cashFlow'])->middleware('perm:report.view'); // AG-086
             Route::get('reports/trial-balance', [ReportController::class, 'trialBalance'])->middleware('perm:report.view');
             Route::post('reports/{name}/export', [ReportController::class, 'export'])->middleware('perm:report.view,report.export');
-
-            // AG-087 background exports (docs/specs/background-exports.md section 5): the requester's own only (404
-            // otherwise); signed in is enough, download re-checks access against the export's stored branch context.
-            Route::get('exports', [ExportController::class, 'index']);
-            Route::get('exports/{exportId}', [ExportController::class, 'show']);
-            Route::get('exports/{exportId}/download', [ExportController::class, 'download']);
 
             Route::get('branches', [BranchController::class, 'index']);
             Route::post('branches', [BranchController::class, 'store'])->middleware('super');

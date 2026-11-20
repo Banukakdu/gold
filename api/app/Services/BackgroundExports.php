@@ -137,12 +137,15 @@ class BackgroundExports
 
     public function run(RunExport $job): void
     {
-        $export = Export::find($job->exportId);
-        // R9: idempotent. A finished export (ready, failed, expired) is never built again.
-        if (! $export || ! in_array($export->status, Export::ACTIVE, true)) {
+        // R9: idempotent. A finished export (ready, failed, expired) is never built again. The move to running is
+        // conditional (reviewer M2): prune may have failed the row as stale since the worker picked the job up.
+        // started_at is this attempt's start, which prune uses to judge a running row (see staleRunningMinutes).
+        $claimed = Export::whereKey($job->exportId)->whereIn('status', Export::ACTIVE)
+            ->update(['status' => Export::RUNNING, 'started_at' => now(), 'attempts' => DB::raw('attempts + 1'), 'updated_at' => now()]);
+        $export = $claimed ? Export::find($job->exportId) : null;
+        if (! $export) {
             return;
         }
-        $export->update(['status' => Export::RUNNING, 'started_at' => $export->started_at ?? now(), 'attempts' => $export->attempts + 1]);
         $disk = Storage::disk(Export::DISK);
         $ctx = app(BranchContext::class);
         $previous = [$ctx->branchId, $ctx->allBranches, getPermissionsTeamId()];
@@ -191,11 +194,20 @@ class BackgroundExports
             $sha = hash_file('sha256', $disk->path($final));
 
             $ready = now();
-            $export->update([
+            // Reviewer M2: only a row this job still owns becomes ready. If prune (or a timeout) failed it meanwhile,
+            // that outcome stands: the file goes, and no export.ready, event or email follows the failure.
+            $owned = Export::whereKey($export->id)->where('status', Export::RUNNING)->update([
                 'status' => Export::READY, 'rows' => $counts['rows'], 'data_as_at' => $at, 'ready_at' => $ready,
                 'expires_at' => $ready->copy()->addHours((int) config('exports.ttl_hours', 24)), 'file_path' => $final,
-                'size_bytes' => $size, 'sha256' => $sha, 'error' => null, 'failure_code' => null,
+                'size_bytes' => $size, 'sha256' => $sha, 'error' => null, 'failure_code' => null, 'updated_at' => $ready,
             ]);
+            if (! $owned) {
+                $disk->delete($final);
+                Log::warning("Export {$export->id} finished after it was marked {$export->fresh()?->status}; the file was discarded.");
+
+                return;
+            }
+            $export->refresh();
             $this->systemAudit('export.ready', $export, $this->auditValues($export, ['size_bytes' => $size, 'sha256' => $sha, 'data_as_at' => self::iso($export->data_as_at)]));
             ExportFinished::dispatch($export);
         } catch (ExportFailure $f) {
@@ -209,8 +221,10 @@ class BackgroundExports
             $this->fail($export, 'access_revoked', ExportFailure::accessRevoked()->getMessage());
             $job->fail($h);
         } catch (Throwable $t) {
-            // Unexpected (deadlock, lost connection): retried once by the worker; failed() records the end.
+            // Unexpected (deadlock, lost connection): retried once by the worker; failed() records the end. Back to
+            // queued while the retry waits, so prune judges it by requested_at and not as a running attempt.
             $this->deletePart($export);
+            Export::whereKey($export->id)->where('status', Export::RUNNING)->update(['status' => Export::QUEUED, 'updated_at' => now()]);
             throw $t;
         } finally {
             $writer?->cleanup();
@@ -243,14 +257,19 @@ class BackgroundExports
      * failure found at download (damaged / missing): that event is the user's request, and no "could not be
      * prepared" email follows it.
      */
-    public function fail(Export $export, string $code, string $message, bool $bySystem = true, ?array $old = null, array $extra = []): void
+    public function fail(Export $export, string $code, string $message, bool $bySystem = true, ?array $old = null, array $extra = []): bool
     {
+        // Reviewer M2: one conditional UPDATE decides. A system failure ends a queued or running export; a failure
+        // found at download ends a ready one. Whoever loses the race (prune, the job, failed(), a second download)
+        // writes nothing: no second audit row, event or email.
+        $from = $bySystem ? Export::ACTIVE : [Export::READY];
+        $won = Export::whereKey($export->id)->whereIn('status', $from)
+            ->update(['status' => Export::FAILED, 'failure_code' => $code, 'error' => $message, 'updated_at' => now()]);
         $export->refresh();
-        if ($export->status === Export::FAILED) {
-            return;
+        if (! $won) {
+            return false;
         }
         $this->deletePart($export);
-        $export->update(['status' => Export::FAILED, 'failure_code' => $code, 'error' => $message]);
         $values = $this->auditValues($export, ['failure_code' => $code, 'attempts' => $export->attempts] + $extra);
         if ($bySystem) {
             $this->systemAudit('export.failed', $export, $values, $old);
@@ -258,6 +277,8 @@ class BackgroundExports
         } else {
             AuditLog::record('export.failed', null, $old, $values, $export->auditBranchId());
         }
+
+        return true;
     }
 
     /**
@@ -320,6 +341,74 @@ class BackgroundExports
 
     public function download(Request $request, Export $export): Response
     {
+        if ($refused = $this->notDownloadable($export)) {
+            return $refused;
+        }
+        if ($reason = $this->accessProblem($export, $request->user())) {
+            // Finding 8: the one event that shows a removed user trying to get data out.
+            AuditLog::record('export.download_denied', null, null, $this->auditValues($export, ['reason' => $reason]), $export->auditBranchId());
+
+            return response()->json(['message' => self::NO_ACCESS], 403);
+        }
+
+        // Reviewer m5: the file is opened once and streamed from that handle, so prune deleting it after this point
+        // cannot break the download; deleted before, the row says why (expired: 410, as above).
+        $disk = Storage::disk(Export::DISK);
+        $path = (string) $export->file_path;
+        $handle = $path !== '' && is_file($disk->path($path)) ? @fopen($disk->path($path), 'rb') : false;
+        if ($handle === false) {
+            if ($refused = $this->notDownloadable($export->refresh())) {
+                return $refused;
+            }
+            Log::error("Export {$export->id}: file missing from storage.", ['path' => $path]);
+            $this->fail($export, 'missing', self::MISSING, bySystem: false);
+
+            return response()->json(['message' => self::MISSING], 410);
+        }
+        $hash = hash_init('sha256');
+        hash_update_stream($hash, $handle);
+        $actual = hash_final($hash);
+        if (! hash_equals((string) $export->sha256, $actual)) {
+            fclose($handle);
+            report(new RuntimeException("Export {$export->id}: sha256 mismatch."));
+            $this->fail($export, 'damaged', self::DAMAGED, bySystem: false, old: ['sha256' => $export->sha256], extra: ['actual_sha256' => $actual]);
+
+            return response()->json(['message' => self::DAMAGED], 500);
+        }
+
+        // Reviewer m3 / m5: one atomic increment, and only while the row is still ready and unexpired.
+        $counted = Export::whereKey($export->id)->where('status', Export::READY)->where('expires_at', '>', now())
+            ->update(['download_count' => DB::raw('download_count + 1'), 'downloaded_at' => now(), 'updated_at' => now()]);
+        $export->refresh();
+        if (! $counted) {
+            fclose($handle);
+
+            return $this->notDownloadable($export) ?? response()->json(['message' => self::NOT_READY], 409);
+        }
+        // Finding 3: the download's own IP and user agent (the current request).
+        AuditLog::record('export.downloaded', null, null, $this->auditValues($export, [
+            'download_count' => $export->download_count, 'sha256' => $export->sha256, 'data_as_at' => self::iso($export->data_as_at),
+        ]), $export->auditBranchId());
+
+        $file = $this->fileName($export);
+        rewind($handle);
+
+        return response()->stream(function () use ($handle) {
+            fpassthru($handle);
+            fclose($handle);
+        }, 200, [
+            'Content-Type' => self::XLSX,
+            'Content-Disposition' => 'attachment; filename="'.$file.'"',
+            'Content-Length' => (string) $export->size_bytes,
+            // Finding 4: no browser or proxy keeps a copy outside the 24 h control.
+            'Cache-Control' => 'no-store, private',
+            'X-Content-Type-Options' => 'nosniff',
+        ]);
+    }
+
+    /** The 409 / 410 answers for a row that has no file to give (queued, running, failed, expired). */
+    private function notDownloadable(Export $export): ?JsonResponse
+    {
         if (in_array($export->status, Export::ACTIVE, true)) {
             return response()->json(['message' => self::NOT_READY], 409);
         }
@@ -332,45 +421,8 @@ class BackgroundExports
 
             return response()->json(['message' => "This export expired on {$when}. Run it again."], 410);
         }
-        if ($reason = $this->accessProblem($export, $request->user())) {
-            // Finding 8: the one event that shows a removed user trying to get data out.
-            AuditLog::record('export.download_denied', null, null, $this->auditValues($export, ['reason' => $reason]), $export->auditBranchId());
 
-            return response()->json(['message' => self::NO_ACCESS], 403);
-        }
-
-        $disk = Storage::disk(Export::DISK);
-        $path = (string) $export->file_path;
-        if ($path === '' || ! $disk->exists($path)) {
-            Log::error("Export {$export->id}: file missing from storage.", ['path' => $path]);
-            $this->fail($export, 'missing', self::MISSING, bySystem: false);
-
-            return response()->json(['message' => self::MISSING], 410);
-        }
-        $actual = hash_file('sha256', $disk->path($path));
-        if (! hash_equals((string) $export->sha256, (string) $actual)) {
-            report(new RuntimeException("Export {$export->id}: sha256 mismatch."));
-            $this->fail($export, 'damaged', self::DAMAGED, bySystem: false, old: ['sha256' => $export->sha256], extra: ['actual_sha256' => $actual]);
-
-            return response()->json(['message' => self::DAMAGED], 500);
-        }
-
-        $export->update(['download_count' => $export->download_count + 1, 'downloaded_at' => now()]);
-        // Finding 3: the download's own IP and user agent (the current request).
-        AuditLog::record('export.downloaded', null, null, $this->auditValues($export, [
-            'download_count' => $export->download_count, 'sha256' => $export->sha256, 'data_as_at' => self::iso($export->data_as_at),
-        ]), $export->auditBranchId());
-
-        $file = $this->fileName($export);
-
-        return $disk->download($path, $file, [
-            'Content-Type' => self::XLSX,
-            'Content-Disposition' => 'attachment; filename="'.$file.'"',
-            'Content-Length' => (string) $export->size_bytes,
-            // Finding 4: no browser or proxy keeps a copy outside the 24 h control.
-            'Cache-Control' => 'no-store, private',
-            'X-Content-Type-Options' => 'nosniff',
-        ]);
+        return null;
     }
 
     public function fileName(Export $export): string
@@ -393,22 +445,31 @@ class BackgroundExports
         // 1. Ready past expiry: the file goes, the row stays.
         Export::where('status', Export::READY)->where('expires_at', '<=', now())->orderBy('requested_at')->get()
             ->each(function (Export $e) use ($disk, &$out) {
+                // Conditional, like every status change (reviewer M2): a row a download just failed is left alone.
+                if (! Export::whereKey($e->id)->where('status', Export::READY)->update(['status' => Export::EXPIRED, 'file_path' => null, 'updated_at' => now()])) {
+                    return;
+                }
                 if ($e->file_path && $disk->exists($e->file_path)) {
                     $disk->delete($e->file_path);
                 }
-                $e->update(['status' => Export::EXPIRED, 'file_path' => null]);
+                $e->refresh();
                 AuditLog::record('export.expired', null, null,
                     $this->auditValues($e, ['by_system' => true, 'requested_by' => $e->user_id]), $e->auditBranchId(),
                     ['user_id' => null, 'ip' => null, 'user_agent' => 'console']);
                 $out['expired']++;
             });
 
-        // 2. Queued or running for too long: a stopped worker.
-        Export::whereIn('status', Export::ACTIVE)->where('requested_at', '<=', now()->subMinutes((int) config('exports.stale_minutes', 120)))
+        // 2. A stopped worker. Queued: judged by requested_at (stale_minutes). Running: judged by the start of the
+        // current attempt (reviewer M2), because a live attempt ends within the job timeout and a killed one is picked
+        // up again within retry_after; a long wait in the queue never fails an attempt that is still building.
+        Export::where(fn ($q) => $q
+            ->where(fn ($q) => $q->where('status', Export::QUEUED)->where('requested_at', '<=', now()->subMinutes((int) config('exports.stale_minutes', 120))))
+            ->orWhere(fn ($q) => $q->where('status', Export::RUNNING)->where('started_at', '<=', now()->subMinutes(self::staleRunningMinutes()))))
             ->orderBy('requested_at')->get()
             ->each(function (Export $e) use (&$out) {
-                $this->fail($e, 'stale', self::STALE);
-                $out['stale']++;
+                if ($this->fail($e, 'stale', self::STALE)) {
+                    $out['stale']++;
+                }
             });
 
         // 3. Files without a ready row, older than 25 h (a killed worker's .part or temporary files). No audit; logged.
@@ -425,10 +486,17 @@ class BackgroundExports
         return $out;
     }
 
+    /** A running attempt older than this has no live worker: the job timeout plus the queue's retry_after (25 min). */
+    public static function staleRunningMinutes(): int
+    {
+        return (int) ceil(((new RunExport(''))->timeout + (int) config('queue.connections.exports.retry_after', 900)) / 60);
+    }
+
     // ------------------------------------------------------------------ presentation
 
     /** Section 5 "Export resource": no file path, user id or params internals. */
-    public function present(Export $e): array
+    /** @param  array<int, Branch>|null  $branches  preloaded by id (the list loads them once per page, reviewer m8) */
+    public function present(Export $e, ?array $branches = null): array
     {
         return [
             'id' => $e->id,
@@ -436,7 +504,7 @@ class BackgroundExports
             'name' => $e->name,
             'title' => self::title($e),
             'format' => $e->format,
-            'branches_label' => self::branchesLabel($e),
+            'branches_label' => self::branchesLabel($e, $branches),
             'period_label' => self::periodLabel($e),
             'rows' => $e->rows,
             'status' => $e->displayStatus(),
@@ -457,14 +525,23 @@ class BackgroundExports
     }
 
     /** "All branches" (All mode without a branch filter), else the codes in scope. */
-    public static function branchesLabel(Export $e): string
+    public static function branchesLabel(Export $e, ?array $branches = null): string
     {
         if ($e->branch_id === null && empty(((array) $e->params)['branches'] ?? null)) {
             return 'All branches';
         }
+        $ids = array_map('intval', (array) $e->branch_ids);
+        $found = $branches === null ? Branch::whereIn('id', $ids)->get() : collect($ids)->map(fn ($id) => $branches[$id] ?? null)->filter();
 
-        return Branch::whereIn('id', (array) $e->branch_ids)->get()->sortBy(fn (Branch $b) => [$b->is_main ? 0 : 1, $b->code])
-            ->pluck('code')->implode(', ');
+        return $found->sortBy(fn (Branch $b) => [$b->is_main ? 0 : 1, $b->code])->pluck('code')->implode(', ');
+    }
+
+    /** @return array<int, Branch> the branches of these exports, by id (one query) */
+    public static function branchesOf(iterable $exports): array
+    {
+        $ids = collect($exports)->flatMap(fn (Export $e) => (array) $e->branch_ids)->map(fn ($id) => (int) $id)->unique()->values();
+
+        return Branch::whereIn('id', $ids)->get()->keyBy('id')->all();
     }
 
     public static function periodLabel(Export $e): string
