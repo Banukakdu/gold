@@ -265,3 +265,65 @@ Reviewed against `docs/specs/controls.md` (void = contra on the original date, c
 12. **SHOULD - Dishonoured cheque AC.** Add AC 40: a deposited cheque ticked, then returned by the bank, is corrected by reversal; the reversal line is ticked on the return date and the pair nets to 0.00 in the reconciled balance.
 
 Fine as specified: posts nothing and never writes `current_balance` (CLAUDE.md), R5's check lives in `LedgerService::void` after the account lock and the marks endpoint locks the same account row, so a tick and a void cannot race; integer cents via `App\Support\Money`; no hard delete (untick and undo keep rows); audit rows for every save, completion and undo with old/new values; branch isolation per R9 (each branch reconciles its own side of a branch transfer, nothing crosses into consolidation); `whereDate` filters; latest-only undo with reason; permission catalogue and "no grant without holding" respected; void contras on the original date net to zero in the book balance (controls R1); year-end close posts no money lines.
+
+## Accountant sign-off
+Checked the finished build (`feature/expense-approvals...feature/bank-reconciliation` at `971612a`) against the Accounting review above, the QA report and the code review, after the developer's fixes. Run: `php artisan test` 851 passed, 2 skipped; `pint --test` passed; `npx ng build` succeeds. I also exported the statement PDF and Excel myself (a throwaway test outside the repo, nothing committed) for four cases: S1 as completed; S1 after a late 1,000.00 cheque dated 25 Oct; S1 reprinted after S2; and S2 undone with a 390-character reason. I checked the figures by hand: 469,500.00 - 15,000.00 + 25,000.00 = 479,500.00; after the late entry 468,500.00 - 15,000.00 + 26,000.00 = 479,500.00, Difference 0.00; S2 468,500.00 + 1,000.00 = 469,500.00.
+
+**Verdict: SIGNED OFF.** No code changes are required before the pull request.
+
+| # | Finding | Result | Evidence |
+|---|---|---|---|
+| 1 | MUST: cleared before booked in the identity | DONE | `BankReconciliation::figures` (expected = book - receipts + payments + cleared later), stored `cleared_booked_later_cents`, V10 in `LedgerChecks`; `VoidReverseLateTest::test_ac35_cleared_before_booked`; QA AC 35 |
+| 2 | MUST: AC 25, a late entry leaves the expected bank balance unchanged | DONE | `test_ac25_late_entry_after_completion`; my S1 late reprint: 468,500.00 / 15,000.00 / 26,000.00 = 479,500.00, Difference 0.00, the late entry listed |
+| 3 | MUST: sign convention, Overdrawn echo | DONE | `ReportExporter::statementBalanceText`; `test_ac36_overdrawn_balance_is_stored_signed`, `test_ac36_overdrawn_on_the_pdf`; S1 field hint (QA) |
+| 4 | MUST: preparer and self-reconciled count above the Checked by / Approved by lines | DONE | `bank-reconciliation.blade.php` ("Prepared by … on …", "2 of 4 lines were recorded by the preparer", blank Checked by / Approved by); `test_ac38_preparer_and_self_count`, `test_statement_reprint_and_signature_block` |
+| 5 | MUST: an undone statement is superseded on every page | DONE | Page header uses `undoneBanner($st, BANNER_REASON_PDF)`, which shortens only the reason, so "This statement is superseded." is always printed. The full banner is in the body and in Excel. `test_ac37_long_undo_reason_keeps_the_superseded_sentence_on_every_page`; confirmed on my 390-character export |
+| 6 | MUST: a frozen mark cannot be re-dated | DONE | `MarksTest::test_ac39_a_frozen_mark_cannot_be_redated` |
+| 7 | SHOULD: first-reconciliation hint | DONE | `reconcile.component.ts:91`; `test_r12_closed_bank_account_and_first_reconciliation_from_zero` |
+| 8 | SHOULD: stale cheque tag | DONE | `STALE_DAYS` 180 on payments only; `test_ac41_stale_cheque` (screen, PDF, Excel) |
+| 9 | SHOULD: "Cleared before booked" tag | DONE | `reconcile.component.ts:156,179`, report screen, PDF/Excel reconciling line |
+| 10 | SHOULD: late-entry warning at posting time | PARTLY | Shown on the income/expense form and the transfer form (`core/reconciliation.ts`, `test_should10_account_list_carries_the_last_reconciled_date`). Not shown on the allocation / top-up / fund-return form (Super Admin) or the reversal dialog. Not blocking: such an entry is still caught afterwards as a late entry and "Changed since completion" (R8). Follow-up |
+| 11 | SHOULD: bank statement attachment | Follow-up story, as agreed. Until then the printed statement is filed with the bank statement |
+| 12 | SHOULD: dishonoured cheque | DONE | `test_ac40_dishonoured_cheque_pair_nets_to_zero` |
+
+**Post-review fixes, checked.**
+- The Older than disclosure is in the screen, PDF and Excel headers, with its own empty text. Older than is ignored with `statement_id`, so a signed statement always lists every uncleared line and its rows add up to its totals (`test_ac29_older_than_is_disclosed_and_has_its_own_empty_text`, `test_older_than_is_ignored_with_statement_id`).
+- Late entries are found by `max_entry_id`, so the one-second boundary is gone (`test_late_entry_in_the_same_second_as_completion`). The S1 banner leaves voids out, and the reprint lists them as "Voided by".
+- The "Ticked, not shown" tile makes the S1 tiles add up to the Reconciled balance (`test_cleared_not_listed_makes_the_tiles_add_up`).
+- The 2,000-line and 2,000-row caps show warnings and never change the totals.
+- Excel puts the account line above the table and stores Age as a number.
+
+**Role templates as delivered.**
+- Fresh install: Branch Admin and Accountant have `account.reconcile`; Cashier and Viewer do not.
+- Upgrade: the `*` templates and the full Branch Admin copies get the key, with a `role.updated` audit row each. A copy the Super Admin narrowed, the Accountant template and branch Accountant roles are left alone (`MigrationTest::test_ac1_existing_install_gets_the_key_on_star_templates_and_full_branch_copies`).
+- This matches Q6 as revised. Segregation stays acceptable: the Cashier records but cannot reconcile, Complete needs a zero difference against the bank's closing balance, and the self-count plus the independent Checked by signature is the compensating control.
+
+**The printed statement as a signable document.** It is correct and a reviewer can sign it. It shows:
+- company, title "Bank reconciliation statement", branch and As at = the statement date, and who printed it and when;
+- each uncleared item with date, ref, cheque or slip number and age;
+- the book balance, then less uncleared receipts and add uncleared payments, then any items cleared before they were booked (listed one by one), giving the expected bank balance;
+- the balance per bank statement (with "Overdrawn" when negative) and the Difference;
+- "Changed since completion" and the late entries, which explain any change from a copy signed earlier;
+- the preparer, the self-reconciled count, and blank Checked by / Approved by lines;
+- for an undone statement, the superseded banner on every page.
+
+Non-blocking polish for a later story:
+- (a) On a statement reprint the account line reads "last reconciled to <this statement's own date>". It should say "Previous statement: <date>, <balance>" (or "none").
+- (b) When the statement has changed since completion, print the figures as completed next to the figures now, so the reviewer does not have to work out the difference from the late entries.
+- (c) A reason that ends with a full stop prints ".." before "This statement is superseded."
+- (d) "Prepared by … on" uses `Y-m-d H:i`, while the rest of the document uses the date-format setting.
+
+**Outstanding (follow-ups, not blocking).**
+- SHOULD 10 on the allocation / top-up / fund-return form and the reversal dialog.
+- Finding 11: attach the bank statement copy to a `bank_statements` row.
+- Polish items (a) to (d) above.
+- Wallet (mobile money) reconciliation (Q1).
+
+**Release-note items.**
+1. "Bank reconciliation (AG-033): Branch Admin roles that hold every permission received 'account.reconcile' automatically (see the audit log, Roles). Grant 'account.reconcile' to the Accountant template and to each branch's Accountant role on the Roles screen; any other role that should reconcile needs it too." A Branch Admin whose role was narrowed must be granted it by the Super Admin, because nobody can grant a key they do not hold.
+2. Month-end order (project doc 7.5.1): reconcile each bank account, print the bank reconciliation statement, have it checked against the bank statement and signed (Checked by / Approved by), file it with the bank statement, then lock the month. Locking stops late entries.
+3. A ticked entry cannot be voided. If the bank processed it, correct it with a reversal dated in an open month (a dishonoured cheque is reversed and the reversal ticked on the return date). If the tick was a mistake, untick it first.
+4. First reconciliation after go-live: choose a statement date after all cheques and deposits outstanding at go-live have cleared, and tick the opening balance line.
+5. Cheques uncleared for more than 6 months are tagged "Stale cheque". Follow them up and write them back with an income entry (for example "Stale cheques written back") after review.
+6. Entering the statement balance: a balance in your favour (CR) is positive; an overdrawn balance (DR / OD) is entered with a minus sign.
+7. An undone statement prints "UNDONE … This statement is superseded." on every page. Any signed paper copy of it must be marked superseded and replaced by the new statement.
