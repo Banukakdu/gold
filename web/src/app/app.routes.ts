@@ -5,6 +5,8 @@ import { ShellComponent } from './layout/shell.component';
 export const routes: Routes = [
   { path: 'login', loadComponent: () => import('./features/auth/login.component').then(m => m.LoginComponent) },
   { path: 'set-password', loadComponent: () => import('./features/auth/set-password.component').then(m => m.SetPasswordComponent) },
+  { path: 'forgot-password', loadComponent: () => import('./features/auth/forgot-password.component').then(m => m.ForgotPasswordComponent) },
+  { path: 'reset-password', loadComponent: () => import('./features/auth/reset-password.component').then(m => m.ResetPasswordComponent) },
   {
     path: '',
     component: ShellComponent,

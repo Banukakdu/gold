@@ -31,7 +31,15 @@ class AuditLog extends Model
         return $this->belongsTo(Branch::class);
     }
 
-    public static function record(string $event, ?Model $model = null, ?array $old = null, ?array $new = null, ?int $branchId = null): self
+    /**
+     * $client overrides the current request's ip / user_agent (each key that is present, null included): a queued job
+     * runs in the worker, so it passes the requester's values captured in the request (password reset spec R12,
+     * accounting review finding 3); the console passes ['ip' => null, 'user_agent' => 'console'] (reviewer N6).
+     *
+     * @param  array{ip?: ?string, user_agent?: ?string}|null  $client
+     */
+    public static function record(string $event, ?Model $model = null, ?array $old = null, ?array $new = null, ?int $branchId = null,
+        ?array $client = null): self
     {
         $req = request();
 
@@ -43,8 +51,8 @@ class AuditLog extends Model
             'auditable_id' => $model?->getKey(),
             'old_values' => $old,
             'new_values' => $new,
-            'ip' => $req?->ip(),
-            'user_agent' => substr((string) $req?->userAgent(), 0, 255),
+            'ip' => $client !== null && array_key_exists('ip', $client) ? $client['ip'] : $req?->ip(),
+            'user_agent' => substr((string) ($client !== null && array_key_exists('user_agent', $client) ? $client['user_agent'] : $req?->userAgent()), 0, 255),
         ]);
     }
 }

@@ -45,6 +45,21 @@ class User extends Authenticatable
         return $this->allRolesInTeam()->where('roles.status', 'active');
     }
 
+    /**
+     * Sign-in lookup (reviewer R3). MySQL's accent-insensitive collation would match "ú@x.com" to "u@x.com", so a
+     * typed variant could reach an account while the rate limits (keyed on the typed text) count it separately.
+     * The row must equal the typed email byte for byte (emails are stored lower-case, B11); anything else is
+     * treated as an unknown email. The same rule on SQLite and MySQL, for login, reset, set-password and the console.
+     */
+    public static function findByEmail(string $email): ?self
+    {
+        $email = mb_strtolower(trim($email));
+        // lower(?) on both sides mirrors how the column collation compares (and lets the SQLite tests fold accents).
+        $user = static::whereRaw('lower(email) = lower(?)', [$email])->first();
+
+        return $user && hash_equals(mb_strtolower((string) $user->email), $email) ? $user : null;
+    }
+
     public function branches(): BelongsToMany
     {
         return $this->belongsToMany(Branch::class)->withPivot('is_default')->withTimestamps();

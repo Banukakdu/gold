@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
 use App\Models\Role;
 use App\Models\User;
+use App\Notifications\EmailChangedNotification;
 use App\Notifications\InvitationNotification;
 use App\Services\AccessAlerts;
 use App\Support\BranchAdmins;
@@ -13,8 +14,10 @@ use App\Support\BranchContext;
 use App\Support\Memberships;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rules\Password as PasswordRule;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -66,7 +69,8 @@ class UserController extends Controller
             'name' => 'required|string|max:255',
             'email' => 'required|email|max:255',
             'phone' => 'nullable|string|max:30',
-            'password' => ['sometimes', 'string', 'min:8', 'regex:/[A-Za-z]/', 'regex:/[0-9]/', function ($attr, $value, $fail) {
+            // Password reset spec R10: the shared policy (local/testing only).
+            'password' => ['sometimes', 'string', PasswordRule::defaults(), function ($attr, $value, $fail) {
                 // Accounting review finding 2: nobody sets another person's password outside local/testing.
                 if (! app()->environment(['local', 'testing'])) {
                     $fail('Passwords are set by the user through the invitation.');
@@ -215,11 +219,17 @@ class UserController extends Controller
         }
 
         $old = $user->only(array_keys($data));
-        DB::transaction(function () use ($user, $data, $deactivating, $old, $branchId) {
+        $emailChanged = isset($data['email']) && $data['email'] !== $user->email;
+        DB::transaction(function () use ($user, $data, $deactivating, $old, $branchId, $emailChanged) {
             if ($deactivating) {
                 foreach (BranchAdmins::branchesOf($user) as $b) {
                     BranchAdmins::assertNotLast($b, [$user->id]);
                 }
+            }
+            if ($emailChanged || $deactivating) {
+                // Password reset spec E4: a pending reset or invitation link for the old email (or of a deactivated
+                // user) can never be used. Runs before the update, while the user still has the old email.
+                Password::broker()->getRepository()->delete($user);
             }
             $user->update($data);
             if ($deactivating) {
@@ -232,6 +242,14 @@ class UserController extends Controller
         $changed = array_filter($sensitive, fn ($v, $k) => ($old[$k] ?? null) !== $v, ARRAY_FILTER_USE_BOTH);
         if ($changed) {
             AccessAlerts::notify('user.updated', $branchId, "{$user->name} <{$user->email}>", array_intersect_key($old, $changed), $changed);
+        }
+        if ($emailChanged) {
+            // Accounting review finding 5: the owner of the old mailbox learns about the change, whoever made it.
+            try {
+                Notification::route('mail', $old['email'])->notify(new EmailChangedNotification($user->email, $me->name));
+            } catch (\Throwable $e) {
+                report($e);
+            }
         }
 
         return $user->fresh();

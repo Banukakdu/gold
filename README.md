@@ -21,7 +21,7 @@ composer install
 cp .env.example .env && php artisan key:generate
 php artisan migrate --seed                # Main branch, Main Account, permissions, role templates, categories, Super Admin
 php artisan serve                         # http://localhost:8000
-php artisan queue:work                    # sends invitation emails and access alerts (or set QUEUE_CONNECTION=sync)
+php artisan queue:work                    # sends invitation, password reset and alert emails (or set QUEUE_CONNECTION=sync)
 
 cd ../web
 npm install
@@ -29,8 +29,14 @@ npx ng serve                              # http://localhost:4200 (proxies /api 
 ```
 
 Sign in with `admin@accountgold.local` / `ChangeMe123` (set `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `api/.env` before seeding).
+Replace that password with `php artisan auth:reset-password admin@accountgold.local` (see "Password reset" below).
 
-In production, run `php artisan queue:work` under a process manager (e.g. Supervisor); without it invitation emails are never sent.
+In production, run `php artisan queue:work` under a process manager (e.g. Supervisor); without it invitation and
+password reset emails are never sent.
+
+Locally, reset and invitation links are written to `api/storage/logs/laravel.log` with the default `MAIL_MAILER=log`
+(or see them in Mailpit on :8025 with `MAIL_MAILER=smtp`, `MAIL_PORT=1025`). Set `QUEUE_CONNECTION=sync` in `api/.env`
+if you do not run a queue worker.
 
 Tests: `cd api && php artisan test` (runs on in-memory SQLite).
 
@@ -134,6 +140,40 @@ neither do the existing reports. Take a database backup first: the back-fill can
   inserted another way (SQL, a seeder or tinker without model events), run `php artisan ledger:chart-sync`: it adds
   the missing accounts and codes, never changes existing ones, and writes one `ledger.chart_created` audit row.
 
+### Password reset (AG-002, docs/specs/password-reset.md)
+
+"Forgot password?" on the sign-in page emails a link that works for 60 minutes and once. A reset signs the user out on
+every device and emails them "Your password was changed".
+
+1. **`FRONTEND_URL`** in `api/.env` must be the public address of the web app (e.g. `https://gold.example.lk`). Reset
+   and invitation links are built only from it, never from the request's Host header. The queue worker must run with
+   the same `.env`.
+2. **Queue worker and mailer.** The reset request, the link email and the alerts are queued: run `php artisan
+   queue:work` under a process manager and configure a real mailer. Production must **not** use `MAIL_MAILER=log`,
+   because that writes the plain reset link to `laravel.log`. Queued payloads in `jobs` / `failed_jobs` hold the link
+   until it expires; never show `failed_jobs` in an admin screen.
+3. **Super Admin switch.** `AUTH_SUPER_ADMIN_EMAIL_RESET=false` (the default) means a Super Admin cannot reset by
+   email: the request gets the usual answer, but no link is sent, the refusal is audited and the other Super Admins
+   get an alert. Keep it off until 2FA (AG-005). A business with at least two active Super Admins may set it to
+   `true`; even then a Super Admin who is the only active one gets no link.
+4. **Recovery command.** Someone with server access runs
+   ```bash
+   php artisan auth:reset-password user@example.com
+   ```
+   It asks for the new password twice (hidden), applies the password policy (8+ characters, a letter and a number),
+   signs the user out everywhere, removes any pending reset or invitation link, clears login lockouts for the email,
+   writes an `auth.password_reset` audit row (`via: console`) and emails the user (and the Super Admins when the user
+   is a Super Admin or branch administrator). It is the way to recover a Super Admin while the switch is off, and the
+   way the seeded Super Admin replaces `ADMIN_PASSWORD`.
+5. **Referrer-Policy.** Serve the web app with `Referrer-Policy: no-referrer`, so a reset or invitation link in the
+   address bar is never sent to another site (nginx: `add_header Referrer-Policy "no-referrer" always;`, Apache:
+   `Header always set Referrer-Policy "no-referrer"`). `index.html` carries the same policy as a meta tag.
+6. Changing a user's email (Users screen) emails the **old** address and cancels any pending link for it.
+7. Login lockout: 5 failed attempts from one IP within 15 minutes lock that email on that IP for 15 minutes from the
+   5th failure. Attempts are counted before the password is checked, so parallel guesses cannot get past the limit.
+   Sign-in, reset and set-password match the email exactly as stored (lower-case); an accented variant such as
+   `ú@x.com`, which MySQL's collation would treat as `u@x.com`, is handled as an unknown email. Lockouts, logouts and every reset step are in the audit log (group "Logins", Super Admin only).
+
 ## How it works
 
 **Branch context.** The app sends the active branch in an `X-Branch-Id` header. Middleware checks the user belongs
@@ -164,7 +204,8 @@ Amounts are handled as integer cents (`app/Support/Money.php`), never floats.
 
 ## API (v1)
 
-All under `/api/v1`, bearer token from `POST auth/login`, plus `X-Branch-Id`.
+All under `/api/v1`, bearer token from `POST auth/login`, plus `X-Branch-Id`. Public: `POST auth/login` ·
+`POST auth/set-password` · `POST auth/forgot-password` · `POST auth/reset-password`.
 
 `GET me` · `GET dashboard` · `GET|POST branches` · `PUT branches/{id}` · `GET|POST accounts` · `PUT accounts/{id}` ·
 `GET accounts/{id}/statement?from&to` · `GET accounts/destinations` · `GET|POST categories` · `PUT categories/{id}` ·
@@ -178,7 +219,7 @@ All under `/api/v1`, bearer token from `POST auth/login`, plus `X-Branch-Id`.
 ## Status against the backlog (docs/Account-gold_Product_Backlog.xlsx)
 
 Done in this first cut (API + UI unless noted):
-AG-001 login + lockout, AG-003 branch switcher, AG-004 permission checks, AG-010/011/012 branches,
+AG-001 login + lockout, AG-002 password reset by email, AG-003 branch switcher, AG-004 permission checks, AG-010/011/012 branches,
 AG-020/021/022/023/024 users and custom roles (API; UI screens next), AG-030/031/032 accounts and statement,
 AG-040/041/043 opening balance, top-up, capital, AG-042 fund return, AG-050/053/054 transfers and reversal,
 AG-060/061/063/065 income, expense, void, list and filters, AG-070/072 categories (API; tree editor UI next),
@@ -187,4 +228,4 @@ AG-080/081 dashboards, AG-090 audit log (writing; viewer UI next), AG-092 settin
 AG-062 attachments on income and expense entries (private files, soft removal, `attachments:verify`).
 
 Next up: users and roles screens, category editor, reports AG-082 to AG-085 with PDF/Excel export,
-password reset (AG-002), audit log viewer, then the R2 approval workflow.
+audit log viewer, then the R2 approval workflow.
