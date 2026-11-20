@@ -1,5 +1,7 @@
 <?php
 
+use App\Models\AuditLog;
+use App\Models\Role;
 use Database\Seeders\PermissionSeeder;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
@@ -16,7 +18,10 @@ use Spatie\Permission\PermissionRegistrar;
  *  - settings row transfer_approval_threshold = null (never) where missing;
  *  - permission transfer.approve where missing, given to the "*" templates exactly as PermissionSeeder::run does for a
  *    key new to the catalogue, so an existing install works without a re-seed. On a fresh install the permission
- *    tables are still empty here and the seeder adds the key.
+ *    tables are still empty here and the seeder adds the key;
+ *  - (review M1) MAIN's branch roles that hold every other catalogue key (copies of a "*" template, e.g. MAIN's
+ *    "Branch Admin") get the key too, with a role.updated audit row each: the key only counts in MAIN (R3), and spec
+ *    section 2 says Branch Admin has it automatically. A copy the Super Admin narrowed is left as it is.
  * SQLite: native ADD COLUMN ... REFERENCES (the schema builder would rebuild transactions to add a foreign key).
  */
 return new class extends Migration
@@ -109,17 +114,48 @@ return new class extends Migration
         if (! Schema::hasTable('permissions') || ! DB::table('permissions')->exists()) {
             return; // fresh install: the seeder creates the catalogue
         }
-        if (DB::table('permissions')->where('name', self::PERMISSION)->where('guard_name', 'web')->exists()) {
+        $now = now();
+        $id = DB::table('permissions')->where('name', self::PERMISSION)->where('guard_name', 'web')->value('id');
+        if ($id === null) {
+            $id = DB::table('permissions')->insertGetId(['name' => self::PERMISSION, 'guard_name' => 'web', 'created_at' => $now, 'updated_at' => $now]);
+            $all = collect(PermissionSeeder::TEMPLATES)->filter(fn ($p) => $p === '*')->keys();
+            $roles = DB::table('roles')->whereNull('branch_id')->whereIn('name', $all)->pluck('id');
+            foreach ($roles as $roleId) {
+                DB::table('role_has_permissions')->insertOrIgnore(['permission_id' => $id, 'role_id' => $roleId]);
+            }
+        }
+        $this->grantMainCopies((int) $id);
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+    }
+
+    /** Review M1: MAIN roles holding every other catalogue key receive the new one (resumable: holders are skipped). */
+    private function grantMainCopies(int $permissionId): void
+    {
+        $main = DB::table('branches')->where('is_main', true)->value('id');
+        if ($main === null) {
             return;
         }
-        $now = now();
-        $id = DB::table('permissions')->insertGetId(['name' => self::PERMISSION, 'guard_name' => 'web', 'created_at' => $now, 'updated_at' => $now]);
-        $all = collect(PermissionSeeder::TEMPLATES)->filter(fn ($p) => $p === '*')->keys();
-        $roles = DB::table('roles')->whereNull('branch_id')->whereIn('name', $all)->pluck('id');
-        foreach ($roles as $roleId) {
-            DB::table('role_has_permissions')->insertOrIgnore(['permission_id' => $id, 'role_id' => $roleId]);
+        $others = array_values(array_diff(PermissionSeeder::PERMISSIONS, [self::PERMISSION]));
+        $otherIds = DB::table('permissions')->where('guard_name', 'web')->whereIn('name', $others)->pluck('id');
+        if ($otherIds->count() !== count($others)) {
+            return; // catalogue incomplete: leave roles to the Super Admin
         }
-        app(PermissionRegistrar::class)->forgetCachedPermissions();
+        $roles = DB::table('roles as r')->where('r.branch_id', $main)
+            ->whereNotExists(fn ($q) => $q->selectRaw('1')->from('role_has_permissions as h')->whereColumn('h.role_id', 'r.id')->where('h.permission_id', $permissionId))
+            ->whereRaw('(SELECT COUNT(*) FROM role_has_permissions h2 WHERE h2.role_id = r.id AND h2.permission_id IN ('.$otherIds->implode(',').')) = ?', [count($others)])
+            ->orderBy('r.id')->get(['r.id', 'r.name']);
+        foreach ($roles as $role) {
+            $old = DB::table('role_has_permissions as h')->join('permissions as p', 'p.id', '=', 'h.permission_id')
+                ->where('h.role_id', $role->id)->orderBy('p.name')->pluck('p.name')->all();
+            DB::table('role_has_permissions')->insertOrIgnore(['permission_id' => $permissionId, 'role_id' => $role->id]);
+            $new = $old;
+            $new[] = self::PERMISSION;
+            sort($new);
+            AuditLog::create(['user_id' => null, 'branch_id' => $main, 'event' => 'role.updated', 'auditable_type' => Role::class,
+                'auditable_id' => $role->id, 'old_values' => ['name' => $role->name, 'permissions' => $old],
+                'new_values' => ['name' => $role->name, 'permissions' => $new, 'source' => 'migration transfer_approvals (AG-051)'],
+                'ip' => null, 'user_agent' => 'console']);
+        }
     }
 
     private function removePermission(): void

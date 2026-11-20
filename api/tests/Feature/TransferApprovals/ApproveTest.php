@@ -69,7 +69,7 @@ class ApproveTest extends TransferApprovalTestCase
         $this->expense('2026-11-19', '60000.00');
         $this->assertSame('140000.00', $this->bal($this->kdyCash));
         $before = $this->state();
-        $this->approve($t->id)->assertStatus(422)->assertJsonPath('message', 'Insufficient balance in Cash (available 140000.00).');
+        $this->approve($t->id)->assertStatus(422)->assertJsonPath('message', 'Insufficient balance in KDY Cash (available 140,000.00).');
         $this->assertSame($before, $this->state());
         $this->assertSame('pending', $t->fresh()->approval_status);
         $this->assertSame(0, LedgerEntry::where('transaction_id', $t->id)->count());

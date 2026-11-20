@@ -104,6 +104,9 @@ class TransactionController extends Controller
         // AG-051 S5: the Approval panel's buttons.
         $transaction->setAttribute('can_approve', $approvals->canApprove($transaction, request()->user()));
         $transaction->setAttribute('can_cancel', $approvals->canCancel($transaction, request()->user()));
+        // QA B2: the approve dialog says "Requester is inactive" here too (S5 "buttons as S3").
+        $transaction->setAttribute('requester_inactive', $transaction->approval_status !== null && $transaction->creator !== null
+            && $transaction->creator->status !== 'active');
         $transaction->setAttribute('expires_on', $transaction->approval_status === TransferApprovals::PENDING
             ? TransferApprovals::expiresOn($transaction->requested_on?->format('Y-m-d')) : null);
         $transaction->loadCount(self::attachmentCounts());

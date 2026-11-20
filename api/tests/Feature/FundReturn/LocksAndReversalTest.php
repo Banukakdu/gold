@@ -98,7 +98,7 @@ class LocksAndReversalTest extends FundReturnTestCase
         $spend = Money::fromCents(Money::toCents($this->bal($this->mainAcc)) - 1_000_000);
         $this->expense('2026-11-18', $spend, $this->admin, $this->mainAcc);
         $before = $this->state();
-        $this->reverse($t['id'])->assertStatus(422)->assertJsonPath('message', "Insufficient balance in {$this->mainAcc->name} (available 10000.00).");
+        $this->reverse($t['id'])->assertStatus(422)->assertJsonPath('message', "Insufficient balance in MAIN {$this->mainAcc->name} (available 10,000.00).");
         $this->assertSame($before, $this->state());
         $this->assertSame('posted', $this->txn($t['id'])->status);
     }

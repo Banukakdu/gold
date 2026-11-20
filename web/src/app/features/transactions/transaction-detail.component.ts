@@ -53,6 +53,7 @@ interface Detail {
   expires_on?: string | null;
   can_approve?: boolean;
   can_cancel?: boolean;
+  requester_inactive?: boolean;
 }
 
 interface LedgerLine {
@@ -125,7 +126,7 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
         </div>
         @if (approvalMode(); as mode) {
           <ag-approval-dialog [mode]="mode" (cancelled)="approvalMode.set(null)" (done)="approvalDone($event, mode)" (refused)="reload()"
-            [target]="{ id: t.id, ref_no: t.ref_no, amount: t.amount, requested_date: t.requested_date ?? null,
+            [target]="{ id: t.id, ref_no: t.ref_no, amount: t.amount, requested_date: t.requested_date ?? null, requester_inactive: !!t.requester_inactive,
               from: (t.from_account?.branch?.code ?? '') + ' · ' + (t.from_account?.name ?? ''), to: (t.to_account?.branch?.code ?? '') + ' · ' + (t.to_account?.name ?? '') }" />
         }
       }

@@ -5,7 +5,7 @@ import { AppDatePipe } from '../../core/app-date.pipe';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
 import { errorText } from '../../core/api.interceptor';
-import { ApprovalDialogComponent, ApprovalTarget } from '../../core/approvals';
+import { ApprovalDialogComponent, ApprovalTarget, toCents } from '../../core/approvals';
 
 interface Side { branch_code: string | null; account: string | null; available?: string }
 interface Row {
@@ -34,25 +34,26 @@ interface Approvals {
           @if (warn()) { <div class="alert">{{ warn() }}</div> }
           @if (r.to_approve.data.length) {
             <div class="tr-scroll">
-              <table class="list">
-                <thead><tr><th>Requested on</th><th class="num">Age (days)</th><th>Ref</th><th>Type</th><th>From</th><th>To</th>
-                  <th class="num">Amount</th><th class="num">Available now</th><th class="num">Other pending</th><th>Below threshold (7 days)</th>
-                  <th>Requested by</th><th>Note</th><th></th></tr></thead>
+              <!-- QA B1: seven columns; the note sits under the ref, the account figures under Available now, and the
+                   actions column stays visible (sticky) when the table scrolls. -->
+              <table class="list ta-table">
+                <thead><tr><th>Requested on</th><th>Ref / note</th><th>From → To</th><th class="num">Amount</th>
+                  <th class="num">Available now</th><th>Requested by</th><th class="tr-actions"></th></tr></thead>
                 <tbody>
                   @for (t of r.to_approve.data; track t.id) {
                     <tr>
-                      <td>{{ t.requested_on | appDate }}</td>
-                      <td class="num">{{ t.age_days }}</td>
-                      <td class="mono"><a [routerLink]="['/transactions', t.id]">{{ t.ref_no }}</a></td>
-                      <td>{{ label(t.type) }}</td>
-                      <td>{{ t.from.branch_code }} · {{ t.from.account }}</td>
-                      <td>{{ t.to.branch_code }} · {{ t.to.account }}</td>
+                      <td>{{ t.requested_on | appDate }}<br /><small class="muted">{{ t.age_days }} day{{ t.age_days === 1 ? '' : 's' }}</small></td>
+                      <td class="ta-note"><a class="mono" [routerLink]="['/transactions', t.id]">{{ t.ref_no }}</a><br />
+                        <small class="muted">{{ label(t.type) }}</small>
+                        @if (t.note) { <br /><small>{{ t.note }}</small> }</td>
+                      <td>{{ t.from.branch_code }} · {{ t.from.account }}<br />→ {{ t.to.branch_code }} · {{ t.to.account }}</td>
                       <td class="num">{{ t.amount | money }}</td>
-                      <td class="num">{{ t.from.available | money }} @if (short(t)) { <span class="tag" data-s="reversed">Short</span> }</td>
-                      <td class="num">{{ t.other_pending_from_account | money }}</td>
-                      <td>@if (t.below_threshold_7d.count) { {{ t.below_threshold_7d.count }}, {{ t.below_threshold_7d.amount | money }} }</td>
+                      <td class="num">{{ t.from.available | money }} @if (short(t)) { <span class="tag" data-s="reversed">Short</span> }
+                        @if (cents(t.other_pending_from_account) > 0) { <br /><small class="muted">Other pending {{ t.other_pending_from_account | money }}</small> }
+                        @if (t.below_threshold_7d.count) {
+                          <br /><small class="muted" title="Posted below the threshold from this account in the last 7 days">Below threshold, 7 days: {{ t.below_threshold_7d.count }}, {{ t.below_threshold_7d.amount | money }}</small>
+                        }</td>
                       <td>{{ t.requested_by?.name }} @if (t.requester_inactive) { <span class="tag">Inactive</span> }</td>
-                      <td class="ts-wrap">{{ t.note }}</td>
                       <td class="tr-actions">
                         @if (t.requested_by_you) { <span class="muted">Requested by you</span> }
                         @else if (t.can_approve) {
@@ -129,7 +130,15 @@ export class TransferApprovalsComponent implements OnInit {
     });
   }
 
-  short(t: Row): boolean { return Number(t.from.available ?? 0) < Number(t.amount); }
+  /** Review m6: integer cents, no floats (negative balances count as below). */
+  short(t: Row): boolean { return this.cents(t.from.available) < this.cents(t.amount); }
+
+  cents(v: string | null | undefined): number {
+    const s = String(v ?? '0').trim();
+    const neg = s.startsWith('-');
+    const c = toCents(neg ? s.slice(1) : s) ?? 0;
+    return neg ? -c : c;
+  }
 
   open(t: Row, mode: 'approve' | 'reject') {
     this.ok.set('');

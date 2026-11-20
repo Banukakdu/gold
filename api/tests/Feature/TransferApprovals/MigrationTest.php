@@ -115,6 +115,43 @@ class MigrationTest extends TestCase
         $this->artisan('migrate', ['--force' => true])->assertExitCode(0);
     }
 
+    public function test_review_m1_upgrade_grants_the_key_to_full_branch_admin_copies_in_main(): void
+    {
+        $this->rollback();
+        $main = DB::table('branches')->where('is_main', true)->value('id');
+        $keys = DB::table('permissions')->whereIn('name', PermissionSeeder::PERMISSIONS)->pluck('id', 'name');
+        $copy = function (string $name, array $without) use ($main, $keys): int {
+            $id = DB::table('roles')->insertGetId(['name' => $name, 'guard_name' => 'web', 'branch_id' => $main, 'created_at' => now(), 'updated_at' => now()]);
+            foreach ($keys->except($without) as $pid) {
+                DB::table('role_has_permissions')->insert(['permission_id' => $pid, 'role_id' => $id]);
+            }
+
+            return $id;
+        };
+        $full = $copy('Branch Admin', []);
+        $narrow = $copy('Main Clerk', ['user.edit']);
+        $before = DB::table('role_has_permissions')->where('role_id', $narrow)->pluck('permission_id')->sort()->values()->all();
+
+        $this->artisan('migrate', ['--force' => true])->assertExitCode(0);
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+
+        $this->assertContains('transfer.approve', Role::find($full)->permissionKeys());
+        $this->assertNotContains('transfer.approve', Role::find($narrow)->permissionKeys());
+        $this->assertSame($before, DB::table('role_has_permissions')->where('role_id', $narrow)->pluck('permission_id')->sort()->values()->all());
+        $audits = DB::table('audit_logs')->where('event', 'role.updated')->where('auditable_type', Role::class)->get();
+        $this->assertCount(1, $audits);
+        $this->assertSame($full, (int) $audits[0]->auditable_id);
+        $newValues = json_decode($audits[0]->new_values, true);
+        ksort($newValues);
+        $this->assertSame(['name', 'permissions', 'source'], array_keys($newValues));
+        $this->assertContains('transfer.approve', $newValues['permissions']);
+        $this->assertNotContains('transfer.approve', json_decode($audits[0]->old_values, true)['permissions']);
+
+        // Running up() again grants nothing twice and writes no second audit row.
+        (require base_path(self::FILE))->up();
+        $this->assertSame(1, DB::table('audit_logs')->where('event', 'role.updated')->count());
+    }
+
     public function test_rollback_stops_while_requests_exist(): void
     {
         $admin = User::where('is_super_admin', true)->firstOrFail();

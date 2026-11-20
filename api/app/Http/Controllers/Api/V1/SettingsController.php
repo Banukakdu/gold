@@ -41,6 +41,8 @@ class SettingsController extends Controller
     public const THRESHOLD = 'Enter an amount of 0 or more with up to 2 decimals, or leave it empty.';
 
     /** AG-051 R18 (accounting review finding 7): shown, never blocking. */
+    public const THRESHOLD_INVALID = 'The stored approval threshold is not valid, so no transfer is held. Enter it again and save.';
+
     public const NO_APPROVER = "Only the Super Admin can approve; requests from MAIN's own admin will wait for you.";
 
     public const CURRENCY_LOCKED = 'The currency cannot be changed after entries have been posted.';
@@ -271,8 +273,11 @@ class SettingsController extends Controller
         $out['fiscal_year_start_locked'] = YearEndClose::query()->exists();
         $out['date_formats'] = array_keys(Settings::DATE_FORMATS);
         $out['currencies'] = Currencies::CODES;
-        $out['transfer_approval_warning'] = $out['transfer_approval_threshold'] !== null && ! app(TransferApprovals::class)->mainHasApprover()
-            ? self::NO_APPROVER : null;
+        $out['transfer_approval_warning'] = match (true) {
+            $this->settings->transferApprovalThresholdInvalid() => self::THRESHOLD_INVALID,
+            $out['transfer_approval_threshold'] !== null && ! app(TransferApprovals::class)->mainHasApprover() => self::NO_APPROVER,
+            default => null,
+        };
 
         // "Last changed by <name> on <date>" per field, from the audit (newest first).
         $last = [];

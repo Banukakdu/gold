@@ -25,6 +25,12 @@ class TransferApprovalDecidedNotification extends Notification implements Should
         return ['mail'];
     }
 
+    /** Review m5: the comment is typed by a user; Markdown and HTML in it are shown as text, never rendered. */
+    public static function plain(string $text): string
+    {
+        return addcslashes(e($text, false), '\\`*_{}[]()#+-.!|~>');
+    }
+
     public function toMail(object $notifiable): MailMessage
     {
         $t = Transaction::withoutGlobalScopes()->with(['fromAccount.branch:id,code', 'toAccount.branch:id,code', 'decidedBy:id,name'])->findOrFail($this->transactionId);
@@ -46,7 +52,7 @@ class TransferApprovalDecidedNotification extends Notification implements Should
             $mail->line('Posting date: '.$t->txn_date->format('Y-m-d').'.');
         }
         if ($t->approval_note) {
-            $mail->line('Comment: '.$t->approval_note);
+            $mail->line('Comment: '.self::plain($t->approval_note));
         }
 
         return $mail->action('Open the transfer', rtrim((string) config('app.frontend_url', config('app.url')), '/')."/transactions/{$t->id}");

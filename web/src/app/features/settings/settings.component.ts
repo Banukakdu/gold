@@ -126,7 +126,7 @@ const SAMPLE = '2026-10-05';
           </label>
           <small class="muted">Leave empty for never. 0 means every branch transfer and fund return. Applies to branch transfers and fund
             returns made by branch users; Super Admin transfers and internal transfers are never held. Grant 'transfer.approve' in MAIN before setting this.</small>
-          @if (s.transfer_approval_warning) { <div class="alert">{{ s.transfer_approval_warning }}</div> }
+          @if (s.transfer_approval_warning) { <div class="warn">{{ s.transfer_approval_warning }}</div> }
           <div class="changed">{{ changed('transfer_approval_threshold') }}</div>
         </fieldset>
 

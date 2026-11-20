@@ -19,7 +19,7 @@ class RequestTest extends TransferApprovalTestCase
         $r = $this->request()->assertCreated()
             ->assertJsonPath('status', 'pending')->assertJsonPath('approval_status', 'pending')
             ->assertJsonPath('requested_date', '2026-11-18')->assertJsonPath('requested_on', '2026-11-20')
-            ->assertJsonPath('entries', [])->assertJsonPath('warning', null);
+            ->assertJsonMissingPath('entries')->assertJsonPath('warning', null);
         $t = $this->txn($r->json('id'));
         $this->assertMatchesRegularExpression('/^KDY-TRF-2026-\d{6}$/', $t->ref_no);
         $this->assertSame(0, LedgerEntry::where('transaction_id', $t->id)->count());
@@ -83,7 +83,7 @@ class RequestTest extends TransferApprovalTestCase
     public function test_ac6_request_checks_refuse_and_create_nothing(): void
     {
         $before = Transaction::withoutGlobalScopes()->count();
-        $this->request('200000.01')->assertStatus(422)->assertJsonPath('message', 'Insufficient balance in Cash (available 200000.00).');
+        $this->request('200000.01')->assertStatus(422)->assertJsonPath('message', 'Insufficient balance in KDY Cash (available 200,000.00).');
         $this->assertSame($before, Transaction::withoutGlobalScopes()->count());
 
         foreach ([$this->kdy, $this->gal, $this->main] as $b) {

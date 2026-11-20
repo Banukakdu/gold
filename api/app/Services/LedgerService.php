@@ -161,7 +161,7 @@ class LedgerService
     private function request(string $type, Account $from, Account $to, string $date, string $amount, ?string $note): Transaction
     {
         $approvals = app(TransferApprovals::class);
-        $other = $approvals->pendingFromAccount($from->id);
+        $other = $approvals->pendingFromAccount($from->id, current: true);
         $threshold = app(Settings::class)->transferApprovalThresholdCents();
         $txn = $this->newTxn($type, $from->branch_id, $date, $amount, [
             'from_account_id' => $from->id,
@@ -186,7 +186,8 @@ class LedgerService
         $id = $txn->id;
         DB::afterCommit(fn () => TransferApprovalRequested::dispatch($id));
 
-        $txn = $txn->fresh()->load('entries');
+        // QA nit: a request has no lines, so the response carries no `entries` key.
+        $txn = $txn->fresh();
         $txn->requestWarning = TransferApprovals::overCommitWarning((string) $from->current_balance, $amount, $other);
 
         return $txn;
@@ -240,7 +241,9 @@ class LedgerService
             AuditLog::record('transfer.approved', $t, ['approval_status' => TransferApprovals::PENDING], [
                 'approval_status' => TransferApprovals::APPROVED, 'posting_date' => $date, 'requested_date' => $t->requested_date?->format('Y-m-d'),
                 'comment' => $comment, 'all_branches' => ! app(BranchContext::class)->isScoped(), 'available_before' => $availableBefore,
-                'approver_branch' => app(BranchContext::class)->isScoped() ? Branch::main()->code : 'all', 'ref_no' => $t->ref_no,
+                // Review m1: the branch the approver worked in ('MAIN' for a Main approver, any branch for a Super Admin).
+                'approver_branch' => ($ctx = app(BranchContext::class))->isScoped() ? Branch::whereKey($ctx->branchId)->value('code') : 'all',
+                'ref_no' => $t->ref_no,
             ]);
             $this->post($t, $lines);
             if ($receipt === TransferReceipts::AWAITING) {
@@ -869,7 +872,9 @@ class LedgerService
     private function assertFunds(Account $acc, string $amount): void
     {
         if (Money::cmp($acc->current_balance, $amount) < 0) {
-            throw new LedgerException("Insufficient balance in {$acc->name} (available {$acc->current_balance}).");
+            // AG-051 QA B4: every branch's cash account is "Cash", so the branch is named; the amount is formatted.
+            $code = $acc->branch?->code;
+            throw new LedgerException('Insufficient balance in '.trim("{$code} {$acc->name}").' (available '.Money::format($acc->current_balance).').');
         }
     }
 

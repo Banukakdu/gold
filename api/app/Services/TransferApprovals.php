@@ -98,12 +98,28 @@ class TransferApprovals
         return $user?->is_super_admin ? self::NOT_REQUIRED_SUPER_ADMIN : self::HOLD;
     }
 
-    /** R14: cents of the requests now pending from this account, except $exceptId. */
-    public function pendingFromAccount(int $accountId, ?int $exceptId = null): int
+    /**
+     * R14: cents of the requests now pending from this account, except $exceptId. $current: a locking (current) read,
+     * so a request made right after another one from the same account sees it under MySQL REPEATABLE READ (review m2).
+     */
+    public function pendingFromAccount(int $accountId, ?int $exceptId = null, bool $current = false): int
     {
         return (int) DB::table('transactions')->where('approval_status', self::PENDING)->where('from_account_id', $accountId)
             ->when($exceptId, fn ($q, $id) => $q->where('id', '!=', $id))
+            ->when($current, fn ($q) => $q->sharedLock())
             ->selectRaw('COALESCE(SUM('.Money::sqlCents('amount').'), 0) as c')->value('c');
+    }
+
+    /**
+     * Review m8: R14 for every account of a page in one query. @return array<int, int> cents by from_account_id
+     *
+     * @param  int[]  $accountIds
+     */
+    private function pendingByAccount(array $accountIds): array
+    {
+        return DB::table('transactions')->where('approval_status', self::PENDING)->whereIn('from_account_id', $accountIds ?: [0])
+            ->groupBy('from_account_id')->selectRaw('from_account_id, COALESCE(SUM('.Money::sqlCents('amount').'), 0) as c')
+            ->pluck('c', 'from_account_id')->map(fn ($v) => (int) $v)->all();
     }
 
     /** R17: a warning, never a block. $otherCents = the other requests pending from the account before this one. */
@@ -316,14 +332,18 @@ class TransferApprovals
             $q = $pending();
             $toApprove['total'] = (clone $q)->count();
             $toApprove['amount'] = Money::fromCents((int) (clone $q)->toBase()->selectRaw('COALESCE(SUM('.Money::sqlCents('amount').'), 0) as c')->value('c'));
-            $toApprove['data'] = $q->limit(self::WIDGET_ROWS)->get()->map(fn (Transaction $t) => $this->row($t, $user, $today, $threshold, true))->all();
+            $rows = $q->limit(self::WIDGET_ROWS)->get();
+            $ctxData = $this->pageData($rows, $today, $threshold);
+            $toApprove['data'] = $rows->map(fn (Transaction $t) => $this->row($t, $user, $today, $threshold, true, $ctxData))->all();
         }
 
         $mine = ['data' => [], 'total' => 0];
         if ($ctx->isScoped()) {
             $q = $pending()->where('created_by', $user->id)->where('branch_id', $ctx->branchId);
             $mine['total'] = (clone $q)->count();
-            $mine['data'] = $q->limit(self::WIDGET_ROWS)->get()->map(fn (Transaction $t) => $this->row($t, $user, $today, $threshold, $approver))->all();
+            $rows = $q->limit(self::WIDGET_ROWS)->get();
+            $ctxData = $this->pageData($rows, $today, $threshold);
+            $mine['data'] = $rows->map(fn (Transaction $t) => $this->row($t, $user, $today, $threshold, $approver, $ctxData))->all();
         }
 
         return [
@@ -333,8 +353,17 @@ class TransferApprovals
         ];
     }
 
-    private function row(Transaction $t, User $user, string $today, ?int $threshold, bool $approver): array
+    /** Review m8: the per-account figures of a page of rows, two grouped queries in all. */
+    private function pageData($rows, string $today, ?int $threshold): array
     {
+        $ids = $rows->pluck('from_account_id')->map(fn ($v) => (int) $v)->unique()->values()->all();
+
+        return ['pending' => $this->pendingByAccount($ids), 'below' => $this->belowThresholdByAccount($ids, $today, $threshold)];
+    }
+
+    private function row(Transaction $t, User $user, string $today, ?int $threshold, bool $approver, array $page): array
+    {
+        $acc = (int) $t->from_account_id;
         $requestedOn = $t->requested_on?->format('Y-m-d');
         $mine = (int) $t->created_by === (int) $user->id;
 
@@ -350,8 +379,8 @@ class TransferApprovals
                 'available' => Money::fromCents(Money::toCents($t->fromAccount?->current_balance))],
             'to' => ['branch_code' => $t->toAccount?->branch?->code, 'account' => $t->toAccount?->name],
             'amount' => Money::fromCents(Money::toCents($t->amount)),
-            'other_pending_from_account' => Money::fromCents($this->pendingFromAccount((int) $t->from_account_id, $t->id)),
-            'below_threshold_7d' => $this->belowThreshold((int) $t->from_account_id, $today, $threshold),
+            'other_pending_from_account' => Money::fromCents(($page['pending'][$acc] ?? 0) - Money::toCents($t->amount)),
+            'below_threshold_7d' => $page['below'][$acc] ?? ['count' => 0, 'amount' => '0.00'],
             'note' => $t->description,
             'requested_by' => $t->creator ? ['id' => $t->creator->id, 'name' => $t->creator->name] : null,
             'requested_by_you' => $mine,
@@ -365,19 +394,19 @@ class TransferApprovals
      * R16 (accounting review finding 4, detective): posted branch transfers / fund returns from the account in the last
      * 7 days at or below the current threshold, not themselves approved requests.
      */
-    public function belowThreshold(int $accountId, string $today, ?int $threshold): array
+    public function belowThresholdByAccount(array $accountIds, string $today, ?int $threshold): array
     {
-        if ($threshold === null) {
-            return ['count' => 0, 'amount' => '0.00'];
+        if ($threshold === null || ! $accountIds) {
+            return [];
         }
         $since = (new DateTimeImmutable($today))->modify('-'.(self::BELOW_DAYS - 1).' days')->format('Y-m-d');
         $x = Money::sqlCents('amount');
-        $r = DB::table('transactions')->where('from_account_id', $accountId)->whereIn('type', self::TYPES)->whereIn('status', ['posted', 'reversed'])
-            ->whereNull('approval_status')->whereDate('txn_date', '>=', $since)->whereDate('txn_date', '<=', $today)
-            ->whereRaw("$x <= ?", [$threshold])
-            ->selectRaw("COUNT(*) as n, COALESCE(SUM($x), 0) as c")->first();
 
-        return ['count' => (int) $r->n, 'amount' => Money::fromCents((int) $r->c)];
+        return DB::table('transactions')->whereIn('from_account_id', $accountIds)->whereIn('type', self::TYPES)->whereIn('status', ['posted', 'reversed'])
+            ->whereNull('approval_status')->whereDate('txn_date', '>=', $since)->whereDate('txn_date', '<=', $today)
+            ->whereRaw("$x <= ?", [$threshold])->groupBy('from_account_id')
+            ->selectRaw("from_account_id, COUNT(*) as n, COALESCE(SUM($x), 0) as c")->get()
+            ->mapWithKeys(fn ($r) => [(int) $r->from_account_id => ['count' => (int) $r->n, 'amount' => Money::fromCents((int) $r->c)]])->all();
     }
 
     /** S5 / API: the detail's buttons. */

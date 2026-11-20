@@ -20,6 +20,11 @@ class SendTransferApprovalEmail
         if (! $t || ! $user || $user->status !== 'active') {
             return;
         }
-        $user->notify(new TransferApprovalDecidedNotification($t->id, $event->state));
+        // Review m4: the decision is committed; with the sync queue a mail failure must not turn it into a 500.
+        try {
+            $user->notify(new TransferApprovalDecidedNotification($t->id, $event->state));
+        } catch (\Throwable $e) {
+            report($e);
+        }
     }
 }

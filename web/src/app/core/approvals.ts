@@ -125,6 +125,8 @@ export interface PendingApprovalInfo {
 export function pendingApprovalLine(i: PendingApprovalInfo | null | undefined, period: string, money: (v: string) => string): string {
   const n = i?.transfers_pending_approval ?? 0;
   if (!n) return '';
-  return `${n} transfer request${n === 1 ? '' : 's'} (${money(i?.transfers_pending_approval_amount ?? '0')}) dated in ${period} `
-    + `${n === 1 ? 'is' : 'are'} still pending approval. They are not in ${period}'s figures and will post on their approval date.`;
+  const one = n === 1;
+  return `${n} transfer request${one ? '' : 's'} (${money(i?.transfers_pending_approval_amount ?? '0')}) dated in ${period} `
+    + `${one ? 'is' : 'are'} still pending approval. ${one ? 'It is' : 'They are'} not in ${period}'s figures and will post on `
+    + `${one ? 'its' : 'their'} approval date.`;
 }
