@@ -12,6 +12,7 @@ import {
   ATTACH_ACCEPT, AttachmentList, AttachmentRow, blobErrorText, fileSize, selectionProblem, uploadAttachment, uploadErrorText,
 } from '../../core/attachments';
 import { LockBannerComponent } from '../period-locks/lock-banner.component';
+import { ReceiptDialogComponent, ReceiptResult, receiptLabel } from '../../core/receipts';
 
 interface Detail {
   id: number; ref_no: string; type: string; status: string; txn_date: string; amount: string;
@@ -30,6 +31,14 @@ interface Detail {
   totals?: { debit: string; credit: string };
   in_active_branch?: boolean;
   backfilled_at?: string | null;
+  /** AG-052 S3. */
+  receipt_status?: string | null;
+  received_on?: string | null;
+  receipt_note?: string | null;
+  receipt_by?: { id: number; name: string; is_super_admin?: boolean } | null;
+  receipt_at?: string | null;
+  can_acknowledge?: boolean;
+  receipt_note_required?: boolean;
 }
 
 interface LedgerLine {
@@ -48,7 +57,7 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
  */
 @Component({
   standalone: true,
-  imports: [FormsModule, MoneyPipe, AppDatePipe, RouterLink, LockBannerComponent],
+  imports: [FormsModule, MoneyPipe, AppDatePipe, RouterLink, LockBannerComponent, ReceiptDialogComponent],
   template: `
     <p class="att-back"><a routerLink="/transactions">Back to transactions</a></p>
     @if (msg()) { <div class="alert">{{ msg() }}</div> }
@@ -74,6 +83,36 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
           <dd>{{ t.creator?.name }} @if (t.creator_tag) { <span class="tag" data-s="inactive">{{ t.creator_tag }}</span> }</dd>
         </dl>
       </div>
+
+      @if (t.receipt_status) {
+        <div class="card section tr-panel">
+          <h2>Receipt</h2>
+          @if (receiptOk()) { <div class="ok">{{ receiptOk() }}</div> }
+          <dl class="entry-detail">
+            <dt>Status</dt>
+            <dd><span class="tag" [attr.data-s]="t.receipt_status === 'disputed' || t.receipt_status === 'cancelled' ? 'reversed' : null">{{ receiptText(t.receipt_status) }}</span></dd>
+            @if (t.received_on) { <dt>Received on</dt><dd>{{ t.received_on | appDate }}</dd> }
+            @if (t.receipt_by) {
+              <dt>By / at</dt>
+              <dd>{{ t.receipt_by.name }} · {{ settings.dateTime(t.receipt_at) }}
+                @if (t.receipt_by.is_super_admin && t.receipt_status === 'received') { <span class="tag">Confirmed by Super Admin</span> }</dd>
+            }
+            @if (t.receipt_note) { <dt>Note</dt><dd class="att-pre">{{ t.receipt_note }}</dd> }
+          </dl>
+          @if (t.can_acknowledge) {
+            <p>
+              <button type="button" (click)="receiptMode.set('received')">Confirm receipt</button>
+              @if (t.receipt_status !== 'disputed') {
+                <button type="button" class="ghost" style="margin-left:8px" (click)="receiptMode.set('discrepancy')">Report a discrepancy</button>
+              }
+            </p>
+          }
+        </div>
+        @if (receiptMode(); as mode) {
+          <ag-receipt-dialog [mode]="mode" (cancelled)="receiptMode.set(null)" (done)="receiptDone($event, mode)" (refused)="reload()"
+            [target]="{ id: t.id, ref_no: t.ref_no, txn_date: t.txn_date, amount: t.amount, receipt_status: t.receipt_status, note_required: t.receipt_note_required }" />
+        }
+      }
 
       @if (t.entries?.length) {
         <div class="card section">
@@ -193,7 +232,7 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
 })
 export class TransactionDetailComponent implements OnInit {
   auth = inject(AuthService);
-  private settings = inject(SettingsService);
+  settings = inject(SettingsService);
   private http = inject(HttpClient);
   private route = inject(ActivatedRoute);
   t = signal<Detail | null>(null);
@@ -210,6 +249,22 @@ export class TransactionDetailComponent implements OnInit {
   reason = '';
   accept = ATTACH_ACCEPT;
   private id = 0;
+
+  /** AG-052 S3: the open receipt dialog and its success line. */
+  receiptMode = signal<'received' | 'discrepancy' | null>(null);
+  receiptOk = signal('');
+
+  receiptText(s: string | null | undefined) { return receiptLabel(s); }
+
+  receiptDone(r: ReceiptResult, mode: 'received' | 'discrepancy') {
+    this.receiptMode.set(null);
+    this.receiptOk.set(mode === 'received' ? `Receipt of ${r.ref_no} confirmed.` : `Discrepancy on ${r.ref_no} reported.`);
+    this.reload();
+  }
+
+  reload() {
+    this.http.get<Detail>(`/api/v1/transactions/${this.id}`).subscribe({ next: t => this.t.set(t), error: e => this.msg.set(errorText(e)) });
+  }
 
   ngOnInit() {
     this.id = Number(this.route.snapshot.paramMap.get('id'));

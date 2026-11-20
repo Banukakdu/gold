@@ -15,7 +15,7 @@ class PermissionSeeder extends Seeder
         'user.view', 'user.create', 'user.edit',
         'role.view', 'role.manage',
         'account.view', 'account.manage',
-        'transfer.create', 'transfer.reverse',
+        'transfer.create', 'transfer.reverse', 'transfer.acknowledge',
         'transaction.view',
         'income.create', 'income.edit', 'income.void',
         'expense.create', 'expense.edit', 'expense.void',
@@ -30,8 +30,10 @@ class PermissionSeeder extends Seeder
             'income.create', 'income.edit', 'income.void', 'expense.create', 'expense.edit', 'expense.void',
             'report.dashboard', 'report.view', 'report.export',
             // Accounting review finding 6: the main reviewer of the books reads the audit log and classifies entries.
-            'audit.view', 'category.manage'],
-        'Cashier' => ['branch.view', 'account.view', 'transaction.view', 'income.create', 'expense.create', 'report.dashboard'],
+            'audit.view', 'category.manage',
+            // AG-052: confirms receipt of transfers into the branch (Q7: also the Cashier, who counts the cash).
+            'transfer.acknowledge'],
+        'Cashier' => ['branch.view', 'account.view', 'transaction.view', 'income.create', 'expense.create', 'report.dashboard', 'transfer.acknowledge'],
         'Viewer' => ['branch.view', 'account.view', 'transaction.view', 'report.dashboard', 'report.view', 'audit.view'],
     ];
 

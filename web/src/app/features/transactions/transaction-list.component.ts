@@ -13,6 +13,7 @@ import { errorText } from '../../core/api.interceptor';
 import { SettingsService } from '../../core/settings.service';
 import { LockBannerComponent } from '../period-locks/lock-banner.component';
 import { BranchPickerComponent } from '../reports/report-common';
+import { RECEIPT_TAGS, receiptLabel } from '../../core/receipts';
 
 interface Creator { id: number; name: string; tag: string | null }
 interface AccountOpt { id: number; name: string; status?: string; branch_id: number; branch?: { code: string } }
@@ -20,8 +21,10 @@ interface CategoryNode { id: number; name: string; type: string; is_active: bool
 interface BranchOpt { id: number; code: string; name: string }
 
 /** The filter params of the URL and the API (spec S1: param names are the API names, so the URL is the API query). */
-const FILTER_KEYS = ['from', 'to', 'type', 'status', 'account_id', 'category_id', 'category_only', 'created_by', 'min', 'max', 'q', 'files', 'branches'] as const;
+const FILTER_KEYS = ['from', 'to', 'type', 'status', 'receipt', 'account_id', 'category_id', 'category_only', 'created_by', 'min', 'max', 'q', 'files', 'branches'] as const;
 const STATUS_LABELS: Record<string, string> = { posted: 'Posted', void: 'Void', reversed: 'Reversed' };
+/** AG-052 S4: the receipt filter (checkbox labels). */
+const RECEIPT_FILTER: [string, string][] = [['awaiting', 'Awaiting'], ['received', 'Received'], ['disputed', 'Discrepancy'], ['cancelled', 'Cancelled']];
 const FILES_LABELS: Record<string, string> = { with: 'Has files', none: 'No files', removed: 'Has removed files' };
 const SORTS: [string, string][] = [
   ['date:desc', 'Date, newest first'], ['date:asc', 'Date, oldest first'],
@@ -31,7 +34,7 @@ const AMOUNT = /^\d{1,13}(\.\d{1,2})?$/;
 const BRANCH_NOTE = 'The branch filter applies in All branches mode only.';
 
 interface Form {
-  from: string; to: string; types: string[]; statuses: string[]; account_id: string;
+  from: string; to: string; types: string[]; statuses: string[]; receipts: string[]; account_id: string;
   parent: string; sub: string; created_by: string; min: string; max: string; q: string; files: string; branches: number[];
 }
 interface Chip { key: string; label: string; remove: string[] }
@@ -62,6 +65,11 @@ interface Chip { key: string; label: string; remove: string[] }
       <fieldset class="ts-field ts-status"><legend>Status</legend>
         @for (s of statuses; track s[0]) {
           <label><input type="checkbox" [checked]="f.statuses.includes(s[0])" (change)="toggle(f.statuses, s[0])" /> {{ s[1] }}</label>
+        }
+      </fieldset>
+      <fieldset class="ts-field ts-status"><legend>Receipt</legend>
+        @for (s of receiptOpts; track s[0]) {
+          <label><input type="checkbox" [checked]="f.receipts.includes(s[0])" (change)="toggle(f.receipts, s[0])" /> {{ s[1] }}</label>
         }
       </fieldset>
       <label>Account
@@ -214,6 +222,9 @@ interface Chip { key: string; label: string; remove: string[] }
       } @else {
         <span class="tag" [attr.data-s]="t.status">{{ statusLabel(t.status) }}</span>
       }
+      @if (t.receipt_status) {
+        <span class="tag" [attr.data-s]="t.receipt_status === 'disputed' ? 'reversed' : null" [title]="receiptTitle(t)">{{ receiptTag(t.receipt_status) }}</span>
+      }
     </ng-template>
 
     <ng-template #actions let-t>
@@ -268,6 +279,7 @@ export class TransactionListComponent implements OnInit {
   f: Form = this.emptyForm();
   types = Object.entries(TYPE_LABELS);
   statuses = Object.entries(STATUS_LABELS);
+  receiptOpts = RECEIPT_FILTER;
   sorts = SORTS;
   private creatorsFor = '';
   private listSub?: Subscription;
@@ -373,7 +385,7 @@ export class TransactionListComponent implements OnInit {
   private formParams(): Params {
     const f = this.f;
     const p: Params = {
-      from: f.from, to: f.to, type: f.types.join(','), status: f.statuses.join(','), account_id: f.account_id,
+      from: f.from, to: f.to, type: f.types.join(','), status: f.statuses.join(','), receipt: f.receipts.join(','), account_id: f.account_id,
       created_by: f.created_by, min: this.amount(f.min), max: this.amount(f.max), q: f.q.trim(), files: f.files,
       branches: this.auth.isAllBranches() ? f.branches.map(String) : [],
     };
@@ -404,7 +416,7 @@ export class TransactionListComponent implements OnInit {
     const list = (v: unknown) => String(v ?? '').split(',').map(s => s.trim()).filter(Boolean);
     const f = this.emptyForm();
     f.from = p['from'] ?? ''; f.to = p['to'] ?? '';
-    f.types = list(p['type']); f.statuses = list(p['status']);
+    f.types = list(p['type']); f.statuses = list(p['status']); f.receipts = list(p['receipt']);
     f.account_id = p['account_id'] ?? ''; f.created_by = p['created_by'] ?? '';
     f.min = p['min'] ?? ''; f.max = p['max'] ?? ''; f.q = p['q'] ?? ''; f.files = p['files'] ?? '';
     f.branches = ((p['branches'] ?? []) as string[]).map(Number);
@@ -419,7 +431,7 @@ export class TransactionListComponent implements OnInit {
   }
 
   private emptyForm(): Form {
-    return { from: '', to: '', types: [], statuses: [], account_id: '', parent: '', sub: '', created_by: '', min: '', max: '', q: '', files: '', branches: [] };
+    return { from: '', to: '', types: [], statuses: [], receipts: [], account_id: '', parent: '', sub: '', created_by: '', min: '', max: '', q: '', files: '', branches: [] };
   }
 
   private amount(v: string) { return v.replace(/,/g, '').trim(); }
@@ -571,6 +583,10 @@ export class TransactionListComponent implements OnInit {
     if (p['to']) c.push({ key: 'to', label: `To ${this.date(p['to'])}`, remove: ['to'] });
     if (p['type']) c.push({ key: 'type', label: `Type: ${this.typeSummary(list(p['type']))}`, remove: ['type'] });
     if (p['status']) c.push({ key: 'status', label: `Status: ${list(p['status']).map(s => STATUS_LABELS[s] ?? s).join(', ')}`, remove: ['status'] });
+    if (p['receipt']) {
+      const names = Object.fromEntries(RECEIPT_FILTER);
+      c.push({ key: 'receipt', label: `Receipt: ${list(p['receipt']).map(s => names[s] ?? s).join(', ')}`, remove: ['receipt'] });
+    }
     if (p['account_id']) {
       const a = this.accountById(p['account_id']);
       c.push({ key: 'account', label: `Account: ${a ? this.accountLabel(a) : '#' + p['account_id']}`, remove: ['account_id'] });
@@ -601,6 +617,10 @@ export class TransactionListComponent implements OnInit {
 
   label(t: string) { return TYPE_LABELS[t] ?? t; }
   statusLabel(s: string) { return STATUS_LABELS[s] ?? s; }
+  receiptTag(s: string) { return RECEIPT_TAGS[s] ?? s; }
+  receiptTitle(t: Transaction) {
+    return receiptLabel(t.receipt_status) + (t.received_on ? ` on ${this.date(t.received_on)}` : '') + (t.receipt_note ? `: ${t.receipt_note}` : '');
+  }
 
   categoryText(t: Transaction): string {
     const c = t.category;
@@ -641,7 +661,11 @@ export class TransactionListComponent implements OnInit {
 
   reverse(t: Transaction) {
     if (this.busy()) return;
-    const reason = prompt(`Reverse ${t.ref_no}? Enter a reason:`);
+    // AG-052 S6: the receiving branch already confirmed the cash (not blocking).
+    const warn = t.receipt_status === 'received'
+      ? `${t.to_account?.branch?.code ?? 'The receiving branch'} confirmed receipt on ${this.date(t.received_on ?? '')}. The reversal sends the money back; arrange the physical return.\n\n`
+      : '';
+    const reason = prompt(`${warn}Reverse ${t.ref_no}? Enter a reason:`);
     if (!reason || this.busy()) return;
     this.busy.set(true);
     this.http.post(`/api/v1/transactions/${t.id}/reverse`, { reason }).subscribe({

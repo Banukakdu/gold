@@ -30,6 +30,8 @@ class SettingsController extends Controller
         'currency_code' => 'currency',
         'date_format' => 'date_format',
         'fiscal_year_start_month' => 'fiscal_year_start_month',
+        // AG-052 S1 / R3 (stored as 0 / 1).
+        'transfer_receipt_required' => 'transfer_receipt_required',
     ];
 
     public const CURRENCY_LOCKED = 'The currency cannot be changed after entries have been posted.';
@@ -92,6 +94,7 @@ class SettingsController extends Controller
             'currency_code' => ['sometimes', 'required', 'string', Rule::in(Currencies::CODES)],
             'date_format' => ['sometimes', 'required', Rule::in(array_keys(Settings::DATE_FORMATS))],
             'fiscal_year_start_month' => 'sometimes|required|integer|between:1,12',
+            'transfer_receipt_required' => 'sometimes|required|boolean',
             // Review N3: an array or text is a 422, never a string cast of an array.
             'currency_decimals' => 'sometimes|required|integer',
         ], [
@@ -109,6 +112,10 @@ class SettingsController extends Controller
         }
         if (isset($d['fiscal_year_start_month'])) {
             $d['fiscal_year_start_month'] = (int) $d['fiscal_year_start_month'];
+        }
+        if (array_key_exists('transfer_receipt_required', $d)) {
+            // Stored and audited as 0 / 1 (AC 25: old 0, new 1).
+            $d['transfer_receipt_required'] = filter_var($d['transfer_receipt_required'], FILTER_VALIDATE_BOOLEAN) ? 1 : 0;
         }
 
         DB::transaction(function () use ($d) {
@@ -194,6 +201,7 @@ class SettingsController extends Controller
             'currency_code' => $this->settings->currencyCode(),
             'date_format' => $this->settings->dateFormat(),
             'fiscal_year_start_month' => $this->settings->fiscalYearStartMonth(),
+            'transfer_receipt_required' => $this->settings->transferReceiptRequired() ? 1 : 0,
         ];
     }
 
@@ -201,7 +209,10 @@ class SettingsController extends Controller
     {
         $logo = $this->settings->logo();
 
-        return $this->current() + [
+        $current = $this->current();
+        $current['transfer_receipt_required'] = (bool) $current['transfer_receipt_required'];
+
+        return $current + [
             'logo' => $logo ? ['sha256' => $logo['sha256'], 'updated_at' => $logo['uploaded_at'] ?? null] : null,
             'currency_decimals' => Currencies::DECIMALS,
             'current_fiscal_year' => $this->settings->currentFiscalYear()->toArray(),

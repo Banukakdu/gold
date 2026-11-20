@@ -35,7 +35,7 @@ import { colomboToday } from '../../core/dates';
       <label>Date <input type="date" name="txn_date" [(ngModel)]="m.txn_date" [max]="today" required /></label>
       <label class="wide">Reason <input name="note" [(ngModel)]="m.note" required /></label>
       @if (error()) { <div class="alert wide">{{ error() }}</div> }
-      @if (saved()) { <div class="ok wide">{{ saved() }} posted.</div> }
+      @if (saved()) { <div class="ok wide">{{ saved() }} posted.@if (mustConfirm()) { {{ mustConfirm() }} must confirm receipt. }</div> }
       <div class="wide actions"><button type="submit" [disabled]="busy()">Transfer</button></div>
     </form>
   `,
@@ -102,12 +102,16 @@ export class TransferFormComponent implements OnInit {
     this.http.get<Account[]>('/api/v1/accounts/destinations').subscribe(a => { this.destinations.set(a); this.dropHiddenTo(); });
   }
 
+  mustConfirm = signal('');
+
   save() {
     if (this.busy()) return; // double-submit guard (QA Q1): a second click can fire before the button disables
     this.busy.set(true);
     this.error.set('');
-    this.http.post<{ ref_no: string; type: string }>('/api/v1/transfers', { ...this.m, from_account_id: this.fromId(), to_account_id: this.toId() }).subscribe({
-      next: r => { this.saved.set(`${r.type === 'fund_return' ? 'Fund return' : 'Transfer'} ${r.ref_no}`); this.m['amount'] = null; this.m['note'] = ''; this.busy.set(false); this.ngOnInit(); },
+    // AG-052 F2: the receiving branch, named in the success text when it must confirm receipt.
+    const toCode = this.destinations().find(a => a.id === Number(this.toId()))?.branch?.code ?? '';
+    this.http.post<{ ref_no: string; type: string; receipt_status?: string | null }>('/api/v1/transfers', { ...this.m, from_account_id: this.fromId(), to_account_id: this.toId() }).subscribe({
+      next: r => { this.mustConfirm.set(r.receipt_status === 'awaiting' ? toCode : ''); this.saved.set(`${r.type === 'fund_return' ? 'Fund return' : 'Transfer'} ${r.ref_no}`); this.m['amount'] = null; this.m['note'] = ''; this.busy.set(false); this.ngOnInit(); },
       error: e => { this.error.set(errorText(e)); this.busy.set(false); },
     });
   }

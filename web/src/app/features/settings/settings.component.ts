@@ -19,8 +19,10 @@ interface FullSettings extends Omit<PublicSettings, 'logo'> {
   date_formats: string[];
   currencies: string[];
   last_changed: Record<string, { by: Person | null; at: string | null }>;
+  /** AG-052 S1. */
+  transfer_receipt_required: boolean;
 }
-type Editable = 'company_name' | 'currency_code' | 'date_format' | 'fiscal_year_start_month';
+type Editable = 'company_name' | 'currency_code' | 'date_format' | 'fiscal_year_start_month' | 'transfer_receipt_required';
 
 const MAX_LOGO = 1024 * 1024;
 const SAMPLE = '2026-10-05';
@@ -104,6 +106,18 @@ const SAMPLE = '2026-10-05';
         </fieldset>
 
         <fieldset>
+          <legend>Transfers</legend>
+          <label style="display:flex;gap:8px;align-items:flex-start">
+            <input type="checkbox" style="width:auto" name="transfer_receipt_required" [(ngModel)]="form.transfer_receipt_required" />
+            <span>Receiving branch must confirm receipt of transfers between branches</span>
+          </label>
+          <small class="muted">Applies to transfers posted after you turn it on. It does not change balances or reports.
+            Grant 'transfer.acknowledge' to the Accountant and Cashier roles in each branch before turning this on.</small>
+          @if (err()['transfer_receipt_required']) { <span class="neg">{{ err()['transfer_receipt_required'] }}</span> }
+          <div class="changed">{{ changed('transfer_receipt_required') }}</div>
+        </fieldset>
+
+        <fieldset>
           <legend>Approvals</legend>
           <span class="muted">Approval thresholds are set here when transfer approval (AG-051) and expense approval (AG-064) are released.</span>
         </fieldset>
@@ -121,7 +135,8 @@ export class SettingsComponent implements OnInit {
   settings = inject(SettingsService);
   months = MONTH_NAMES;
   s = signal<FullSettings | null>(null);
-  form: Record<Editable, string | number> = { company_name: '', currency_code: '', date_format: '', fiscal_year_start_month: 4 };
+  form: Record<Editable, string | number | boolean> = { company_name: '', currency_code: '', date_format: '', fiscal_year_start_month: 4,
+    transfer_receipt_required: false };
   msg = signal('');
   ok = signal('');
   logoMsg = signal('');
@@ -149,20 +164,21 @@ export class SettingsComponent implements OnInit {
     const s = this.s();
     if (!s) return;
     this.form = { company_name: s.company_name, currency_code: s.currency_code, date_format: s.date_format,
-      fiscal_year_start_month: Number(s.fiscal_year_start_month) };
+      fiscal_year_start_month: Number(s.fiscal_year_start_month), transfer_receipt_required: !!s.transfer_receipt_required };
     this.err.set({});
   }
 
   /** Only the changed fields are sent (S1). */
-  private changes(): Partial<Record<Editable, string | number>> {
+  private changes(): Partial<Record<Editable, string | number | boolean>> {
     const s = this.s();
     if (!s) return {};
-    const out: Partial<Record<Editable, string | number>> = {};
+    const out: Partial<Record<Editable, string | number | boolean>> = {};
     const name = String(this.form.company_name).trim();
     if (name !== s.company_name) out.company_name = name;
     if (this.form.currency_code !== s.currency_code) out.currency_code = this.form.currency_code;
     if (this.form.date_format !== s.date_format) out.date_format = this.form.date_format;
     if (Number(this.form.fiscal_year_start_month) !== Number(s.fiscal_year_start_month)) out.fiscal_year_start_month = Number(this.form.fiscal_year_start_month);
+    if (!!this.form.transfer_receipt_required !== !!s.transfer_receipt_required) out.transfer_receipt_required = !!this.form.transfer_receipt_required;
     return out;
   }
 

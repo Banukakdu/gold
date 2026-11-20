@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Events\TransferReceiptRequested;
 use App\Exceptions\LedgerException;
 use App\Models\Account;
 use App\Models\AuditLog;
@@ -130,8 +131,13 @@ class LedgerService
                 'to_account_id' => $to->id,
                 'related_branch_id' => $to->branch_id,
                 'description' => $note,
+                // AG-052 R3: the setting at this moment decides; the receipt posts nothing (R1).
+                'receipt_status' => app(TransferReceipts::class)->initialStatus($type),
             ]);
             $this->post($txn, $lines);
+            if ($txn->receipt_status === TransferReceipts::AWAITING) {
+                DB::afterCommit(fn () => TransferReceiptRequested::dispatch($txn->id));
+            }
 
             return $this->finish($txn);
         }, self::ATTEMPTS);
@@ -277,8 +283,11 @@ class LedgerService
             $this->post($txn, $lines);
             $original->update(['status' => 'reversed']);
             AuditLog::record('transaction.reversed', $original, ['status' => 'posted'], ['status' => 'reversed', 'reversal_id' => $txn->id, 'reversal_date' => $date, 'reason' => $reason, 'self' => (int) $original->created_by === (int) auth()->id()]);
+            $txn = $this->finish($txn);
+            // AG-052 R7: an open receipt is cancelled in the same DB transaction (the reversal row has none, Q3).
+            app(TransferReceipts::class)->cancelForReversal($original, $txn);
 
-            return $this->finish($txn);
+            return $txn;
         }, self::ATTEMPTS);
     }
 
@@ -844,7 +853,12 @@ class LedgerService
             'branch_transfer' => 'TRF', 'internal_transfer' => 'INT', 'income' => 'INC', 'expense' => 'EXP', 'reversal' => 'REV', 'year_end_close' => 'YEC'][$txn->type];
         $txn->ref_no = sprintf('%s-%s-%s-%06d', $txn->branch->code, $prefix, substr((string) $txn->txn_date->format('Y'), 0, 4), $txn->id);
         $txn->save();
-        AuditLog::record("transaction.{$txn->type}", $txn, null, $txn->only(['ref_no', 'amount', 'txn_date', 'from_account_id', 'to_account_id', 'account_id', 'category_id']));
+        // AG-052 R12: the creation row of a between-branch transfer carries its receipt status.
+        $keys = ['ref_no', 'amount', 'txn_date', 'from_account_id', 'to_account_id', 'account_id', 'category_id'];
+        if (in_array($txn->type, TransferReceipts::TYPES, true)) {
+            $keys[] = 'receipt_status';
+        }
+        AuditLog::record("transaction.{$txn->type}", $txn, null, $txn->only($keys));
 
         return $txn->load('entries');
     }

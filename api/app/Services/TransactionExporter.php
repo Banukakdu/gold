@@ -66,6 +66,7 @@ class TransactionExporter
         ['Date', 'date'], ['Created at', 'text'], ['Ref no', 'text'], ['Branch', 'text'], ['Type', 'text'], ['Direction', 'text'],
         ['Category', 'text'], ['Sub-category', 'text'], ['Account', 'text'], ['From', 'text'], ['To', 'text'], ['Payee / payer', 'text'],
         ['Payment method', 'text'], ['Reference', 'text'], ['Description', 'text'], ['Amount', 'amount'], ['Status', 'text'],
+        ['Receipt', 'text'], ['Received on', 'date'], ['Receipt by', 'text'], ['Receipt note', 'text'],
         ['Reversal of', 'text'], ['Reversed by', 'text'], ['Voided on', 'date'], ['Voided by', 'text'], ['Void reason', 'text'],
         ['Created by', 'text'], ['Files', 'text'],
     ];
@@ -109,6 +110,10 @@ class TransactionExporter
                 $t->description,
                 $closing ? '—' : Money::fromCents(Money::toCents($t->amount)),
                 self::statusLabel($t),
+                $t->receipt_status ? TransferReceipts::label($t->receipt_status) : '',
+                $t->received_on?->format('Y-m-d'),
+                $t->receiptBy?->name,
+                $t->receipt_note,
                 $t->reversalOf?->ref_no,
                 $t->reversedBy?->ref_no,
                 $void['date'] ?? null,
@@ -238,6 +243,9 @@ class TransactionExporter
         }
         if ($v = $p->get('status')) {
             $parts[] = 'Status: '.implode(', ', array_map('ucfirst', $list($v)));
+        }
+        if ($v = $p->get('receipt')) {
+            $parts[] = 'Receipt: '.implode(', ', array_map([TransferReceipts::class, 'label'], $list($v)));
         }
         if ($id = $p->get('account_id')) {
             $id = (int) $id;

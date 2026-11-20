@@ -139,6 +139,12 @@ class ReportExporter
                     ." by {$fy['reopened']['by']}: {$fy['reopened']['reason']}";
             }
         }
+        if ($name === 'transfers' && ($receipt = $p->extra['receipt'] ?? [])) {
+            // AG-052 S5: the Receipt filter in the header.
+            $notes[] = $receipt === [TransferReceipts::IN_TRANSIT]
+                ? 'Receipt: '.TransferReceipts::IN_TRANSIT_LABEL.' ('.$settings->formatDate($p->to).'), any date up to it'
+                : 'Receipt: '.implode(', ', array_map([TransferReceipts::class, 'label'], $receipt));
+        }
         $lines = array_values(array_filter([
             $company,
             $title,
@@ -313,11 +319,11 @@ class ReportExporter
                 [
                     'title' => 'Movements',
                     'columns' => [['Date', 'date'], ['Ref no', 'text'], ['Type', 'text'], ['From', 'text'], ['To', 'text'], ['Amount', 'amount'],
-                        ['Status', 'text'], ['Note', 'text'], ['Created by', 'text']],
+                        ['Status', 'text'], ['Receipt', 'text'], ['Note', 'text'], ['Created by', 'text']],
                     'rows' => array_merge(
                         array_map(fn ($m) => $row([$m['txn_date'], $m['ref_no'], self::movementLabel($m), $m['from']['branch_code'].' - '.$m['from']['account'],
-                            $m['to']['branch_code'].' - '.$m['to']['account'], $m['amount'], self::statusLabel($m), $m['description'], $m['created_by']]), $d['movements']['data']),
-                        [$row(['Net moved (reversals deducted)', '', '', '', '', $d['net_moved'], '', '', ''], true)],
+                            $m['to']['branch_code'].' - '.$m['to']['account'], $m['amount'], self::statusLabel($m), self::receiptLabel($m), $m['description'], $m['created_by']]), $d['movements']['data']),
+                        [$row(['Net moved (reversals deducted)', '', '', '', '', $d['net_moved'], '', '', '', ''], true)],
                     ),
                 ],
                 $this->matrixSheet($d, $row),
@@ -424,6 +430,12 @@ class ReportExporter
         $label = ReportService::MOVEMENT_LABELS[$m['movement_type']] ?? Str::headline($m['movement_type']);
 
         return $m['status'] === 'reversal' ? "Reversal ({$label})" : $label;
+    }
+
+    /** AG-052 S5: the receipt label, "—" when none (reversal rows, transfers not requiring one). */
+    public static function receiptLabel(array $m): string
+    {
+        return ($m['receipt_status'] ?? null) ? TransferReceipts::label($m['receipt_status']) : '—';
     }
 
     public static function statusLabel(array $m): string

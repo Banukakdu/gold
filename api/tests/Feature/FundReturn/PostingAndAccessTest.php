@@ -35,7 +35,9 @@ class PostingAndAccessTest extends FundReturnTestCase
         $audit = AuditLog::where('event', 'transaction.fund_return')->sole();
         $this->assertSame([$this->gal->id, $this->galAcc->id, $t['id']], [$audit->branch_id, $audit->user_id, $audit->auditable_id]);
         $v = $this->sorted($audit->new_values);
-        $this->assertSame(['account_id', 'amount', 'category_id', 'from_account_id', 'ref_no', 'to_account_id', 'txn_date'], array_keys($v));
+        // AG-052 R12: the creation row of a between-branch transfer carries its receipt status (setting off: null).
+        $this->assertSame(['account_id', 'amount', 'category_id', 'from_account_id', 'receipt_status', 'ref_no', 'to_account_id', 'txn_date'], array_keys($v));
+        $this->assertNull($v['receipt_status']);
         $this->assertSame([$t['ref_no'], '20000.00', $this->galCash->id, $this->mainAcc->id], [$v['ref_no'], $v['amount'], $v['from_account_id'], $v['to_account_id']]);
     }
 

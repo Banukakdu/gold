@@ -3,6 +3,7 @@ import { HttpClient } from '@angular/common/http';
 import { AppDatePipe } from '../../core/app-date.pipe';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
+import { TransferReceiptsComponent } from './transfer-receipts.component';
 
 interface Dash {
   scope: 'all' | 'branch';
@@ -16,7 +17,7 @@ interface Dash {
 
 @Component({
   standalone: true,
-  imports: [MoneyPipe, AppDatePipe],
+  imports: [MoneyPipe, AppDatePipe, TransferReceiptsComponent],
   template: `
     <h1>{{ auth.isAllBranches() ? 'All branches' : auth.activeBranch()?.name }} <small class="muted">this month</small></h1>
     @if (d(); as d) {
@@ -26,6 +27,9 @@ interface Dash {
         <div class="kpi"><span>Expenses</span><b class="neg">{{ d.expense | money }}</b></div>
         <div class="kpi"><span>Net</span><b [class.neg]="+d.net < 0">{{ d.net | money }}</b></div>
       </section>
+
+      <!-- AG-052 S2: needs transaction.view as well as report.dashboard. -->
+      @if (auth.can('transaction.view')) { <ag-transfer-receipts /> }
 
       <section class="grid2">
         <div class="card">

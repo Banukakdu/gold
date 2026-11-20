@@ -4,9 +4,13 @@ import { FormsModule } from '@angular/forms';
 import { firstValueFrom } from 'rxjs';
 import { errorText } from '../../core/api.interceptor';
 import { SettingsService } from '../../core/settings.service';
+import { MoneyPipe } from '../../core/money.pipe';
+import { InTransitInfo, inTransitLine } from '../../core/receipts';
 
 /** Lock confirm review (controls finding 7 + AG-062 finding 5): information only, never blocks. */
-interface Review { closes_from: string | null; self_voids: number; self_reversals: number; files_removed?: number; files_removed_self?: number; backup_warning?: string | null }
+interface Review extends InTransitInfo {
+  closes_from: string | null; self_voids: number; self_reversals: number; files_removed?: number; files_removed_self?: number; backup_warning?: string | null;
+}
 interface Person { id: number; name: string; tag: string | null }
 interface Lock {
   id: number; branch_id: number | null; period: string;
@@ -203,6 +207,9 @@ export class PeriodLocksComponent implements OnInit {
     }
     // AG-093 R15 (backups review F9): information only, it never blocks the lock.
     if (review?.backup_warning) text += `\n\n${review.backup_warning}`;
+    // AG-052 S7 / R14: transfers in transit at the month end (information only).
+    const transit = inTransitLine(review, `the end of ${label(p)}`, v => new MoneyPipe().transform(v));
+    if (transit) text += `\n\n${transit}`;
     if (!confirm(text) || this.busy()) return;
     this.busy.set(true);
     this.http.post('/api/v1/period-locks', { period: p, branch_id: branch }).subscribe({

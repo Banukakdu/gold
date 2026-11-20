@@ -33,7 +33,7 @@ import { colomboToday } from '../../core/dates';
       <label>Date <input type="date" name="txn_date" [(ngModel)]="m.txn_date" [max]="today" required /></label>
       <label>Note <input name="note" [(ngModel)]="m.note" /></label>
       @if (error()) { <div class="alert wide">{{ error() }}</div> }
-      @if (saved()) { <div class="ok wide">Posted {{ saved() }}.</div> }
+      @if (saved()) { <div class="ok wide">Posted {{ saved() }}.@if (mustConfirm()) { The branch must confirm receipt. }</div> }
       <div class="wide actions"><button type="submit" [disabled]="busy()">Send funds</button></div>
     </form>
 
@@ -60,6 +60,8 @@ export class AllocationFormComponent implements OnInit {
   busy = signal(false);
   error = signal('');
   saved = signal('');
+  /** AG-052: the receiving branch must confirm receipt. */
+  mustConfirm = signal(false);
   today = colomboToday(); // Q4 / R10: no future dates (Asia/Colombo day)
   m: any = { kind: 'opening', from_account_id: null, to_account_id: null, amount: null, txn_date: this.today, note: '' };
   c: any = { account_id: null, amount: null, txn_date: this.today, note: 'Owner capital' };
@@ -76,8 +78,8 @@ export class AllocationFormComponent implements OnInit {
     if (this.busy()) return; // double-submit guard (QA Q1): a second click can fire before the button disables
     this.busy.set(true);
     this.error.set('');
-    this.http.post<{ ref_no: string }>(url, body).subscribe({
-      next: r => { this.saved.set(r.ref_no); this.busy.set(false); this.ngOnInit(); },
+    this.http.post<{ ref_no: string; receipt_status?: string | null }>(url, body).subscribe({
+      next: r => { this.mustConfirm.set(r.receipt_status === 'awaiting'); this.saved.set(r.ref_no); this.busy.set(false); this.ngOnInit(); },
       error: e => { this.error.set(errorText(e)); this.busy.set(false); },
     });
   }

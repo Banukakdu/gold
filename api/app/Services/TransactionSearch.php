@@ -38,6 +38,8 @@ class TransactionSearch
             'to' => ['nullable', 'date_format:Y-m-d'],
             'type' => ['bail', 'nullable', 'string', $this->listRule('type', self::TYPES)],
             'status' => ['bail', 'nullable', 'string', $this->listRule('status', self::STATUSES)],
+            // AG-052 S4: receipt states (comma list); rows with no receipt never match.
+            'receipt' => ['bail', 'nullable', 'string', $this->listRule('receipt status', array_keys(TransferReceipts::LABELS))],
             'account_id' => 'nullable|integer',
             'category_id' => 'nullable|integer',
             'category_only' => 'nullable|boolean',
@@ -87,7 +89,7 @@ class TransactionSearch
         }
 
         $filters = [];
-        foreach (['from', 'to', 'type', 'status', 'account_id', 'category_id', 'category_only', 'created_by', 'min', 'max', 'q', 'files'] as $k) {
+        foreach (['from', 'to', 'type', 'status', 'receipt', 'account_id', 'category_id', 'category_only', 'created_by', 'min', 'max', 'q', 'files'] as $k) {
             $v = $d[$k] ?? null;
             if ($v !== null && $v !== '' && ! ($k === 'category_only' && ! filter_var($v, FILTER_VALIDATE_BOOLEAN))) {
                 $filters[$k] = $v;
@@ -116,6 +118,7 @@ class TransactionSearch
             ->when($f['to'] ?? null, fn ($q, $v) => $q->whereDate('transactions.txn_date', '<=', $v))
             ->when($this->list($f['type'] ?? null), fn ($q, $v) => $q->whereIn('transactions.type', $v))
             ->when($this->list($f['status'] ?? null), fn ($q, $v) => $q->whereIn('transactions.status', $v))
+            ->when($this->list($f['receipt'] ?? null), fn ($q, $v) => $q->whereIn('transactions.receipt_status', $v))
             ->when($f['account_id'] ?? null, fn ($q, $v) => $q->where(fn ($w) => $w->where('transactions.account_id', $v)
                 ->orWhere('transactions.from_account_id', $v)->orWhere('transactions.to_account_id', $v)))
             ->when($f['category_id'] ?? null, fn ($q, $v) => isset($f['category_only'])

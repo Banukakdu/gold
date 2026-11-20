@@ -7,6 +7,7 @@ import { errorText } from '../../core/api.interceptor';
 import { MoneyPipe } from '../../core/money.pipe';
 import { SettingsService } from '../../core/settings.service';
 import { SignaturesComponent } from '../reports/report-common';
+import { InTransitInfo, inTransitLine } from '../../core/receipts';
 
 interface Person { id: number; name: string }
 interface Close {
@@ -24,7 +25,7 @@ interface BranchPreview {
   branch: { id: number; code: string; name: string; status: string };
   income: string; expense: string; net: string; ie_net: string; difference: string; lines: Line[];
 }
-interface Preview {
+interface Preview extends InTransitInfo {
   fiscal_year: { start_year: number; label: string; short_label: string; start: string; end: string; closed: boolean };
   branches: BranchPreview[]; total_net: string; total_ie_net: string; retained_earnings_movement: string;
   checks: { code: string; message: string }[];
@@ -97,6 +98,8 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 
         <span class="export"><button class="ghost" (click)="print()">Print</button><button class="ghost" (click)="preview.set(null)">Close preview</button></span>
       </div>
       @if (p.checks.length) { <ul class="ye-checks">@for (c of p.checks; track c.code) { <li>{{ c.message }}</li> }</ul> }
+      <!-- AG-052 S7 / R14: information only, not a check. -->
+      @if (transit(p); as line) { <div class="att-note" style="margin-top:8px">{{ line }}</div> }
       <div class="card section" style="margin-top:10px">
         <h2 style="margin-top:0">Summary</h2>
         <table class="list">
@@ -147,6 +150,7 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 
           </table>
         } @else { <p class="muted">Loading...</p> }
         @if (closePreview()?.backup_warning; as w) { <div class="warn">{{ w }}</div> }
+        @if (transit(closePreview()); as line) { <div class="att-note">{{ line }}</div> }
         <p>This posts closing entries dated {{ settings.date(y.end) }} in every branch and keeps {{ monthOf(y.end) }} locked for all branches.
           It can only be undone by reopening the year.</p>
         <label>Type {{ short(y) }} to confirm <input name="confirm" [(ngModel)]="confirmText" autocomplete="off" /></label>
@@ -181,6 +185,11 @@ export class YearEndComponent implements OnInit {
   private http = inject(HttpClient);
   years = signal<Year[] | null>(null);
   preview = signal<Preview | null>(null);
+
+  transit(p: Preview | null): string {
+    return p ? inTransitLine(p, this.settings.date(p.fiscal_year.end), v => new MoneyPipe().transform(v)) : '';
+  }
+
   closePreview = signal<Preview | null>(null);
   closing = signal<Year | null>(null);
   reopening = signal<Year | null>(null);

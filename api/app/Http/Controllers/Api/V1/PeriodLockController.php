@@ -10,6 +10,7 @@ use App\Models\Transaction;
 use App\Models\User;
 use App\Models\YearEndClose;
 use App\Services\Backups\BackupStatus;
+use App\Services\TransferReceipts;
 use App\Support\BranchContext;
 use App\Support\BusinessDate;
 use App\Support\LedgerChecks;
@@ -104,6 +105,7 @@ class PeriodLockController extends Controller
         $self = fn ($r) => ($r->new_values['self'] ?? false) === true;
         $first = $open->isEmpty() ? $period : $open->min();
         $files = $rows->where('event', 'attachment.removed');
+        $periodEnd = CarbonImmutable::createFromFormat('!Y-m', $period)->endOfMonth()->format('Y-m-d');
 
         return [
             'period' => $period,
@@ -117,7 +119,10 @@ class PeriodLockController extends Controller
             'files_removed_self' => $files->filter($self)->count(),
             // AG-093 R15 (backups review F9): information only, it never blocks the lock.
             'backup_warning' => BackupStatus::warning(),
-        ];
+        ]
+            // AG-052 R8 / R14: transfers in transit at the period end, sent or received by a branch this lock newly
+            // closes. Information only: an open receipt never blocks a lock.
+            + app(TransferReceipts::class)->inTransitSummary($periodEnd, $open->keys()->map(fn ($id) => (int) $id)->all());
     }
 
     public function store(Request $request)

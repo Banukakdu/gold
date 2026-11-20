@@ -87,6 +87,12 @@ final class Settings
         return $this->raw('expense_negative_balance') ?? 'block';
     }
 
+    /** AG-052 R3: new between-branch transfers start as "Awaiting receipt". Default off (Q2). */
+    public function transferReceiptRequired(): bool
+    {
+        return $this->raw('transfer_receipt_required') === '1';
+    }
+
     /** The stored logo metadata (R3) or null. A legacy data: URI is not a logo any more (the migration converted it). */
     public function logo(): ?array
     {

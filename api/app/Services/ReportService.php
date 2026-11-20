@@ -18,6 +18,7 @@ use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use RuntimeException;
@@ -110,12 +111,17 @@ class ReportService
         ];
         $rules += match ($name) {
             'income-expense' => ['type' => ['nullable', Rule::in(['all', 'income', 'expense'])]],
-            'transfers' => ['types' => 'nullable|array', 'types.*' => ['string', Rule::in(self::MOVEMENT_TYPES)], 'page' => 'nullable|integer|min:1'],
+            'transfers' => ['types' => 'nullable|array', 'types.*' => ['string', Rule::in(self::MOVEMENT_TYPES)], 'page' => 'nullable|integer|min:1',
+                // AG-052 S5: receipt states, or in_transit (R14) on its own.
+                'receipt' => ['bail', 'nullable', 'array', TransferReceipts::filterRule([...array_keys(TransferReceipts::LABELS), TransferReceipts::IN_TRANSIT])]],
             'cash-book' => ['accounts' => 'nullable|array', 'accounts.*' => 'integer|distinct'],
             'trial-balance' => ['view' => ['nullable', Rule::in(['branch', 'consolidated'])], 'closing_entries' => 'nullable|boolean'],
             default => [],
         };
         $d = validator($input, $rules)->validate();
+        if ($name === 'transfers' && in_array(TransferReceipts::IN_TRANSIT, $d['receipt'] ?? [], true) && count(array_unique($d['receipt'])) > 1) {
+            throw ValidationException::withMessages(['receipt' => 'In transit at end date cannot be combined with other receipt values.']);
+        }
 
         $fy = null;
         if ($name === 'trial-balance') {
@@ -164,7 +170,8 @@ class ReportService
 
         $extra = match ($name) {
             'income-expense' => ['type' => $d['type'] ?? 'all'],
-            'transfers' => ['types' => $d['types'] ?? self::MOVEMENT_TYPES, 'page' => (int) ($d['page'] ?? 1)],
+            'transfers' => ['types' => $d['types'] ?? self::MOVEMENT_TYPES, 'page' => (int) ($d['page'] ?? 1),
+                'receipt' => array_values(array_unique(array_map('trim', $d['receipt'] ?? [])))],
             'cash-book' => ['accounts' => array_map('intval', $d['accounts'] ?? [])],
             'trial-balance' => ['view' => $d['view'] ?? 'branch', 'closing_entries' => filter_var($d['closing_entries'] ?? false, FILTER_VALIDATE_BOOLEAN),
                 'fiscal_year' => $fy->startYear],
@@ -387,6 +394,8 @@ class ReportService
     {
         $x = $this->cents('t.amount');
         $base = $this->movementQuery($p);
+        // The report also runs on a database migrated only up to the double-entry schema (double-entry AC 27).
+        $receiptColumns = Schema::hasColumn('transactions', 'receipt_status') ? 't.receipt_status, t.received_on' : 'NULL as receipt_status, NULL as received_on';
 
         $list = (clone $base)
             ->leftJoin('accounts as fa', 'fa.id', '=', 't.from_account_id')
@@ -396,6 +405,7 @@ class ReportService
             ->leftJoin('users as u', 'u.id', '=', 't.created_by')
             ->orderByDesc('t.txn_date')->orderByDesc('t.id')
             ->selectRaw("t.id, t.ref_no, t.type, t.txn_date, t.status, t.description, $x as cents, o.ref_no as orig_ref, o.type as orig_type,
+                $receiptColumns,
                 fb.code as from_branch, fa.name as from_account, tb.code as to_branch, ta.name as to_account, u.name as created_by");
 
         $map = fn ($r) => [
@@ -410,6 +420,9 @@ class ReportService
             'amount' => Money::fromCents($r->type === Transaction::REVERSAL ? -(int) $r->cents : (int) $r->cents),
             'status' => $r->type === Transaction::REVERSAL ? 'reversal' : $r->status,
             'reversal_of_ref' => $r->orig_ref,
+            // AG-052 S5: null = "Not required" (reversal rows never have one, Q3).
+            'receipt_status' => $r->receipt_status,
+            'received_on' => $r->received_on ? substr($r->received_on, 0, 10) : null,
             'description' => $r->description,
             'created_by' => $r->created_by,
         ];
@@ -455,7 +468,14 @@ class ReportService
             $net[$id] = $received[$id] - $v;
         }
 
+        $receipt = $p->extra['receipt'] ?? [];
+        $inTransit = $receipt === [TransferReceipts::IN_TRANSIT]
+            ? ['as_at' => $p->to, 'count' => $movements['total'], 'amount' => Money::fromCents((int) $cells->sum(fn ($c) => (int) $c->cents))]
+            : null;
+
         return $this->meta($p) + [
+            'receipt' => $receipt,
+            'in_transit' => $inTransit,
             'movements' => $movements,
             'net_moved' => Money::fromCents((int) $cells->sum(fn ($c) => (int) $c->cents)),
             'matrix' => [
@@ -473,15 +493,26 @@ class ReportService
         return $this->movementQuery($p)->count();
     }
 
+    /**
+     * AG-052 S5: a Receipt filter narrows the movements, the matrix and Net moved alike (as Types does). Reversal rows
+     * have no receipt, so they drop out. "In transit at end date" (R14) lists the originals in transit at To, whatever
+     * their date before To; From does not limit it.
+     */
     private function movementQuery(ReportParams $p): Builder
     {
         $types = $p->extra['types'] ?? self::MOVEMENT_TYPES;
+        $receipt = $p->extra['receipt'] ?? [];
         $ids = $p->branchIds();
 
-        return $this->countedTransactions(self::MOVEMENT_TYPES)
+        $q = $this->countedTransactions(self::MOVEMENT_TYPES)
             ->where(fn ($w) => $w->whereIn('t.type', $types)->orWhereIn('o.type', $types))
-            ->where(fn ($w) => $w->whereIn('t.branch_id', $ids)->orWhereIn('t.related_branch_id', $ids))
-            ->whereDate('t.txn_date', '>=', $p->from)->whereDate('t.txn_date', '<=', $p->to);
+            ->where(fn ($w) => $w->whereIn('t.branch_id', $ids)->orWhereIn('t.related_branch_id', $ids));
+        if ($receipt === [TransferReceipts::IN_TRANSIT]) {
+            return app(TransferReceipts::class)->whereInTransit($q, $p->to);
+        }
+
+        return $q->whereDate('t.txn_date', '>=', $p->from)->whereDate('t.txn_date', '<=', $p->to)
+            ->when($receipt, fn ($w) => $w->whereIn('t.receipt_status', $receipt));
     }
 
     // ------------------------------------------------------------------ AG-085 Daily Cash Book (R7)

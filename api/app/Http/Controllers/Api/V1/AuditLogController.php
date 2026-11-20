@@ -50,7 +50,8 @@ class AuditLogController extends Controller
 
     /** Event groups of the filter: [prefixes, exact events]. */
     public const GROUPS = [
-        'transactions' => [['transaction.'], []],
+        // AG-052 R12: receipt events are in the Transactions group.
+        'transactions' => [['transaction.', 'transfer.receipt_'], []],
         'voids' => [[], ['transaction.voided', 'transaction.reversed']],
         'users' => [['user.'], []],
         'roles' => [['role.'], []],
@@ -81,6 +82,9 @@ class AuditLogController extends Controller
         'transaction.fund_return' => 'Fund return recorded',
         'transaction.branch_transfer' => 'Branch transfer recorded',
         'transaction.internal_transfer' => 'Internal transfer recorded',
+        'transfer.receipt_received' => 'Receipt confirmed',
+        'transfer.receipt_disputed' => 'Discrepancy reported',
+        'transfer.receipt_cancelled' => 'Receipt cancelled (reversed)',
         'period.locked' => 'Period locked',
         'period.unlocked' => 'Period unlocked',
         'report.exported' => 'Report exported',
