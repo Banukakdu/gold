@@ -60,6 +60,11 @@ return new class extends Migration
         if (! Schema::hasIndex('transactions', self::STATUS_INDEX)) {
             Schema::table('transactions', fn (Blueprint $t) => $t->index(['related_branch_id', 'receipt_status'], self::STATUS_INDEX));
         }
+        // A previous down() may have left the related_branch_id foreign key its own index: drop it once another
+        // index serves the foreign key again, so a rollback and re-run leave no redundant index behind.
+        if ($mysql && Schema::hasIndex('transactions', self::RELATED_FK) && $this->otherIndexStartsWith('related_branch_id', self::RELATED_FK)) {
+            Schema::table('transactions', fn (Blueprint $t) => $t->dropIndex(self::RELATED_FK));
+        }
 
         $now = now();
         DB::table('settings')->insertOrIgnore(['key' => 'transfer_receipt_required', 'value' => '0', 'created_at' => $now, 'updated_at' => $now]);
@@ -69,7 +74,8 @@ return new class extends Migration
 
     public function down(): void
     {
-        // The receipt columns are the only record of who confirmed each cash handover.
+        // The receipt columns are the only record of who confirmed each cash handover. CI's rollback step relies on
+        // `migrate:fresh --seed` posting no receipts (MigrationTest checks that the seed leaves none).
         if (Schema::hasColumn('transactions', 'receipt_status') && DB::table('transactions')->whereNotNull('receipt_status')->exists()) {
             throw new RuntimeException('Rollback stopped before any change: transactions hold transfer receipts, and rolling back '
                 .'would drop who confirmed them. Restore a backup taken before this migration instead.');
@@ -77,7 +83,8 @@ return new class extends Migration
         $mysql = DB::connection()->getDriverName() === 'mysql';
 
         // MySQL may use the composite as the related_branch_id foreign key's index (error 1553 on drop): give the
-        // foreign key its own index first when no other index would serve it.
+        // foreign key its own index first when no other index would serve it. It stays after the rollback (the foreign
+        // key needs it); the next up() drops it again.
         if ($mysql && Schema::hasIndex('transactions', self::STATUS_INDEX) && ! $this->otherIndexStartsWith('related_branch_id', self::STATUS_INDEX)) {
             Schema::table('transactions', fn (Blueprint $t) => $t->index('related_branch_id', self::RELATED_FK));
         }

@@ -33,6 +33,7 @@ const BUCKETS: Record<string, string> = { '0_1': '0-1 days', '2_3': '2-3 days', 
         <section class="card section tr-widget">
           <h2>Transfers to confirm</h2>
           @if (ok()) { <div class="ok">{{ ok() }}</div> }
+          @if (warn()) { <div class="alert">{{ warn() }}</div> }
           <div class="kpis tr-buckets">
             @for (b of r.summary.buckets; track b.key) {
               <div class="kpi" [class.tr-late]="b.key === '8_plus' && b.count > 0">
@@ -110,7 +111,7 @@ const BUCKETS: Record<string, string> = { '0_1': '0-1 days', '2_3': '2-3 days', 
     } @else if (error()) { <div class="alert">{{ error() }}</div> }
 
     @if (dialog(); as d) {
-      <ag-receipt-dialog [target]="d.target" [mode]="d.mode" (done)="done($event)" (cancelled)="dialog.set(null)" (refused)="load()" />
+      <ag-receipt-dialog [target]="d.target" [mode]="d.mode" (done)="done($event)" (cancelled)="dialog.set(null)" (refused)="refused($event)" />
     }
   `,
 })
@@ -120,25 +121,48 @@ export class TransferReceiptsComponent implements OnInit {
   r = signal<Receipts | null>(null);
   error = signal('');
   ok = signal('');
+  warn = signal('');
   dialog = signal<{ target: ReceiptTarget; mode: 'received' | 'discrepancy' } | null>(null);
 
   ngOnInit() { this.load(); }
 
-  load() {
+  load(after?: (r: Receipts) => void) {
     this.http.get<Receipts>('/api/v1/transfer-receipts').subscribe({
-      next: r => { this.r.set(r); this.error.set(''); },
+      next: r => { this.r.set(r); this.error.set(''); after?.(r); },
       error: () => this.error.set('Could not load the transfers to confirm.'),
     });
   }
 
   open(t: Row, mode: 'received' | 'discrepancy') {
     this.ok.set('');
-    this.dialog.set({ mode, target: { id: t.id, ref_no: t.ref_no, txn_date: t.txn_date, amount: t.amount, receipt_status: t.receipt_status, note_required: t.note_required } });
+    this.warn.set('');
+    this.dialog.set({ mode, target: this.target(t) });
+  }
+
+  private target(t: Row): ReceiptTarget {
+    return { id: t.id, ref_no: t.ref_no, txn_date: t.txn_date, amount: t.amount, receipt_status: t.receipt_status, note_required: t.note_required };
+  }
+
+  /** A 422 (e.g. someone else confirmed or disputed it meanwhile): reload, then reopen the dialog on the new state or close it. */
+  refused(message: string) {
+    const d = this.dialog();
+    if (!d) return;
+    this.load(r => {
+      const t = r.incoming.data.find(x => x.id === d.target.id);
+      const still = t && t.can_acknowledge && (d.mode === 'received' || t.receipt_status === 'awaiting');
+      if (still && t.receipt_status !== d.target.receipt_status) {
+        this.dialog.set({ mode: d.mode, target: this.target(t) });
+      } else if (!still) {
+        this.dialog.set(null);
+        this.warn.set(message);
+      }
+    });
   }
 
   done(res: ReceiptResult) {
     const mode = this.dialog()?.mode;
     this.dialog.set(null);
+    this.warn.set('');
     this.ok.set(mode === 'received' ? `Receipt of ${res.ref_no} confirmed.` : `Discrepancy on ${res.ref_no} reported.`);
     this.load();
   }

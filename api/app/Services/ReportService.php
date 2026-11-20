@@ -38,6 +38,17 @@ use RuntimeException;
  */
 class ReportService
 {
+    /**
+     * AG-052: the receipt columns exist. Checked once per process (review minor 5); forgotten whenever migrations run
+     * (AppServiceProvider), so a rollback is seen.
+     */
+    private static ?bool $receiptColumns = null;
+
+    public static function forgetSchemaCache(): void
+    {
+        self::$receiptColumns = null;
+    }
+
     public const NAMES = ['income-expense', 'branch-comparison', 'transfers', 'cash-book', 'trial-balance'];
 
     /** Excel export and cash book screen cap (detail rows). */
@@ -395,7 +406,8 @@ class ReportService
         $x = $this->cents('t.amount');
         $base = $this->movementQuery($p);
         // The report also runs on a database migrated only up to the double-entry schema (double-entry AC 27).
-        $receiptColumns = Schema::hasColumn('transactions', 'receipt_status') ? 't.receipt_status, t.received_on' : 'NULL as receipt_status, NULL as received_on';
+        self::$receiptColumns ??= Schema::hasColumn('transactions', 'receipt_status');
+        $receiptColumns = self::$receiptColumns ? 't.receipt_status, t.received_on' : 'NULL as receipt_status, NULL as received_on';
 
         $list = (clone $base)
             ->leftJoin('accounts as fa', 'fa.id', '=', 't.from_account_id')

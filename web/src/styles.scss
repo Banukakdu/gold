@@ -243,6 +243,8 @@ tr.tr-red td { background: #fbeceb; }
 .tr-note { font-size: 12px; summary { cursor: pointer; color: var(--gold); } }
 .tr-actions { white-space: nowrap; }
 .tr-panel dl { margin: 0; }
+.tr-tag { margin-left: 6px; }
+.tr-check { flex-direction: row !important; gap: 8px; align-items: center; color: var(--ink); }
 @media (max-width: 760px) {
   .tr-actions { white-space: normal; }
   .tr-actions button.link { min-height: 44px; display: block; }

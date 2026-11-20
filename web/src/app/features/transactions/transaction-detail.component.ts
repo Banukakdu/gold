@@ -39,6 +39,8 @@ interface Detail {
   receipt_at?: string | null;
   can_acknowledge?: boolean;
   receipt_note_required?: boolean;
+  /** The latest discrepancy report (kept visible after it was settled). */
+  receipt_discrepancy?: { note: string | null; by: { id: number; name: string } | null; at: string | null } | null;
 }
 
 interface LedgerLine {
@@ -97,7 +99,11 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
               <dd>{{ t.receipt_by.name }} · {{ settings.dateTime(t.receipt_at) }}
                 @if (t.receipt_by.is_super_admin && t.receipt_status === 'received') { <span class="tag">Confirmed by Super Admin</span> }</dd>
             }
-            @if (t.receipt_note) { <dt>Note</dt><dd class="att-pre">{{ t.receipt_note }}</dd> }
+            @if (t.receipt_note) { <dt>{{ t.receipt_status === 'received' && t.receipt_discrepancy ? 'How it was settled' : 'Note' }}</dt><dd class="att-pre">{{ t.receipt_note }}</dd> }
+            @if (t.receipt_discrepancy && t.receipt_status !== 'disputed') {
+              <dt>Discrepancy reported</dt>
+              <dd class="att-pre">{{ t.receipt_discrepancy.note }}<br /><small class="muted">{{ t.receipt_discrepancy.by?.name }} · {{ settings.dateTime(t.receipt_discrepancy.at) }}</small></dd>
+            }
           </dl>
           @if (t.can_acknowledge) {
             <p>
@@ -109,7 +115,7 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
           }
         </div>
         @if (receiptMode(); as mode) {
-          <ag-receipt-dialog [mode]="mode" (cancelled)="receiptMode.set(null)" (done)="receiptDone($event, mode)" (refused)="reload()"
+          <ag-receipt-dialog [mode]="mode" (cancelled)="receiptMode.set(null)" (done)="receiptDone($event, mode)" (refused)="receiptRefused($event)"
             [target]="{ id: t.id, ref_no: t.ref_no, txn_date: t.txn_date, amount: t.amount, receipt_status: t.receipt_status, note_required: t.receipt_note_required }" />
         }
       }
@@ -262,8 +268,19 @@ export class TransactionDetailComponent implements OnInit {
     this.reload();
   }
 
-  reload() {
-    this.http.get<Detail>(`/api/v1/transactions/${this.id}`).subscribe({ next: t => this.t.set(t), error: e => this.msg.set(errorText(e)) });
+  reload(after?: (t: Detail) => void) {
+    this.http.get<Detail>(`/api/v1/transactions/${this.id}`).subscribe({ next: t => { this.t.set(t); after?.(t); }, error: e => this.msg.set(errorText(e)) });
+  }
+
+  /** A 422 from the dialog: reload; the open dialog picks up the new state, or closes when nothing is left to do. */
+  receiptRefused(message: string) {
+    const mode = this.receiptMode();
+    this.reload(t => {
+      if (!t.can_acknowledge || (mode === 'discrepancy' && t.receipt_status !== 'awaiting')) {
+        this.receiptMode.set(null);
+        this.msg.set(message);
+      }
+    });
   }
 
   ngOnInit() {

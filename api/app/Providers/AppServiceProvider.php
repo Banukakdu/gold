@@ -6,12 +6,15 @@ use App\Services\Backups\BackupException;
 use App\Services\Backups\DatabaseDumper;
 use App\Services\Backups\MySqlDumper;
 use App\Services\Backups\SqliteDumper;
+use App\Services\ReportService;
 use App\Support\BranchContext;
 use App\Support\Minutes;
 use App\Support\Settings;
 use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Database\Events\MigrationsEnded;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Validation\Rules\Password;
@@ -37,6 +40,9 @@ class AppServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
+        // AG-052: ReportService caches whether the receipt columns exist; a migrate or rollback may change that.
+        Event::listen(MigrationsEnded::class, fn () => ReportService::forgetSchemaCache());
+
         // Password reset spec R10: the one password policy. Every endpoint (and the console command) that accepts a
         // new password uses ['required', 'string', Password::defaults(), 'confirmed'] and keeps no rule of its own.
         Password::defaults(fn () => Password::min(8)->letters()->numbers());

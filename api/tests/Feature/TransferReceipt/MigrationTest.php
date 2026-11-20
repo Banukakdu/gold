@@ -64,6 +64,8 @@ class MigrationTest extends TestCase
         }
         $this->assertNotContains('transfer.acknowledge', $t['Viewer']);
         $this->assertSame('0', DB::table('settings')->where('key', 'transfer_receipt_required')->value('value'));
+        // CI rolls back after migrate:fresh --seed; down() refuses while receipts exist.
+        $this->assertFalse(DB::table('transactions')->whereNotNull('receipt_status')->exists());
     }
 
     public function test_ac26_existing_install_gets_the_key_on_star_templates_only_and_rollback_is_clean(): void

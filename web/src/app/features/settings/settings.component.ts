@@ -107,12 +107,13 @@ const SAMPLE = '2026-10-05';
 
         <fieldset>
           <legend>Transfers</legend>
-          <label style="display:flex;gap:8px;align-items:flex-start">
+          <label class="tr-check">
             <input type="checkbox" style="width:auto" name="transfer_receipt_required" [(ngModel)]="form.transfer_receipt_required" />
             <span>Receiving branch must confirm receipt of transfers between branches</span>
           </label>
           <small class="muted">Applies to transfers posted after you turn it on. It does not change balances or reports.
-            Grant 'transfer.acknowledge' to the Accountant and Cashier roles in each branch before turning this on.</small>
+            Grant 'transfer.acknowledge' to the Branch Admin, Accountant and Cashier roles in each branch before turning this on
+            (branch roles already copied from the templates do not get it automatically).</small>
           @if (err()['transfer_receipt_required']) { <span class="neg">{{ err()['transfer_receipt_required'] }}</span> }
           <div class="changed">{{ changed('transfer_receipt_required') }}</div>
         </fieldset>

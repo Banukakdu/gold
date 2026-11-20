@@ -89,6 +89,7 @@ class TransactionController extends Controller
         $receipts = app(TransferReceipts::class);
         $transaction->setAttribute('can_acknowledge', $receipts->canAcknowledge($transaction, request()->user()));
         $transaction->setAttribute('receipt_note_required', $receipts->noteRequired($transaction));
+        $transaction->setAttribute('receipt_discrepancy', $receipts->lastDiscrepancy($transaction));
         $transaction->loadCount(self::attachmentCounts());
         $this->tagAuthors(collect([$transaction]));
         $this->markLegacyVoids(collect([$transaction]));

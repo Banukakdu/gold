@@ -223,7 +223,7 @@ interface Chip { key: string; label: string; remove: string[] }
         <span class="tag" [attr.data-s]="t.status">{{ statusLabel(t.status) }}</span>
       }
       @if (t.receipt_status) {
-        <span class="tag" [attr.data-s]="t.receipt_status === 'disputed' ? 'reversed' : null" [title]="receiptTitle(t)">{{ receiptTag(t.receipt_status) }}</span>
+        <span class="tag tr-tag" [attr.data-s]="t.receipt_status === 'disputed' ? 'reversed' : null" [title]="receiptTitle(t)">{{ receiptTag(t.receipt_status) }}</span>
       }
     </ng-template>
 

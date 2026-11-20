@@ -63,6 +63,8 @@ class TransferReceipts
 
     public const REMOTE_NOTE = 'From All branches, say what you checked, e.g. the bank statement date (10 to 500 characters).';
 
+    public const CHANGED = 'This receipt was changed by someone else. Reload and try again.';
+
     public const DISPUTE_NOTE = 'Describe the discrepancy (10 to 500 characters).';
 
     public static function label(?string $state): string
@@ -113,6 +115,13 @@ class TransferReceipts
 
             $action = validator($input, ['action' => 'required|in:received,discrepancy'],
                 ['action.in' => 'Action must be received or discrepancy.'])->validate()['action'];
+            // R6 concurrency (review finding 1): the state the user saw. A confirm typed against "awaiting" must never
+            // settle a discrepancy reported meanwhile; the user reloads and decides again.
+            $expected = validator($input, ['expected_status' => ['nullable', 'string', 'in:'.implode(',', self::OPEN)]])
+                ->validate()['expected_status'] ?? null;
+            if ($expected !== null && $expected !== $t->receipt_status) {
+                abort(422, self::CHANGED);
+            }
             if ($action === 'discrepancy' && $t->receipt_status === self::DISPUTED) {
                 abort(422, 'A discrepancy is already reported. Confirm receipt when the money arrives, or ask '.$t->branch->code.' to reverse the transfer.');
             }
@@ -123,13 +132,8 @@ class TransferReceipts
             $new = $action === 'received' ? self::RECEIVED : self::DISPUTED;
             $cols = ['receipt_status' => $new, 'receipt_note' => $d['note'], 'receipt_by' => $user->id, 'receipt_at' => $now, 'updated_at' => $now]
                 + ($action === 'received' ? ['received_on' => $d['received_on']] : []);
-            // R6 concurrency: conditional on the state just checked (the row is also locked).
-            $updated = Transaction::withoutGlobalScopes()->whereKey($t->id)->where('status', 'posted')
-                ->where('receipt_status', $old)->update($cols);
-            if ($updated !== 1) {
-                $this->refuse($t->fresh(['branch:id,code', 'receiptBy:id,name']), $user);
-                abort(422, 'This receipt was changed by someone else. Reload and try again.');
-            }
+            // The row is locked (lockForUpdate above), so the state checked is the state written over.
+            Transaction::withoutGlobalScopes()->whereKey($t->id)->update($cols);
             $t->refresh();
             $values = ['receipt_status' => $new, 'receipt_at' => $now->toIso8601String(), 'note' => $d['note'], 'all_branches' => ! $ctx->isScoped()]
                 + ($action === 'received' ? ['received_on' => $d['received_on']] : []);
@@ -200,6 +204,22 @@ class TransferReceipts
         return in_array($t->type, self::TYPES, true) && $t->status === 'posted' && in_array($t->receipt_status, self::OPEN, true)
             && $this->visible($t, app(BranchContext::class)) && (int) $t->created_by !== (int) $user->id
             && ($hasKey ?? $user->canDo('transfer.acknowledge'));
+    }
+
+    /**
+     * S3 (QA O2): the discrepancy that a confirmation settled, from its audit row (the receipt columns then hold the
+     * settlement). Null when the transfer was never disputed.
+     */
+    public function lastDiscrepancy(Transaction $t): ?array
+    {
+        if ($t->receipt_status === null) {
+            return null;
+        }
+        $a = AuditLog::with('user:id,name')->where('event', 'transfer.receipt_disputed')->where('auditable_type', Transaction::class)
+            ->where('auditable_id', $t->id)->latest('id')->first();
+
+        return $a ? ['note' => $a->new_values['note'] ?? null, 'by' => $a->user ? ['id' => $a->user->id, 'name' => $a->user->name] : null,
+            'at' => $a->created_at?->toIso8601String()] : null;
     }
 
     /** S2 / S3: the confirm dialog requires a note (review findings 3 and 4). */

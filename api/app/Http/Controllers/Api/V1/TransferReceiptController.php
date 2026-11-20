@@ -32,7 +32,7 @@ class TransferReceiptController extends Controller
     /** POST /transactions/{id}/receipt. */
     public function store(Request $request, int $transactionId)
     {
-        $t = $this->receipts->act($transactionId, $request->only(['action', 'received_on', 'note']), $request->user());
+        $t = $this->receipts->act($transactionId, $request->only(['action', 'received_on', 'note', 'expected_status']), $request->user());
 
         return self::present($t->load('receiptBy:id,name,is_super_admin'));
     }

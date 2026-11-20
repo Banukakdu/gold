@@ -311,7 +311,7 @@ class AuditLogController extends Controller
                 'auditable_id' => $a->auditable_id,
                 'old_values' => $old,
                 'new_values' => $new,
-                'summary' => self::summary($old, $new),
+                'summary' => str_starts_with($a->event, 'transfer.receipt_') ? self::receiptSummary($old, $new) : self::summary($old, $new),
                 'self' => ($a->new_values['self'] ?? false) === true,
                 'ip' => $a->ip,
                 'user_agent' => $a->user_agent,
@@ -423,6 +423,22 @@ class AuditLogController extends Controller
             $parts[] = $k.': '.self::short($old[$k] ?? null).' -> '.self::short($new[$k] ?? null);
             if (count($parts) === 2) {
                 break;
+            }
+        }
+
+        return implode('; ', $parts);
+    }
+
+    /**
+     * AG-052 (QA O3): a receipt row always shows the state change, then the business date and the note, so a back-dated
+     * confirmation is visible in the list.
+     */
+    public static function receiptSummary(?array $old, ?array $new): string
+    {
+        $parts = ['receipt_status: '.self::short($old['receipt_status'] ?? null).' -> '.self::short($new['receipt_status'] ?? null)];
+        foreach (['received_on', 'note', 'reversal_ref'] as $k) {
+            if (($new[$k] ?? null) !== null && $new[$k] !== '') {
+                $parts[] = $k.': '.self::short($new[$k]);
             }
         }
 

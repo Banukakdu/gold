@@ -1,4 +1,4 @@
-import { Component, EventEmitter, Input, OnInit, Output, inject, signal } from '@angular/core';
+import { Component, EventEmitter, HostListener, Input, OnInit, Output, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { errorText } from './api.interceptor';
@@ -40,7 +40,8 @@ export interface ReceiptResult {
 
 /**
  * S2 / S3 dialogs: "Confirm receipt" (Received on + Note) and "Report a discrepancy" (Note, 10-500). Errors show the
- * API message in the dialog; a 422 also tells the host (the widget reloads).
+ * API message in the dialog; a 422 also tells the host, which reloads and passes the new state back in (the
+ * dialog stays open on the fresh state, or the host closes it when nothing is left to do). Esc closes it.
  */
 @Component({
   selector: 'ag-receipt-dialog',
@@ -78,8 +79,8 @@ export class ReceiptDialogComponent implements OnInit {
   @Input({ required: true }) mode!: 'received' | 'discrepancy';
   @Output() done = new EventEmitter<ReceiptResult>();
   @Output() cancelled = new EventEmitter<void>();
-  /** A 422: the receipt changed meanwhile (the host reloads). */
-  @Output() refused = new EventEmitter<void>();
+  /** A 422 (e.g. the receipt changed meanwhile): carries the API message; the host reloads. */
+  @Output() refused = new EventEmitter<string>();
 
   private http = inject(HttpClient);
   private auth = inject(AuthService);
@@ -92,6 +93,11 @@ export class ReceiptDialogComponent implements OnInit {
   ngOnInit() {
     this.today = colomboToday();
     this.receivedOn = this.today;
+  }
+
+  @HostListener('document:keydown.escape')
+  onEscape() {
+    if (!this.busy()) this.cancelled.emit();
   }
 
   private noteRequired(): boolean {
@@ -117,7 +123,9 @@ export class ReceiptDialogComponent implements OnInit {
     if (this.busy()) return;
     this.busy.set(true);
     this.error.set('');
+    // R6: the state the user saw; the API answers 422 when someone else changed it meanwhile.
     const body: Record<string, string> = { action: this.mode };
+    if (this.target.receipt_status) body['expected_status'] = this.target.receipt_status;
     if (this.mode === 'received') body['received_on'] = this.receivedOn;
     if (this.note.trim()) body['note'] = this.note.trim();
     this.http.post<ReceiptResult>(`/api/v1/transactions/${this.target.id}/receipt`, body).subscribe({
@@ -125,7 +133,7 @@ export class ReceiptDialogComponent implements OnInit {
       error: e => {
         this.busy.set(false);
         this.error.set(errorText(e));
-        if (e?.status === 422 && !e?.error?.errors) this.refused.emit();
+        if (e?.status === 422 && !e?.error?.errors) this.refused.emit(errorText(e));
       },
     });
   }
