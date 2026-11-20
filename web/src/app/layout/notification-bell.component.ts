@@ -3,7 +3,7 @@ import { NavigationEnd, Router, RouterLink } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { filter } from 'rxjs';
 import { colomboDateTime } from '../core/dates';
-import { NotificationRow, NotificationsService, badgeText, relativeTime } from '../core/notifications.service';
+import { FetchMark, NotificationRow, NotificationsService, badgeText, relativeTime } from '../core/notifications.service';
 
 /** Kind icons (text glyphs, no icon library). */
 export const KIND_ICON: Record<string, string> = {
@@ -37,11 +37,12 @@ export function kindIcon(kind: string): string { return KIND_ICON[kind] ?? '•'
       @if (badge()) { <span class="nb-badge" aria-hidden="true">{{ badge() }}</span> }
     </button>
     @if (openState()) {
-      <div class="nb-panel card" role="dialog" aria-label="Notifications">
+      <div class="nb-panel card" role="dialog" aria-label="Notifications" [style.--nb-top]="panelTop() + 'px'">
         <div class="nb-head">
           <b>Notifications</b>
-          <button type="button" class="link" [disabled]="svc.unread() === 0 || marking()" (click)="markAll()">Mark all as read</button>
+          <button type="button" class="link" [disabled]="!canMarkAll()" (click)="markAll()">Mark all as read</button>
         </div>
+        @if (markError()) { <p class="nb-empty nb-error" role="alert">Could not mark the notifications as read. Try again.</p> }
         <div class="nb-body">
           @if (error()) {
             <p class="nb-empty">Could not load notifications. Try again. <button type="button" class="link" (click)="load()">Retry</button></p>
@@ -80,10 +81,15 @@ export class NotificationBellComponent implements OnInit {
   rows = signal<NotificationRow[] | null>(null);
   error = signal(false);
   marking = signal(false);
-  private fetchedAt: string | null = null;
+  markError = signal(false);
+  /** Phone layout (QA 3): the panel is fixed from just under the bell to the bottom of the visible viewport. */
+  panelTop = signal(64);
+  private mark: FetchMark | null = null;
 
   badge = computed(() => badgeText(this.svc.unread()));
   label = computed(() => `Notifications, ${this.svc.unread()} unread`);
+  /** Only for a list that loaded (its fetched_at bounds what is marked, R8), one request at a time. */
+  canMarkAll = computed(() => this.rows() !== null && !this.error() && !this.marking() && this.svc.unread() > 0);
 
   ngOnInit() {
     this.svc.start();
@@ -98,29 +104,57 @@ export class NotificationBellComponent implements OnInit {
   toggle() {
     if (this.openState()) { this.close(); return; }
     this.openState.set(true);
+    this.place(true);
     this.load();
   }
+
+  /**
+   * Where the phone panel starts: under the bell. When the bell sits so low that little room is left (the sidebar
+   * stacks above the header at phone width), the page is first scrolled to bring the bell near the top, so the panel
+   * and its "See all" footer fit the visible viewport with the list scrolling inside.
+   */
+  private place(scroll = false) {
+    const btn = this.host.nativeElement.querySelector('.nb-bell') as HTMLElement | null;
+    const win = this.host.nativeElement.ownerDocument?.defaultView;
+    if (!btn || !win) return;
+    let r = btn.getBoundingClientRect();
+    if (scroll && win.innerHeight - r.bottom < 320 && r.top > 8) {
+      win.scrollBy(0, r.top - 8);
+      r = btn.getBoundingClientRect();
+    }
+    this.panelTop.set(Math.max(8, Math.round(r.bottom + 6)));
+  }
+
+  @HostListener('window:resize')
+  @HostListener('window:scroll')
+  onViewportChange() { if (this.openState()) this.place(); }
 
   close() { this.openState.set(false); }
 
   load() {
     this.error.set(false);
+    this.markError.set(false);
+    this.rows.set(null);
+    this.mark = null;
     this.svc.list({ filter: 'all', per_page: 10 }).subscribe({
-      next: p => { this.rows.set(p.data); this.fetchedAt = p.fetched_at; this.svc.unread.set(p.unread_count); },
+      next: p => { this.rows.set(p.data); this.mark = { fetched_at: p.fetched_at, fetched_id: p.fetched_id }; this.svc.unread.set(p.unread_count); },
       // The badge keeps its last value.
       error: () => this.error.set(true),
     });
   }
 
   async markAll() {
+    const mark = this.mark;
+    if (!mark || !this.canMarkAll()) return;
     this.marking.set(true);
+    this.markError.set(false);
     try {
-      await this.svc.markAll(this.fetchedAt);
-      const before = this.fetchedAt ? new Date(this.fetchedAt).getTime() : Infinity;
+      await this.svc.markAll(mark);
+      const before = new Date(mark.fetched_at).getTime();
       const now = new Date().toISOString();
       this.rows.update(rs => (rs ?? []).map(r => !r.read_at && new Date(r.created_at).getTime() <= before ? { ...r, read_at: now } : r));
     } catch {
-      this.error.set(true);
+      this.markError.set(true);
     } finally {
       this.marking.set(false);
     }

@@ -130,24 +130,35 @@ class InAppNotifications
 
     // ------------------------------------------------------------------ reading (section 5, R5)
 
-    /** The branches whose rows this user may read in full; null = every branch (Super Admin). @return int[]|null */
-    public function visibleBranchIds(User $user): ?array
+    /**
+     * What this user may read in full: `branches` null = every branch (Super Admin), else the current memberships;
+     * `approver` = isApprover() now. Computed once per request.
+     *
+     * @return array{branches: int[]|null, approver: bool}
+     */
+    public function viewer(User $user): array
     {
-        return $user->is_super_admin ? null : $user->branches()->pluck('branches.id')->map(fn ($v) => (int) $v)->all();
+        return [
+            'branches' => $user->is_super_admin ? null : $user->branches()->pluck('branches.id')->map(fn ($v) => (int) $v)->all(),
+            'approver' => $this->isApprover($user),
+        ];
     }
 
     /**
      * Section 5 row. R5 (accounting review 2): a row about a branch the user can no longer see is shown without its
-     * body and with a title that carries no amount or name; the stored row is not changed.
+     * body and with a title that carries no amount or name; the stored row is not changed. An approval request is tagged
+     * MAIN but describes another branch's transfer, so it is also redacted once the user is no longer an approver
+     * (review finding 1).
      *
-     * @param  int[]|null  $visible  from visibleBranchIds()
+     * @param  array{branches: int[]|null, approver: bool}  $viewer  from viewer()
      */
-    public function present(DatabaseNotification $n, ?array $visible): array
+    public function present(DatabaseNotification $n, array $viewer): array
     {
         $d = (array) $n->data;
         $branchId = isset($d['branch_id']) ? (int) $d['branch_id'] : null;
         $code = $d['branch_code'] ?? null;
-        $redacted = $branchId !== null && $visible !== null && ! in_array($branchId, $visible, true);
+        $redacted = ($branchId !== null && $viewer['branches'] !== null && ! in_array($branchId, $viewer['branches'], true))
+            || ($n->type === InAppNotification::APPROVAL_REQUESTED && ! $viewer['approver']);
 
         return [
             'id' => $n->id,

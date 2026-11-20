@@ -120,10 +120,11 @@ export class NotificationsComponent implements OnInit {
 
   async markAll() {
     const p = this.page();
+    if (!p || this.marking()) return; // one request at a time, only for a loaded list (R8)
     this.marking.set(true);
     try {
-      await this.svc.markAll(p?.fetched_at ?? null);
-      this.load(p?.meta.current_page ?? 1);
+      await this.svc.markAll(p);
+      this.load(p.meta.current_page);
     } catch {
       this.msg.set('Could not mark the notifications as read. Try again.');
     } finally {

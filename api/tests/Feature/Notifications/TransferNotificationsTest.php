@@ -2,6 +2,8 @@
 
 namespace Tests\Feature\Notifications;
 
+use App\Events\TransferApprovalRequested;
+use App\Events\TransferReceiptRequested;
 use App\Models\AuditLog;
 use App\Models\Transaction;
 use App\Notifications\InAppNotification as N;
@@ -249,5 +251,43 @@ class TransferNotificationsTest extends NotificationsTestCase
         $this->assertSame(['transfer.rejected'], AuditLog::where('id', '>', AuditLog::max('id') - (AuditLog::count() - $before))->pluck('event')->all());
         $this->assertSame(0, AuditLog::where('event', 'like', '%notification%')->count());
         $this->assertSame(0, DB::table('notifications')->where('type', N::APPROVAL_REQUESTED)->whereNull('read_at')->count());
+    }
+
+    public function test_review2_queued_approval_email_is_dropped_when_decided_or_switched_off(): void
+    {
+        $t1 = $this->t1();
+        $mail = Notification::sent($this->mainBa, TransferApprovalRequestedMail::class)->sole();
+        $this->assertTrue($mail->shouldSend($this->mainBa, 'mail'));
+
+        $this->mainBa->forceFill(['approval_request_email' => false])->save();
+        $this->assertFalse($mail->shouldSend($this->mainBa, 'mail'));
+        $this->mainBa->forceFill(['approval_request_email' => true])->save();
+        $this->assertTrue($mail->shouldSend($this->mainBa, 'mail'));
+
+        $this->cancel($t1->id)->assertOk();
+        $this->assertFalse($mail->shouldSend($this->mainBa, 'mail'));
+        (new ChannelManager($this->app))->sendNow($this->mainBa->fresh(), $mail);
+        $this->assertCount(0, Mail::mailer()->getSymfonyTransport()->messages());
+
+        $t2 = $this->t1('120000.00');
+        $mail2 = Notification::sent($this->mainBa, TransferApprovalRequestedMail::class)->firstWhere('transactionId', $t2->id);
+        $this->approve($t2->id, $this->admin, 'all')->assertOk();
+        $this->assertFalse($mail2->shouldSend($this->mainBa, 'mail'));
+    }
+
+    public function test_review7_the_events_carry_the_actor_who_is_never_notified(): void
+    {
+        $t1 = $this->t1();
+        DB::table('notifications')->delete();
+        // A console dispatch (no signed-in user) still excludes the user named by the event.
+        $this->app['auth']->forgetGuards();
+        event(new TransferApprovalRequested($t1->id, $this->mainBa->id));
+        $this->assertSame([(int) $this->admin->id], $this->recipients(N::APPROVAL_REQUESTED, $t1));
+
+        $t2 = $this->t2();
+        DB::table('notifications')->delete();
+        $this->app['auth']->forgetGuards();
+        event(new TransferReceiptRequested($t2->id, $this->galAcc->id));
+        $this->assertSame(self::ids([$this->galCsh, $this->ba]), $this->recipients(N::RECEIPT_REQUESTED, $t2));
     }
 }

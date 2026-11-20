@@ -328,7 +328,10 @@ a.nt-row:hover { background: #faf6ec; }
   .top { padding: 8px 16px; gap: 8px; }
   .switcher select { min-width: 0; max-width: 200px; }
   ag-notification-bell { position: static; }
-  .nb-panel { position: absolute; top: 100%; left: 16px; right: 16px; width: auto; max-width: none; max-height: 70vh; }
+  /* QA 3: fixed from under the bell (--nb-top, set by the component) to 16px above the bottom of the visible viewport,
+     so the header and "See all" are always on screen and only the list scrolls. */
+  .nb-panel { position: fixed; top: var(--nb-top, 64px); left: 16px; right: 16px; width: auto; max-width: none;
+    max-height: min(70vh, calc(100vh - var(--nb-top, 64px) - 16px)); max-height: min(70vh, calc(100dvh - var(--nb-top, 64px) - 16px)); }
   .nt-th { display: none; }
   .nt-row { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: 'msg msg' 'branch when'; }
   .nt-when { flex-direction: row; color: var(--muted); font-size: 12px; align-items: center; }

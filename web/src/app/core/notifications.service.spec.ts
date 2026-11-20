@@ -15,6 +15,9 @@ const MAIN = { id: 1, code: 'MAIN', name: 'Main', is_main: true, roles: ['Branch
 const KDY = { id: 2, code: 'KDY', name: 'Kandy', is_main: false, roles: ['Branch Admin'], permissions: ['transaction.view'] };
 const GAL = { id: 3, code: 'GAL', name: 'Galle', is_main: false, roles: ['Cashier'], permissions: ['transaction.view'] };
 
+/** An ordered-UUID high-water mark as the list returns it. */
+export const FID = '0193a1b2-c3d4-4e5f-8a9b-0c1d2e3f4a5b';
+
 export function me(branches = [MAIN, KDY], superAdmin = false): Me {
   return { id: 7, name: 'M. Silva', email: 'm@x.lk', is_super_admin: superAdmin, branches };
 }
@@ -153,11 +156,11 @@ describe('NotificationsService', () => {
     expect(router.navigateByUrl).toHaveBeenCalledWith('/transactions/41', { replaceUrl: undefined });
   }));
 
-  it('R8: mark all sends the fetched_at the list showed', fakeAsync(() => {
+  it('R8: mark all sends the fetched_at and high-water mark of the list it showed', fakeAsync(() => {
     svc.unread.set(3);
-    svc.markAll('2026-11-20T10:00:00+00:00');
+    svc.markAll({ fetched_at: '2026-11-20T10:00:00+00:00', fetched_id: FID });
     const req = http.expectOne('/api/v1/notifications/read-all');
-    expect(req.request.body).toEqual({ before: '2026-11-20T10:00:00+00:00' });
+    expect(req.request.body).toEqual({ before: '2026-11-20T10:00:00+00:00', before_id: FID });
     req.flush({ marked: 3 });
     flushMicrotasks();
     expect(svc.unread()).toBe(0);

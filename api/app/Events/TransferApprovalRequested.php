@@ -12,5 +12,9 @@ class TransferApprovalRequested
 {
     use Dispatchable;
 
-    public function __construct(public readonly int $transactionId) {}
+    /** @param  int|null  $userId  who requested it; the in-app listener never notifies this user (AG-094 R2) */
+    public function __construct(
+        public readonly int $transactionId,
+        public readonly ?int $userId = null,
+    ) {}
 }

@@ -5,7 +5,7 @@ import { ActivatedRoute, Router, provideRouter } from '@angular/router';
 import { Component } from '@angular/core';
 import { AuthService } from '../../core/auth.service';
 import { NotificationPage } from '../../core/notifications.service';
-import { me, row } from '../../core/notifications.service.spec';
+import { FID, me, row } from '../../core/notifications.service.spec';
 import { ToastService } from '../../core/toast.service';
 import { NotificationOpenComponent } from './notification-open.component';
 import { NotificationsComponent } from './notifications.component';
@@ -15,7 +15,7 @@ import { phoneFrame } from '../../../testing/phone-frame';
 class BlankComponent {}
 
 function page(data = [row()], unread = 1): NotificationPage {
-  return { data, meta: { current_page: 1, last_page: 1, per_page: 20, total: data.length }, unread_count: unread, fetched_at: '2026-11-20T10:00:00Z' };
+  return { data, meta: { current_page: 1, last_page: 1, per_page: 20, total: data.length }, unread_count: unread, fetched_at: '2026-11-20T10:00:00Z', fetched_id: FID };
 }
 
 function setup(extra: unknown[] = []) {
@@ -89,14 +89,15 @@ describe('NotificationsComponent', () => {
     expect(el.textContent).toContain('Could not save. Try again.');
   });
 
-  it('F9: Mark all as read sends the fetched_at of the list', () => {
+  it('F9: Mark all as read sends the list\'s fetched_at and high-water mark, once while in flight', () => {
     list('unread').flush(page());
     prefs().flush({ approval_request_email: true, can_approve: false });
     fixture.detectChanges();
     const btn = Array.from(el.querySelectorAll('button')).find(b => b.textContent!.includes('Mark all as read'))!;
     btn.click();
+    btn.click(); // a second click while the first is in flight is ignored
     const req = http.expectOne('/api/v1/notifications/read-all');
-    expect(req.request.body).toEqual({ before: '2026-11-20T10:00:00Z' });
+    expect(req.request.body).toEqual({ before: '2026-11-20T10:00:00Z', before_id: FID });
   });
 
   it('AC 30: at 390px rows are stacked cards of at least 44 px, buttons wrap under the title, no horizontal scroll', async () => {
@@ -161,6 +162,25 @@ describe('NotificationOpenComponent', () => {
     expect(TestBed.inject(ToastService).text()).toBe('Notification not found.');
     expect(TestBed.inject(AuthService).activeBranchId()).toBe('3');
     TestBed.inject(ToastService).clear();
+  }));
+
+  it('review 5: an outage or an inactive account is not reported as "not found" and the user stays', fakeAsync(() => {
+    id = 'n-1';
+    const fixture = TestBed.createComponent(NotificationOpenComponent);
+    fixture.detectChanges();
+    http.expectOne('/api/v1/notifications/n-1').flush({ message: 'Server Error' }, { status: 500, statusText: 'Server Error' });
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(router.navigateByUrl).not.toHaveBeenCalled();
+    expect(TestBed.inject(ToastService).text()).toBe('');
+    expect(fixture.nativeElement.textContent).toContain('Could not open the notification. Try again.');
+
+    fixture.nativeElement.querySelector('button').click();
+    http.expectOne('/api/v1/notifications/n-1').flush({ message: 'Account inactive.' }, { status: 403, statusText: 'Forbidden' });
+    flushMicrotasks();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('Account inactive.');
+    expect(router.navigateByUrl).not.toHaveBeenCalled();
   }));
 });
 

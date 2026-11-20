@@ -8,6 +8,7 @@ use App\Services\InAppNotifications;
 use Illuminate\Http\Request;
 use Illuminate\Notifications\DatabaseNotification;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Str;
 
 /**
  * AG-094 notifications (docs/specs/notifications.md section 5). Outside `branch`, like exports: a notification
@@ -33,17 +34,21 @@ class NotificationController extends Controller
             'page' => ['nullable', 'integer', 'min:1'],
         ]);
         $fetchedAt = now();
+        // R8 high-water mark: row ids are ordered UUIDs (time first, 10 microsecond steps), so a row written after this
+        // point has a greater id even within the same second as fetched_at (review finding 3).
+        $fetchedId = (string) Str::orderedUuid();
         $page = $this->own($request)
             ->when(($v['filter'] ?? 'all') === 'unread', fn ($q) => $q->whereNull('read_at'))
             ->orderByDesc('created_at')->orderByDesc('id')
             ->paginate((int) ($v['per_page'] ?? 20));
-        $visible = $this->inApp->visibleBranchIds($user);
+        $viewer = $this->inApp->viewer($user);
 
         return [
-            'data' => $page->getCollection()->map(fn (DatabaseNotification $n) => $this->inApp->present($n, $visible))->values()->all(),
+            'data' => $page->getCollection()->map(fn (DatabaseNotification $n) => $this->inApp->present($n, $viewer))->values()->all(),
             'meta' => ['current_page' => $page->currentPage(), 'last_page' => $page->lastPage(), 'per_page' => $page->perPage(), 'total' => $page->total()],
             'unread_count' => $this->unread($request),
             'fetched_at' => $fetchedAt->toIso8601String(),
+            'fetched_id' => $fetchedId,
         ];
     }
 
@@ -63,7 +68,7 @@ class NotificationController extends Controller
     {
         $user = $this->active($request);
 
-        return $this->inApp->present($this->find($request, $id), $this->inApp->visibleBranchIds($user));
+        return $this->inApp->present($this->find($request, $id), $this->inApp->viewer($user));
     }
 
     /** POST /notifications/{id}/read: idempotent, an already-read row keeps its first read_at (R8). */
@@ -80,14 +85,18 @@ class NotificationController extends Controller
         return ['id' => $n->id, 'read_at' => $n->read_at?->toIso8601String()];
     }
 
-    /** POST /notifications/read-all: unread rows created at or before `before` (the list's fetched_at), else all (R8). */
+    /**
+     * POST /notifications/read-all: unread rows created at or before `before` (the list's fetched_at), else all (R8).
+     * `before_id` (the list's fetched_id) also excludes a row written after the list in the same second.
+     */
     public function readAll(Request $request)
     {
         $this->active($request);
-        $v = $request->validate(['before' => ['nullable', 'date']]);
+        $v = $request->validate(['before' => ['nullable', 'date'], 'before_id' => ['nullable', 'uuid']]);
         $now = now();
         $marked = $this->own($request)->whereNull('read_at')
             ->when($v['before'] ?? null, fn ($q, $b) => $q->where('created_at', '<=', Carbon::parse($b)->setTimezone(config('app.timezone'))))
+            ->when($v['before_id'] ?? null, fn ($q, $id) => $q->where('id', '<=', strtolower($id)))
             ->update(['read_at' => $now, 'updated_at' => $now]);
 
         return ['marked' => $marked];

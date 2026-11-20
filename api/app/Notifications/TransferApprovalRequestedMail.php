@@ -18,8 +18,8 @@ use Illuminate\Notifications\Notification;
  *
  * Accounting review 3: amount, branch codes, account names, requester and dates only. No balance or "available"
  * figure, no bank account number and no free text (note, comment): an email cannot be withdrawn once sent.
- * Accounting review 4: when the queued mail is sent the recipient is checked again (still active, still an approver);
- * otherwise it is dropped.
+ * Accounting review 4: when the queued mail is sent the recipient is checked again (still active, still an approver,
+ * email still on) and the request must still be pending; otherwise it is dropped.
  */
 class TransferApprovalRequestedMail extends Notification implements ShouldQueue
 {
@@ -35,12 +35,20 @@ class TransferApprovalRequestedMail extends Notification implements ShouldQueue
         return ['mail'];
     }
 
-    /** Review 4: evaluated when the queued job runs (and by the notification fake when it is sent). */
+    /**
+     * Evaluated when the queued job runs (and by the notification fake when it is sent). Accounting review 4: still
+     * active and still an approver. Also dropped when the request was decided meanwhile or the recipient has turned the
+     * email off since it was queued.
+     */
     public function shouldSend(object $notifiable, string $channel): bool
     {
         $user = $notifiable->fresh();
+        if ($user === null || ! ($user->approval_request_email ?? true)) {
+            return false;
+        }
+        $state = Transaction::withoutGlobalScopes()->whereKey($this->transactionId)->value('approval_status');
 
-        return $user !== null && app(InAppNotifications::class)->isApprover($user);
+        return $state === TransferApprovals::PENDING && app(InAppNotifications::class)->isApprover($user);
     }
 
     public function toMail(object $notifiable): MailMessage

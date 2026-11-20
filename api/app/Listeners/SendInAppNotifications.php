@@ -43,7 +43,7 @@ class SendInAppNotifications
                 return;
             }
             $main = Branch::main();
-            $users = $this->inApp->eligible($this->inApp->approvers(), auth()->id())->except([(int) $t->created_by]);
+            $users = $this->inApp->eligible($this->inApp->approvers(), $event->userId)->except([(int) $t->created_by]);
             $data = $this->data($t, $main, "{$t->ref_no} needs approval",
                 $this->route($t).', '.Money::format($t->amount).', requested by '.$this->name($t->created_by));
             foreach ($users as $u) {
@@ -94,7 +94,7 @@ class SendInAppNotifications
             }
             $users = $this->inApp->holders('transfer.acknowledge', (int) $t->related_branch_id)
                 ->reject(fn (User $u) => $u->is_super_admin || (int) $u->id === (int) $t->created_by);
-            $this->inApp->send($users, auth()->id(), N::RECEIPT_REQUESTED, $this->data($t, $this->branch($t->related_branch_id),
+            $this->inApp->send($users, $event->userId, N::RECEIPT_REQUESTED, $this->data($t, $this->branch($t->related_branch_id),
                 "Confirm receipt of {$t->ref_no} from {$this->code($t->fromAccount)}: ".Money::format($t->amount),
                 'From '.$this->side($t->fromAccount).' to '.$this->side($t->toAccount).', sent by '.$this->name($t->created_by).'.'));
         });

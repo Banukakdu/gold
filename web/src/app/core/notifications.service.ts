@@ -22,7 +22,12 @@ export interface NotificationPage {
   meta: { current_page: number; last_page: number; per_page: number; total: number };
   unread_count: number;
   fetched_at: string;
+  /** R8 high-water mark of the list (review finding 3): rows written after it stay unread on "Mark all as read". */
+  fetched_id: string;
 }
+
+/** The list a "Mark all as read" refers to. There is no mark-all without a loaded list (review finding 4). */
+export type FetchMark = Pick<NotificationPage, 'fetched_at' | 'fetched_id'>;
 
 export interface NotificationPrefs { approval_request_email: boolean; can_approve: boolean }
 
@@ -120,9 +125,10 @@ export class NotificationsService {
     return this.http.get<NotificationRow>(`/api/v1/notifications/${encodeURIComponent(id)}`);
   }
 
-  /** R8: only rows created at or before the time the list was fetched. */
-  async markAll(before: string | null): Promise<number> {
-    const r = await firstValueFrom(this.http.post<{ marked: number }>('/api/v1/notifications/read-all', before ? { before } : {}));
+  /** R8: only rows the loaded list could have shown (created at or before its fetch). */
+  async markAll(mark: FetchMark): Promise<number> {
+    const r = await firstValueFrom(this.http.post<{ marked: number }>('/api/v1/notifications/read-all',
+      { before: mark.fetched_at, before_id: mark.fetched_id }));
     this.unread.update(n => Math.max(0, n - r.marked));
     this.refreshCount();
     return r.marked;

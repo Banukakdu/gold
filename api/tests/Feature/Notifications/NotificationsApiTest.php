@@ -12,6 +12,7 @@ use App\Services\InAppNotifications;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Notifications\DatabaseNotification;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 /** docs/specs/notifications.md AC 14-22, 30b, 30d: the endpoints, the prune and what they never touch. */
 class NotificationsApiTest extends NotificationsTestCase
@@ -221,8 +222,8 @@ class NotificationsApiTest extends NotificationsTestCase
         $balances = DB::table('accounts')->orderBy('id')->pluck('current_balance', 'id')->all();
 
         // Create (every listener), read, read-all, auto-read and prune, on their own.
-        event(new TransferApprovalRequested($t1->id));
-        event(new TransferReceiptRequested($t2->id));
+        event(new TransferApprovalRequested($t1->id, $this->acc->id));
+        event(new TransferReceiptRequested($t2->id, $this->acc->id));
         event(new TransferReceiptChanged($t2->id, 'awaiting', 'disputed', $this->galCsh->id));
         event(new TransferReceiptChanged($t2->id, 'disputed', 'received', $this->galAcc->id));
         event(new TransferApprovalDecided($t1->id, 'expired', null));
@@ -244,7 +245,63 @@ class NotificationsApiTest extends NotificationsTestCase
     public function test_r5_redaction_helper_never_changes_super_admin_rows(): void
     {
         $id = $this->note($this->admin, '2026-11-20 08:00:00', 'GAL row', N::RECEIPT_REQUESTED, $this->gal->id, 'GAL');
-        $row = app(InAppNotifications::class)->present(DatabaseNotification::find($id), app(InAppNotifications::class)->visibleBranchIds($this->admin));
+        $row = app(InAppNotifications::class)->present(DatabaseNotification::find($id), app(InAppNotifications::class)->viewer($this->admin));
         $this->assertSame(['GAL row', 'Body'], [$row['title'], $row['body']]);
+    }
+
+    public function test_review1_approval_requests_are_redacted_once_the_user_is_no_longer_an_approver(): void
+    {
+        $t1 = $this->t1();
+        $row = $this->rows($this->mainBa, N::APPROVAL_REQUESTED)->sole();
+        $stored = DB::table('notifications')->where('id', $row->id)->first();
+        $this->bare($this->mainBa)->getJson('/api/v1/notifications')->assertJsonPath('data.0.body', 'KDY -> GAL, 150,000.00, requested by A. Perera');
+
+        // Moved to MAIN Accountant (no transfer.approve), still a MAIN member.
+        setPermissionsTeamId($this->main->id);
+        $this->mainBa->syncRoles([$this->branchRole($this->main, 'Accountant')]);
+        $list = $this->bare($this->mainBa)->getJson('/api/v1/notifications')->assertOk();
+        $this->assertSame('Notification for MAIN (no longer available)', $list->json('data.0.title'));
+        $this->assertNull($list->json('data.0.body'));
+        foreach (['150,000', 'A. Perera', 'KDY', $t1->ref_no] as $secret) {
+            $this->assertStringNotContainsString($secret, json_encode($list->json('data')));
+        }
+        $this->bare($this->mainBa)->getJson("/api/v1/notifications/{$row->id}")->assertOk()->assertJsonPath('body', null);
+        $this->assertEquals($stored, DB::table('notifications')->where('id', $row->id)->first());
+
+        // Other kinds of the same user are unaffected; an approver again sees the full row.
+        $other = $this->note($this->mainBa, '2026-11-20 08:00:00', 'Export row');
+        $this->bare($this->mainBa)->getJson("/api/v1/notifications/{$other}")->assertJsonPath('title', 'Export row')->assertJsonPath('body', 'Body');
+        setPermissionsTeamId($this->main->id);
+        $this->mainBa->syncRoles([$this->branchRole($this->main, 'Branch Admin')]);
+        $this->bare($this->mainBa)->getJson("/api/v1/notifications/{$row->id}")->assertJsonPath('title', "{$t1->ref_no} needs approval");
+    }
+
+    public function test_review3_read_all_keeps_a_row_written_after_the_list_in_the_same_second(): void
+    {
+        foreach (['08:00', '08:10', '08:20'] as $t) {
+            $this->note($this->acc, "2026-11-20 {$t}:00");
+        }
+        $list = $this->bare($this->acc)->getJson('/api/v1/notifications')->assertOk();
+        $fetchedAt = $list->json('fetched_at');
+        $this->assertTrue(Str::isUuid($list->json('fetched_id')));
+        // Same (frozen) second as fetched_at, written after the list.
+        $same = $this->note($this->acc, '2026-11-20 10:00:00');
+        $this->assertSame(now()->toIso8601String(), $fetchedAt);
+        $this->bare($this->acc)->postJson('/api/v1/notifications/read-all', ['before' => $fetchedAt, 'before_id' => $list->json('fetched_id')])
+            ->assertOk()->assertExactJson(['marked' => 3]);
+        $this->assertNull(DatabaseNotification::find($same)->read_at);
+        $this->bare($this->acc)->postJson('/api/v1/notifications/read-all', ['before_id' => 'not-a-uuid'])->assertStatus(422);
+    }
+
+    public function test_review6_show_is_owner_only_and_refuses_inactive_users(): void
+    {
+        $id = $this->note($this->galCsh, '2026-11-20 08:00:00');
+        $this->bare($this->acc)->getJson("/api/v1/notifications/{$id}")->assertNotFound()->assertJsonPath('message', 'Notification not found.');
+        $this->bare($this->admin)->getJson("/api/v1/notifications/{$id}")->assertNotFound();
+        $this->bare($this->galCsh)->getJson('/api/v1/notifications/9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d')->assertNotFound();
+        $this->bare($this->galCsh)->getJson('/api/v1/notifications/not-a-uuid')->assertNotFound();
+        $this->bare($this->galCsh)->getJson("/api/v1/notifications/{$id}")->assertOk()->assertJsonPath('id', $id);
+        $this->galCsh->update(['status' => 'inactive']);
+        $this->bare($this->galCsh)->getJson("/api/v1/notifications/{$id}")->assertForbidden()->assertExactJson(['message' => 'Account inactive.']);
     }
 }
