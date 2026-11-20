@@ -18,8 +18,17 @@ class LocksAndReversalTest extends FundReturnTestCase
         $this->assertSame($before, $this->state());
     }
 
-    /** AC 7: the sending branch's own lock keeps the plain message (checked before MAIN). */
+    /** AC 7: GAL's own lock keeps the plain message. */
     public function test_ac7_branch_lock_keeps_the_plain_message(): void
+    {
+        $this->lock('2026-10', $this->gal)->assertCreated();
+        $before = $this->state();
+        $this->fundReturn(date: '2026-10-15')->assertStatus(422)->assertJsonPath('message', 'The period 2026-10 is locked.');
+        $this->assertSame($before, $this->state());
+    }
+
+    /** R4 ordering: with GAL and MAIN both locked, the sending branch's lock is reported first. */
+    public function test_branch_lock_is_checked_before_main(): void
     {
         $this->lock('2026-10', $this->gal)->assertCreated();
         $this->lock('2026-10', $this->main)->assertCreated();
@@ -105,7 +114,9 @@ class LocksAndReversalTest extends FundReturnTestCase
         $this->assertSame($before, $this->state());
 
         $this->lock('2026-11', $this->gal)->assertCreated();
+        $before = $this->state();
         $this->reverse($t['id'])->assertStatus(422)->assertJsonPath('message', 'The period 2026-11 is locked.');
+        $this->assertSame($before, $this->state());
         $this->assertSame('posted', $this->txn($t['id'])->status);
     }
 }
