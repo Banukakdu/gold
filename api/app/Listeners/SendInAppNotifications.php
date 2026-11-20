@@ -2,19 +2,24 @@
 
 namespace App\Listeners;
 
+use App\Events\ExpenseApprovalDecided;
+use App\Events\ExpenseApprovalRequested;
 use App\Events\ExportFinished;
 use App\Events\TransferApprovalDecided;
 use App\Events\TransferApprovalRequested;
 use App\Events\TransferReceiptChanged;
 use App\Events\TransferReceiptRequested;
 use App\Models\Account;
+use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\Export;
 use App\Models\Transaction;
 use App\Models\User;
+use App\Notifications\ExpenseApprovalRequestedMail;
 use App\Notifications\InAppNotification as N;
 use App\Notifications\TransferApprovalRequestedMail;
 use App\Services\BackgroundExports;
+use App\Services\ExpenseApprovals;
 use App\Services\InAppNotifications;
 use App\Services\TransferApprovals;
 use App\Services\TransferReceipts;
@@ -81,6 +86,81 @@ class SendInAppNotifications
             // The event names the actor; null is the expiry job (no actor), whoever is signed in.
             $this->inApp->send([$requester], $event->userId, N::APPROVAL_DECIDED,
                 $this->data($t, $this->branch($t->branch_id), $title, $this->route($t).', '.Money::format($t->amount).', '.$detail));
+        });
+    }
+
+    /**
+     * AG-064 R11: the expense's branch approvers (`expense.approve` through a role there) and the Super Admins, except
+     * the requester; a request only a Super Admin may decide (R4a) goes to Super Admins only. Plus the optional email.
+     */
+    public function handleExpenseApprovalRequested(ExpenseApprovalRequested $event): void
+    {
+        $this->guard(function () use ($event) {
+            $t = $this->expense($event->transactionId);
+            if (! $t) {
+                return;
+            }
+            $approvals = app(ExpenseApprovals::class);
+            $users = $this->inApp->superAdmins();
+            if (! $approvals->superAdminOnly($t)) {
+                $users = $users->concat($this->inApp->holders('expense.approve', (int) $t->branch_id));
+            }
+            $users = $this->inApp->eligible($users, $event->userId)->except([(int) $t->created_by]);
+            $data = $this->data($t, $t->branch, "{$t->ref_no} needs approval",
+                $this->expenseLine($t).', '.Money::format($t->amount).', requested by '.$this->name($t->created_by));
+            foreach ($users as $u) {
+                // The email links to this user's own row, so a failed row write skips the email (reported).
+                $this->guard(function () use ($u, $t, $data) {
+                    $id = $this->inApp->write($u, N::EXPENSE_APPROVAL_REQUESTED, $data);
+                    if ($u->approval_request_email ?? true) {
+                        $u->notify(new ExpenseApprovalRequestedMail($t->id, $id));
+                    }
+                });
+            }
+        });
+    }
+
+    /**
+     * AG-064 R11: any decision closes the approvers' rows (R6); approved / rejected / expired (not cancelled) tell the
+     * requester whether to pay; an approval by the user who brought the requester in (R4b) is flagged to the Super Admins.
+     */
+    public function handleExpenseApprovalDecided(ExpenseApprovalDecided $event): void
+    {
+        $this->guard(fn () => $this->inApp->markReadFor(N::EXPENSE_APPROVAL_REQUESTED, $event->transactionId));
+        if (! in_array($event->state, [ExpenseApprovals::APPROVED, ExpenseApprovals::REJECTED, ExpenseApprovals::EXPIRED], true)) {
+            return;
+        }
+        $this->guard(function () use ($event) {
+            $t = $this->expense($event->transactionId);
+            $requester = $t?->creator()->first();
+            if (! $t || ! $requester) {
+                return;
+            }
+            $by = $this->name($event->userId);
+            $title = match ($event->state) {
+                ExpenseApprovals::APPROVED => "Your expense request {$t->ref_no} was approved and posted. You may now pay it.",
+                ExpenseApprovals::REJECTED => "Your expense request {$t->ref_no} was rejected by {$by}. Do not pay it.",
+                default => "Your expense request {$t->ref_no} expired after ".ExpenseApprovals::EXPIRY_DAYS.' days. Do not pay it.',
+            };
+            $this->inApp->send([$requester], $event->userId, N::EXPENSE_APPROVAL_DECIDED,
+                $this->data($t, $t->branch, $title, $this->expenseLine($t).', '.Money::format($t->amount)));
+        });
+        if ($event->state !== ExpenseApprovals::APPROVED) {
+            return;
+        }
+        $this->guard(function () use ($event) {
+            $flagged = AuditLog::where('event', 'expense.approved')->where('auditable_type', Transaction::class)
+                ->where('auditable_id', $event->transactionId)->latest('id')->value('new_values');
+            if (! (((array) $flagged)['approver_onboarded_requester'] ?? false)) {
+                return;
+            }
+            $t = $this->expense($event->transactionId);
+            if (! $t) {
+                return;
+            }
+            $this->inApp->send($this->inApp->superAdmins(), $event->userId, N::EXPENSE_APPROVAL_FLAGGED, $this->data($t, $t->branch,
+                "{$t->ref_no} approved by the user who added the requester",
+                trim(($t->branch?->code ?? '').' '.Money::format($t->amount)).', requested by '.$this->name($t->created_by).', approved by '.$this->name($event->userId)));
         });
     }
 
@@ -170,6 +250,18 @@ class SendInAppNotifications
     private function transfer(int $id): ?Transaction
     {
         return Transaction::withoutGlobalScopes()->with(['fromAccount.branch:id,code', 'toAccount.branch:id,code'])->find($id);
+    }
+
+    private function expense(int $id): ?Transaction
+    {
+        return Transaction::withoutGlobalScopes()->where('type', Transaction::EXPENSE)
+            ->with(['branch:id,code', 'account:id,name', 'category:id,name,parent_id', 'category.parent:id,name'])->find($id);
+    }
+
+    /** "KDY Cash, Utilities > Electricity" (no payee, reference or description: AG-094 R1). */
+    private function expenseLine(Transaction $t): string
+    {
+        return trim(($t->branch?->code ?? '').' '.($t->account?->name ?? '')).', '.ExpenseApprovals::categoryPath($t->category);
     }
 
     private function data(Transaction $t, ?Branch $branch, string $title, string $body): array

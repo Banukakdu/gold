@@ -40,6 +40,11 @@ class Transaction extends Model
     /** AG-051 R17: the over-commitment warning of a request just made (not a column; the API adds it as `warning`). */
     public ?string $requestWarning = null;
 
+    /** AG-064 R2b: why an expense request was held (threshold | same_day_total), and the same-day total that counted. */
+    public ?string $holdReason = null;
+
+    public ?string $sameDayTotal = null;
+
     protected $casts = ['txn_date' => 'date:Y-m-d', 'amount' => 'decimal:2', 'approved_at' => 'datetime',
         'received_on' => 'date:Y-m-d', 'receipt_at' => 'datetime',
         // AG-051 transfer approvals.

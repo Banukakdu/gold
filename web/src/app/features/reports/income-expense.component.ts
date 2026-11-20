@@ -4,6 +4,7 @@ import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe } from '../../core/money.pipe';
+import { AppDatePipe } from '../../core/app-date.pipe';
 import {
   BranchPickerComponent, ExportButtonsComponent, FiscalPresetsComponent, ReportHeadComponent, ReportMeta, ReportParams, currentMonth, fieldErrors, toHttpParams,
   readQuery, reportError, writeQuery,
@@ -12,12 +13,17 @@ import {
 interface Line { id: number | null; name: string; is_active: boolean; amount: string; percent: string | null; code?: string | null; branch_only?: string | null }
 interface Cat extends Line { subs: Line[] }
 interface Section { total: string; categories: Cat[] }
-interface IncomeExpense extends ReportMeta { income: Section | null; expense: Section | null; net: string | null }
+interface IncomeExpense extends ReportMeta {
+  income: Section | null; expense: Section | null; net: string | null;
+  /** AG-064 S7: expenses pending approval now, dated <= To; not in the figures. */
+  pending_approval?: { data: { id: number; ref_no: string; branch: { id: number; code: string }; requested_date: string; requested_on: string;
+    category_path: string; amount: string }[]; count: number; amount: string };
+}
 
 /** AG-082 */
 @Component({
   standalone: true,
-  imports: [FormsModule, RouterLink, MoneyPipe, FiscalPresetsComponent, BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent],
+  imports: [FormsModule, RouterLink, MoneyPipe, AppDatePipe, FiscalPresetsComponent, BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent],
   template: `
     <h1>Income &amp; Expense <small class="muted">by category</small></h1>
     <form class="filters" (ngSubmit)="load()">
@@ -65,6 +71,21 @@ interface IncomeExpense extends ReportMeta { income: Section | null; expense: Se
         }
         @if (r.net !== null) {
           <div class="card"><table><tr class="sub"><td>Net (income - expenses)</td><td class="num" [class.neg]="+r.net < 0">{{ r.net | money }}</td></tr></table></div>
+        }
+        @if (r.pending_approval?.count) {
+          <div class="card section">
+            <h2>Expenses pending approval now (not included above)</h2>
+            <table class="list">
+              <thead><tr><th>Requested on</th><th>Ref</th><th>Branch</th><th>Category > Sub-category</th><th class="num">Amount</th></tr></thead>
+              <tbody>
+                @for (m of r.pending_approval!.data; track m.id) {
+                  <tr><td>{{ m.requested_on | appDate }}</td><td class="mono"><a [routerLink]="['/transactions', m.id]">{{ m.ref_no }}</a></td>
+                    <td>{{ m.branch.code }}</td><td>{{ m.category_path }}</td><td class="num">{{ m.amount | money }}</td></tr>
+                }
+              </tbody>
+            </table>
+            <p class="muted">{{ r.pending_approval!.count }} pending, {{ r.pending_approval!.amount | money }}</p>
+          </div>
         }
       }
     }

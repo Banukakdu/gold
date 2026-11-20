@@ -8,6 +8,7 @@ use App\Models\AuditLog;
 use App\Models\PeriodLock;
 use App\Models\Transaction;
 use App\Models\User;
+use App\Services\ExpenseApprovals;
 use App\Services\YearEnd;
 use App\Support\AttachmentFile;
 use App\Support\BranchContext;
@@ -43,7 +44,7 @@ class AttachmentController extends Controller
 
         return [
             'data' => $this->present($shown, $transaction, $user, $locked),
-            'can_add' => $this->canAdd($user, $transaction),
+            'can_add' => $transaction->status !== 'rejected' && $this->canAdd($user, $transaction),
             'max' => Attachment::MAX_ACTIVE,
             'max_total' => Attachment::MAX_TOTAL,
             'active_count' => $active->count(),
@@ -78,6 +79,8 @@ class AttachmentController extends Controller
             [$attachment, $alsoOn] = DB::transaction(function () use ($transaction, $user, $file, $name, $mime, $sha, $size, $disk, $dir, $basename, $path, &$written) {
                 // R3: the row lock serialises parallel uploads to one entry, so two of them cannot make 6.
                 $txn = Transaction::whereKey($transaction->id)->lockForUpdate()->firstOrFail();
+                // AG-064 R19: the evidence of a request that was decided without posting is frozen.
+                abort_if($txn->status === 'rejected', 422, ExpenseApprovals::FILES_FROZEN);
                 $existing = Attachment::where('transaction_id', $txn->id)->get(['id', 'sha256', 'removed_at']);
                 $active = $existing->whereNull('removed_at');
                 abort_if($active->count() >= Attachment::MAX_ACTIVE, 422, 'An entry can have at most 5 files. Remove one first.');
@@ -203,7 +206,10 @@ class AttachmentController extends Controller
             $txn = Transaction::whereKey($transaction->id)->lockForUpdate()->firstOrFail();
             $att = Attachment::whereKey($attachment->id)->lockForUpdate()->firstOrFail();
             abort_if($att->removed_at !== null, 422, 'This file has already been removed.');
-            abort_if($txn->status !== 'posted', 422, 'Files of a voided or reversed entry cannot be removed.');
+            // AG-064 R19: a pending request's files may be removed (the requester attaches the bill after saving); a
+            // rejected, cancelled or expired one's are frozen. A pending row's txn_date is its requested_date.
+            abort_if($txn->status === 'rejected', 422, ExpenseApprovals::FILES_FROZEN);
+            abort_if(! in_array($txn->status, ['posted', 'pending'], true), 422, 'Files of a voided or reversed entry cannot be removed.');
             // Finding 3: the entry's own date and branch, cumulative rule, locking read inside the write.
             $date = $txn->txn_date->format('Y-m-d');
             if ($refused = app(YearEnd::class)->closedOrLockedMessage($txn->branch_id, $date, share: true)) {
@@ -266,6 +272,9 @@ class AttachmentController extends Controller
     /** F6 note on S2. */
     private function note(Transaction $t, bool $locked): ?string
     {
+        if ($t->status === 'rejected') {
+            return ExpenseApprovals::FILES_FROZEN;
+        }
         if ($t->status === 'void') {
             return 'This entry is void: files can be added but not removed.';
         }
@@ -314,7 +323,7 @@ class AttachmentController extends Controller
         $members = DB::table('branch_user')->whereIn('user_id', $rows->pluck('uploaded_by')->unique())->where('branch_id', $txn->branch_id)
             ->pluck('user_id')->flip();
         $alsoOn = $this->alsoOn($rows->whereNull('removed_at')->pluck('sha256'), $txn);
-        $removable = $txn->status === 'posted' && ! $locked;
+        $removable = in_array($txn->status, ['posted', 'pending'], true) && ! $locked;
 
         return $rows->map(function (Attachment $a) use ($txn, $user, $members, $alsoOn, $removable) {
             $u = $a->uploader;

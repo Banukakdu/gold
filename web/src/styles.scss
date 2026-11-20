@@ -269,6 +269,24 @@ tr.tr-red td { background: #fbeceb; }
 .ta-table th.tr-actions, .ta-table td.tr-actions { position: sticky; right: 0; background: var(--card); box-shadow: -6px 0 6px -6px rgba(0, 0, 0, .18); }
 .ta-table .ta-note { min-width: 14ch; max-width: 28ch; overflow-wrap: break-word; }
 
+/* AG-064 S3: approval dialogs keep a 16px gutter and scroll on their own on short screens. */
+.ap-dialog { max-height: calc(100vh - 32px); overflow-y: auto; top: 16px; box-sizing: border-box; }
+@media (min-width: 761px) { .ap-dialog { top: 15%; max-height: 80vh; } }
+/* Full width with a 16px gutter measured from the viewport edges (100vw would include a classic scrollbar). */
+@media (max-width: 760px) { .ap-dialog { left: 16px; right: 16px; width: auto; transform: none; } }
+/* AG-064 S3 / S4 "Expenses to approve": a table on wide screens, stacked cards at phone width. */
+.ea-cards { display: none; }
+.ea-path { overflow-wrap: anywhere; }
+.ea-card { border-top: 1px solid var(--line); padding: 10px 0; display: flex; flex-direction: column; gap: 4px; }
+.ea-line { display: flex; flex-wrap: wrap; gap: 0 8px; align-items: baseline; justify-content: space-between; min-width: 0; }
+.ea-line.ea-sub { justify-content: flex-start; font-size: 13px; color: var(--muted); }
+.ea-buttons { display: flex; gap: 8px; button { flex: 1; min-height: 44px; } }
+@media (max-width: 760px) {
+  .ea-table { display: none; }
+  .ea-cards { display: block; }
+}
+.ap-hint { overflow-wrap: anywhere; }
+
 /* AG-094 S1 notification bell (docs/specs/notifications.md): 44 px target, badge, dropdown; full-width panel at 390px. */
 .top { position: relative; }
 ag-notification-bell { position: relative; display: flex; margin-left: auto; }

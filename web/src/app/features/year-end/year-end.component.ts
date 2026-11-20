@@ -1,6 +1,7 @@
 import { Component, OnInit, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
+import { RouterLink } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 import { AuthService } from '../../core/auth.service';
 import { errorText } from '../../core/api.interceptor';
@@ -40,7 +41,7 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 
 /** AG-092 S5 Year-end. Super Admin only. Posting is the API's (LedgerService::closeYear / reopenYear). */
 @Component({
   standalone: true,
-  imports: [FormsModule, MoneyPipe, SignaturesComponent],
+  imports: [FormsModule, MoneyPipe, SignaturesComponent, RouterLink],
   template: `
     <h1 class="no-print">Year-end</h1>
     @if (msg()) { <div class="alert">{{ msg() }}</div> }
@@ -101,6 +102,21 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 
       @if (p.checks.length) { <ul class="ye-checks">@for (c of p.checks; track c.code) { <li>{{ c.message }}</li> }</ul> }
       <!-- AG-052 S7 / R14: information only, not a check. -->
       @if (transit(p); as line) { <div class="att-note" style="margin-top:8px">{{ line }}</div> }
+      @if (p.expenses_pending_approval_list?.length) {
+        <!-- AG-064 SHOULD 7: decide them before closing (the close is not blocked). -->
+        <div class="card section">
+          <h3 style="margin-top:0">Expenses pending approval</h3>
+          <table class="list">
+            <thead><tr><th>Ref</th><th>Branch</th><th>Requested for</th><th class="num">Amount</th></tr></thead>
+            <tbody>
+              @for (e of p.expenses_pending_approval_list; track e.id) {
+                <tr><td><a [routerLink]="['/transactions', e.id]">{{ e.ref_no }}</a></td><td>{{ e.branch.code }}</td>
+                  <td>{{ settings.date(e.requested_date) }}</td><td class="num">{{ e.amount | money }}</td></tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      }
       <div class="card section" style="margin-top:10px">
         <h2 style="margin-top:0">Summary</h2>
         <table class="list">

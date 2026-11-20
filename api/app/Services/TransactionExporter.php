@@ -145,7 +145,7 @@ class TransactionExporter
         ['Category', 'text'], ['Sub-category', 'text'], ['Account', 'text'], ['From', 'text'], ['To', 'text'], ['Payee / payer', 'text'],
         ['Payment method', 'text'], ['Reference', 'text'], ['Description', 'text'], ['Amount', 'amount'], ['Status', 'text'],
         // AG-051 S6
-        ['Approval', 'text'], ['Decided by', 'text'], ['Decided at', 'text'],
+        ['Approval', 'text'], ['Requested for', 'date'], ['Decided by', 'text'], ['Decided at', 'text'],
         ['Receipt', 'text'], ['Received on', 'date'], ['Receipt by', 'text'], ['Receipt note', 'text'],
         ['Reversal of', 'text'], ['Reversed by', 'text'], ['Voided on', 'date'], ['Voided by', 'text'], ['Void reason', 'text'],
         ['Created by', 'text'], ['Files', 'text'],
@@ -191,6 +191,8 @@ class TransactionExporter
                 $closing ? '—' : Money::fromCents(Money::toCents($t->amount)),
                 self::statusLabel($t),
                 $t->approval_status ? TransferApprovals::label($t->approval_status) : '',
+                // AG-064 SHOULD 7: the bill date of an approved request next to its posting date.
+                $t->requested_date?->format('Y-m-d'),
                 $t->decidedBy?->name,
                 $t->decided_at ? $t->decided_at->copy()->setTimezone('Asia/Colombo')->format('Y-m-d H:i') : '',
                 $t->receipt_status ? TransferReceipts::label($t->receipt_status) : '',

@@ -8,9 +8,18 @@ import { errorText } from '../../core/api.interceptor';
 import { LockBannerComponent } from '../period-locks/lock-banner.component';
 import { colomboToday } from '../../core/dates';
 import { ATTACH_ACCEPT, fileSize, selectionProblem, uploadAttachment, uploadErrorText } from '../../core/attachments';
+import { AuthService } from '../../core/auth.service';
+import { ToastService } from '../../core/toast.service';
+import { toCents } from '../../core/approvals';
 
 interface UploadLine { name: string; size: number; pct: number; error?: string; done?: boolean }
-interface SaveResult { id: number; ref: string; total: number; attached: number; failures: { name: string; message: string }[] }
+interface SaveResult {
+  id: number; ref: string; total: number; attached: number; failures: { name: string; message: string }[];
+  /** AG-064: held for approval (status pending), the R2b same-day total and the R17 warning. */
+  pending?: boolean; sameDay?: string | null; date?: string; warning?: string | null;
+}
+interface SaveResponse { id: number; ref_no: string; status?: string; hold_reason?: string | null; same_day_total?: string | null; warning?: string | null; txn_date?: string }
+interface BranchLimit { id: number; expense_approval_threshold?: string | null }
 
 /** Record income or expense (route /transactions/new/:kind). */
 @Component({
@@ -36,7 +45,11 @@ interface SaveResult { id: number; ref: string; total: number; attached: number;
           @for (c of subs(); track c.id) { <option [ngValue]="c.id">{{ c.name }}</option> }
         </select>
       </label>
-      <label>Amount <input type="number" name="amount" [(ngModel)]="m.amount" min="0.01" step="0.01" required /></label>
+      <label>Amount <input type="number" name="amount" [(ngModel)]="m.amount" (ngModelChange)="amount.set($event)" min="0.01" step="0.01" required /></label>
+      @if (needsApproval()) {
+        <!-- AG-064 S2 (display only; the server decides, R2). -->
+        <p class="alert info wide ap-hint">Above {{ threshold() | money }}: this expense needs approval before it is posted. Do not pay until it is approved.</p>
+      }
       <label>{{ kind() === 'income' ? 'Received from' : 'Paid to' }} <input name="payee_payer" [(ngModel)]="m.payee_payer" /></label>
       <label>Payment method
         <select name="payment_method" [(ngModel)]="m.payment_method">
@@ -76,17 +89,32 @@ interface SaveResult { id: number; ref: string; total: number; attached: number;
             {{ r.failures.length }} file{{ r.failures.length === 1 ? ' was' : 's were' }} not attached:
             @for (f of r.failures; track $index) { {{ f.name }} - {{ f.message }}{{ $last ? '' : ';' }} }
             <a [routerLink]="['/transactions', r.id]">Open {{ r.ref }}</a> to try again.</div>
+        } @else if (r.pending) {
+          <div class="ok wide ap-hint"><a [routerLink]="['/transactions', r.id]">{{ r.ref }}</a> sent for approval. Balances do not change until it is approved.@if (r.sameDay) { Together with your other expenses in this category dated {{ r.date }} ({{ r.sameDay | money }}) this is above the limit.}@if (r.total) { {{ r.attached }} of {{ r.total }} file{{ r.total === 1 ? '' : 's' }} attached.}</div>
         } @else {
           <div class="ok wide">Saved as <a [routerLink]="['/transactions', r.id]">{{ r.ref }}</a>.@if (r.total) { {{ r.attached }} of {{ r.total }} file{{ r.total === 1 ? '' : 's' }} attached.}</div>
         }
+        @if (r.warning) { <div class="alert wide ap-hint">{{ r.warning }}</div> }
       }
-      <div class="wide actions"><button type="submit" [disabled]="busy() || !!fileError()">Save {{ kind() }}</button></div>
+      <div class="wide actions"><button type="submit" [disabled]="busy() || !!fileError()">{{ needsApproval() ? 'Send for approval' : 'Save ' + kind() }}</button></div>
     </form>
   `,
 })
 export class EntryFormComponent implements OnInit {
   kind = input.required<'income' | 'expense'>();
   private http = inject(HttpClient);
+  private auth = inject(AuthService);
+  private toast = inject(ToastService);
+  /** AG-064 S2: the active branch's expense approval limit (GET /branches) and the typed amount. */
+  threshold = signal<string | null>(null);
+  amount = signal<unknown>(null);
+  /** Display only (the server decides, R2): an expense, a limit, not Super Admin, amount strictly above, in cents. */
+  needsApproval = computed(() => {
+    if (this.kind() !== 'expense' || this.auth.isSuperAdmin()) return false;
+    const t = toCents(this.threshold());
+    const a = toCents(this.amount());
+    return t !== null && a !== null && a > t;
+  });
   private router = inject(Router);
   today = colomboToday();
   accounts = signal<Account[]>([]);
@@ -107,6 +135,10 @@ export class EntryFormComponent implements OnInit {
   subs = computed(() => this.categories().find(c => c.id === this.parentIdSig())?.children ?? []);
 
   ngOnInit() {
+    if (this.kind() === 'expense') {
+      const active = Number(this.auth.activeBranchId());
+      this.http.get<BranchLimit[]>('/api/v1/branches').subscribe(b => this.threshold.set(b.find(x => x.id === active)?.expense_approval_threshold ?? null));
+    }
     this.http.get<Account[]>('/api/v1/accounts').subscribe(a => {
       this.accounts.set(a.filter(x => x.status !== 'closed'));
       this.m['account_id'] ??= a[0]?.id;
@@ -135,13 +167,18 @@ export class EntryFormComponent implements OnInit {
     this.busy.set(true);
     this.error.set('');
     this.result.set(null);
-    this.http.post<{ id: number; ref_no: string }>(`/api/v1/${this.kind() === 'income' ? 'incomes' : 'expenses'}`, this.m).subscribe({
+    this.http.post<SaveResponse>(`/api/v1/${this.kind() === 'income' ? 'incomes' : 'expenses'}`, this.m).subscribe({
       next: async r => {
-        // The entry is posted; a file problem never rolls it back (F1).
+        // AG-064 S2: the response's status picks the message; the R17 warning follows it (never a block).
+        const pending = r.status === 'pending';
+        if (pending) this.toast.show(`${r.ref_no} sent for approval. Balances do not change until it is approved.`);
+        // The entry is posted (or held); a file problem never rolls it back (F1). Files upload to a pending entry too.
         const res = await this.uploadAll(r.id);
-        this.result.set({ id: r.id, ref: r.ref_no, ...res });
+        this.result.set({ id: r.id, ref: r.ref_no, ...res, pending, warning: r.warning ?? null,
+          sameDay: r.hold_reason === 'same_day_total' ? r.same_day_total ?? null : null, date: r.txn_date ?? this.m['txn_date'] });
         const keep = { account_id: this.m['account_id'], txn_date: this.m['txn_date'] };
         this.m = { ...this.blank(), ...keep };
+        this.amount.set(null);
         this.files.set([]);
         this.uploads.set([]);
         this.busy.set(false);

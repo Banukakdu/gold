@@ -45,6 +45,9 @@ class AuditLogController extends Controller
 
     public const MASK = '••••';
 
+    /** Values of the `approval` filter: an audit flag `approval = <value>`, or a boolean key `<value> = true`. */
+    public const APPROVAL_FILTERS = [TransferApprovals::NOT_REQUIRED_SUPER_ADMIN, 'approver_onboarded_requester', 'after_approval'];
+
     /** Keys that match the mask pattern but hold no secret (password reset spec R12: a flag and a count), shown only
      * when the value really is a bool or an int (reviewer N7). */
     public const NOT_SECRET = ['first_password', 'tokens_revoked'];
@@ -53,7 +56,8 @@ class AuditLogController extends Controller
     public const GROUPS = [
         // AG-052 R12: receipt events are in the Transactions group.
         // AG-051 R12: approval events too.
-        'transactions' => [['transaction.', 'transfer.receipt_', 'transfer.approv'], ['transfer.rejected']],
+        // AG-064 R12: expense approval events too.
+        'transactions' => [['transaction.', 'transfer.receipt_', 'transfer.approv', 'expense.approv'], ['transfer.rejected', 'expense.rejected']],
         'voids' => [[], ['transaction.voided', 'transaction.reversed']],
         'users' => [['user.'], []],
         'roles' => [['role.'], []],
@@ -93,6 +97,11 @@ class AuditLogController extends Controller
         'transfer.rejected' => 'Transfer rejected',
         'transfer.approval_cancelled' => 'Transfer request cancelled',
         'transfer.approval_expired' => 'Transfer request expired',
+        'expense.approval_requested' => 'Expense sent for approval',
+        'expense.approved' => 'Expense approved',
+        'expense.rejected' => 'Expense rejected',
+        'expense.approval_cancelled' => 'Expense request cancelled',
+        'expense.approval_expired' => 'Expense request expired',
         'period.locked' => 'Period locked',
         'period.unlocked' => 'Period unlocked',
         'report.exported' => 'Report exported',
@@ -226,7 +235,8 @@ class AuditLogController extends Controller
             'self' => 'nullable|boolean',
             'ref_no' => 'nullable|string|max:40',
             // AG-051 finding 6: Super Admin movements above the threshold that were not held.
-            'approval' => 'nullable|in:'.TransferApprovals::NOT_REQUIRED_SUPER_ADMIN,
+            // AG-064: approvals by the user who brought the requester in (R4b) and changes after approval (R21).
+            'approval' => ['nullable', Rule::in(self::APPROVAL_FILTERS)],
             'branches' => 'nullable|array',
             'branches.*' => 'distinct',
             'page' => 'nullable|integer|min:1',
@@ -264,7 +274,8 @@ class AuditLogController extends Controller
         $q->when($f['event'], fn ($q, $v) => $q->where('event', $v))
             ->when($f['user_id'], fn ($q, $v) => $q->where('user_id', $v))
             ->when($request->boolean('self'), fn ($q) => $q->where('new_values->self', true))
-            ->when($f['approval'], fn ($q, $v) => $q->where('new_values->approval', $v));
+            ->when($f['approval'], fn ($q, $v) => $v === TransferApprovals::NOT_REQUIRED_SUPER_ADMIN
+                ? $q->where('new_values->approval', $v) : $q->where("new_values->{$v}", true));
         if ($f['ref_no']) {
             $ids = Transaction::withoutGlobalScopes()->where('ref_no', $f['ref_no'])->pluck('id');
             $q->where('auditable_type', Transaction::class)->whereIn('auditable_id', $ids);

@@ -115,7 +115,7 @@ class LedgerVerify extends Command
         // AG-051 V9 (accounting review MUST 2): requests that never posted have no lines; status agrees.
         if (Schema::hasColumn('transactions', 'approval_status')) {
             $v9 = LedgerChecks::approvalRequests();
-            $failed = $this->check('V9 transfer requests: no lines unless approved, status agrees with approval status', $v9->count(),
+            $failed = $this->check('V9 transfer requests and expense requests: no lines unless approved, status agrees with approval status', $v9->count(),
                 ['Ref', 'Date', 'Branch', 'Problem'], $v9->map(fn ($r) => [$r->ref_no ?? "#{$r->transaction_id}", substr((string) $r->txn_date, 0, 10), $r->branch, $r->problem])->all()) || $failed;
         }
 

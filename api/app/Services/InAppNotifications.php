@@ -38,15 +38,28 @@ class InAppNotifications
         return $ids === [] ? collect() : User::whereIn('id', $ids)->where('status', 'active')->orderBy('id')->get();
     }
 
-    /** @return int[] */
-    private function holderIds(string $permission, int $branchId, ?int $userId = null): array
+    /**
+     * AG-064: whether $userId holds any of $permissions through an active role of $branchId while a member of it.
+     *
+     * @param  string|string[]  $permissions
+     */
+    public function holds(int $userId, string|array $permissions, int $branchId): bool
+    {
+        return $this->holderIds($permissions, $branchId, $userId) !== [];
+    }
+
+    /**
+     * @param  string|string[]  $permission
+     * @return int[]
+     */
+    private function holderIds(string|array $permission, int $branchId, ?int $userId = null): array
     {
         return DB::table('model_has_roles as mr')
             ->join('role_has_permissions as rp', 'rp.role_id', '=', 'mr.role_id')
             ->join('permissions as p', 'p.id', '=', 'rp.permission_id')
             ->join('roles as r', fn ($j) => $j->on('r.id', '=', 'mr.role_id')->where('r.status', '=', 'active'))
             ->join('branch_user as bu', fn ($j) => $j->on('bu.user_id', '=', 'mr.model_id')->where('bu.branch_id', '=', $branchId))
-            ->where('mr.model_type', User::class)->where('mr.branch_id', $branchId)->where('p.name', $permission)
+            ->where('mr.model_type', User::class)->where('mr.branch_id', $branchId)->whereIn('p.name', (array) $permission)
             ->when($userId !== null, fn ($q) => $q->where('mr.model_id', $userId))
             ->distinct()->pluck('mr.model_id')->map(fn ($v) => (int) $v)->all();
     }
@@ -64,8 +77,47 @@ class InAppNotifications
     }
 
     /**
-     * The same rule for one user, read fresh: the preferences endpoint's `can_approve` and the re-check of a queued
-     * approval email (R7, accounting review 4) use it.
+     * The same rule for one user, read fresh: the re-check of a queued transfer approval email (R7, accounting review 4)
+     * and the R5 redaction of transfer approval requests use it.
+     */
+    public function isTransferApprover(User $user): bool
+    {
+        if ($user->status !== 'active') {
+            return false;
+        }
+
+        return $user->is_super_admin || $this->holderIds('transfer.approve', (int) Branch::main()->id, (int) $user->id) !== [];
+    }
+
+    /** AG-064 R3 / R11: active, and a Super Admin or `expense.approve` through a role of $branchId (member of it). */
+    public function isExpenseApprover(User $user, int $branchId): bool
+    {
+        if ($user->status !== 'active') {
+            return false;
+        }
+
+        return $user->is_super_admin || $this->holderIds('expense.approve', $branchId, (int) $user->id) !== [];
+    }
+
+    /** AG-064: the branches in which the user holds `expense.approve` (null = every branch, Super Admin). */
+    public function expenseApproverBranches(User $user): ?array
+    {
+        if ($user->is_super_admin) {
+            return null;
+        }
+
+        return DB::table('model_has_roles as mr')
+            ->join('role_has_permissions as rp', 'rp.role_id', '=', 'mr.role_id')
+            ->join('permissions as p', 'p.id', '=', 'rp.permission_id')
+            ->join('roles as r', fn ($j) => $j->on('r.id', '=', 'mr.role_id')->where('r.status', '=', 'active'))
+            ->join('branch_user as bu', fn ($j) => $j->on('bu.user_id', '=', 'mr.model_id')->on('bu.branch_id', '=', 'mr.branch_id'))
+            ->where('mr.model_type', User::class)->where('mr.model_id', $user->id)->where('p.name', 'expense.approve')
+            ->distinct()->pluck('mr.branch_id')->map(fn ($v) => (int) $v)->all();
+    }
+
+    /**
+     * The preferences endpoint's `can_approve` (section 5): may receive an approval-request email, i.e. a transfer
+     * approver, or (AG-064 R11) holds `expense.approve` through any branch role.
      */
     public function isApprover(User $user): bool
     {
@@ -73,7 +125,7 @@ class InAppNotifications
             return false;
         }
 
-        return $user->is_super_admin || $this->holderIds('transfer.approve', (int) Branch::main()->id, (int) $user->id) !== [];
+        return $this->isTransferApprover($user) || $this->expenseApproverBranches($user) !== [];
     }
 
     // ------------------------------------------------------------------ writing (R2, R3)
@@ -134,13 +186,16 @@ class InAppNotifications
      * What this user may read in full: `branches` null = every branch (Super Admin), else the current memberships;
      * `approver` = isApprover() now. Computed once per request.
      *
-     * @return array{branches: int[]|null, approver: bool}
+     * `expense_branches` = where the user may approve expenses now (null = every branch). AG-064 R11 / R5.
+     *
+     * @return array{branches: int[]|null, approver: bool, expense_branches: int[]|null}
      */
     public function viewer(User $user): array
     {
         return [
             'branches' => $user->is_super_admin ? null : $user->branches()->pluck('branches.id')->map(fn ($v) => (int) $v)->all(),
-            'approver' => $this->isApprover($user),
+            'approver' => $this->isTransferApprover($user),
+            'expense_branches' => $user->status === 'active' ? $this->expenseApproverBranches($user) : [],
         ];
     }
 
@@ -150,15 +205,19 @@ class InAppNotifications
      * MAIN but describes another branch's transfer, so it is also redacted once the user is no longer an approver
      * (review finding 1).
      *
-     * @param  array{branches: int[]|null, approver: bool}  $viewer  from viewer()
+     * @param  array{branches: int[]|null, approver: bool, expense_branches?: int[]|null}  $viewer  from viewer()
      */
     public function present(DatabaseNotification $n, array $viewer): array
     {
         $d = (array) $n->data;
         $branchId = isset($d['branch_id']) ? (int) $d['branch_id'] : null;
         $code = $d['branch_code'] ?? null;
+        $expenseBranches = array_key_exists('expense_branches', $viewer) ? $viewer['expense_branches'] : [];
         $redacted = ($branchId !== null && $viewer['branches'] !== null && ! in_array($branchId, $viewer['branches'], true))
-            || ($n->type === InAppNotification::APPROVAL_REQUESTED && ! $viewer['approver']);
+            || ($n->type === InAppNotification::APPROVAL_REQUESTED && ! $viewer['approver'])
+            // AG-064 R11 / R5: an expense approval request once the reader no longer approves that branch's expenses.
+            || ($n->type === InAppNotification::EXPENSE_APPROVAL_REQUESTED && $expenseBranches !== null
+                && ! in_array((int) $branchId, $expenseBranches, true));
 
         return [
             'id' => $n->id,
