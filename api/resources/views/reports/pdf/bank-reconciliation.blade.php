@@ -27,8 +27,8 @@
                 <td class="num">{{ $r['age_days'] }}</td>
             </tr>
         @empty
-            <tr><td colspan="8">All bank entries up to {{ $date($data['as_at']) }} are reconciled.</td></tr>
         @endforelse
+        @if ($a['empty_text'] ?? null)<tr><td colspan="8">{{ $a['empty_text'] }}</td></tr>@endif
         </tbody>
     </table>
     <table style="width: 60%; margin-top: 6px">
@@ -68,7 +68,7 @@
         </table>
     @endif
     <p class="note">Prepared by {{ $st['completed_by']['name'] ?? '-' }} on {{ $colombo($st['completed_at']) }}</p>
-    <p class="note">{{ $st['self_count'] }} of {{ $st['lines_count'] }} lines were recorded by the preparer</p>
+    <p class="note">{{ $st['self_count'] }} of {{ $st['lines_count'] }} {{ $st['lines_count'] === 1 ? 'line was' : 'lines were' }} recorded by the preparer</p>
     {{-- Review finding 4: blank Checked by / Approved by lines for the independent review. --}}
     <table class="sign">
         <tr>

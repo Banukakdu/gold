@@ -14,6 +14,7 @@ use App\Support\BranchContext;
 use App\Support\BusinessDate;
 use App\Support\Money;
 use App\Support\ReportParams;
+use App\Support\Settings;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Database\QueryException;
@@ -50,6 +51,11 @@ class BankReconciliation
     public const LOCKED_UNDO = 'The statement date is in a locked period. Only a Super Admin can undo it.';
 
     public const MAX_ITEMS = 500;
+
+    /** Review finding 9: at most this many lines on the S1 screen, and uncleared rows on the S3 screen (exports have their own caps). */
+    public const SCREEN_LINES = 2000;
+
+    public const SCREEN_ROWS = 2000;
 
     /** S3 basis line. */
     public const BASIS = 'Bank lines dated up to the As at date that have no cleared date on or before it; voided entries excluded. '
@@ -163,17 +169,48 @@ class BankReconciliation
             || $now['uncleared_payments'] !== $s->uncleared_payments_cents || $now['cleared_booked_later'] !== $s->cleared_booked_later_cents;
     }
 
-    /** R8 late entries of a statement: lines dated on or before S written after its completion (new postings and void contras). */
+    /**
+     * R8 late entries of a statement: lines dated on or before S written after its completion (new postings and void
+     * contras). "After" is by line id against the account's highest line id stored at completion (review finding 7:
+     * no one-second timestamp boundary; Complete holds the account lock, so no line of the account is in flight).
+     */
     private function lateQuery(BankStatement $s): Builder
     {
         return DB::table('ledger_entries as le')->join('transactions as t', 't.id', '=', 'le.transaction_id')
             ->where('le.account_id', $s->account_id)->whereDate('le.entry_date', '<=', $s->statement_date->format('Y-m-d'))
-            ->where('le.created_at', '>', $s->completed_at);
+            ->where('le.id', '>', (int) $s->max_entry_id);
     }
 
+    /** The S1 banner count (review finding 6): late entries that are listed and can be ticked, so voided ones are left out. */
     public function lateCount(BankStatement $s): int
     {
-        return (int) $this->lateQuery($s)->distinct()->count('le.transaction_id');
+        return (int) $this->lateQuery($s)->whereIn('t.status', ['posted', 'reversed'])->distinct()->count('le.transaction_id');
+    }
+
+    /**
+     * Statements (ids) with at least one late line, in one query. A completed statement's figures at S can only change
+     * through a late line (every mark cleared on or before S is frozen, a marked line cannot be voided and lines are
+     * immutable), so `changed` is computed only for these (review finding 9).
+     *
+     * @param  Collection<int, BankStatement>  $statements
+     * @return array<int, true>
+     */
+    private function withLateLines(Collection $statements): array
+    {
+        if ($statements->isEmpty()) {
+            return [];
+        }
+
+        return DB::table('bank_statements as s')->whereIn('s.id', $statements->pluck('id'))
+            ->whereExists(fn ($q) => $q->selectRaw('1')->from('ledger_entries as le')->whereColumn('le.account_id', 's.account_id')
+                ->whereRaw('DATE(le.entry_date) <= DATE(s.statement_date)')->whereColumn('le.id', '>', 's.max_entry_id'))
+            ->pluck('s.id')->mapWithKeys(fn ($id) => [(int) $id => true])->all();
+    }
+
+    /** R8 for a completed statement; an undone statement is superseded and never flagged. */
+    private function changedFast(BankStatement $s, array $late): bool
+    {
+        return $s->status === BankStatement::COMPLETED && isset($late[$s->id]) && $this->changed($s);
     }
 
     /** The late entries of a statement for the reprint: ref, date, amount, recorded by/at, or voided by/at. */
@@ -209,9 +246,20 @@ class BankReconciliation
         $this->assertBank($account);
         $account->loadMissing('branch:id,code,name');
         $last = $this->lastCompleted($account->id);
-        $lines = $this->lines($account, $statementDate, $showLater, $showReconciled ? $last : null, $user);
-        $statements = BankStatement::withoutGlobalScopes()->with(['completedBy', 'undoneBy'])->where('account_id', $account->id)
+        [$lines, $limited] = $this->lines($account, $statementDate, $showLater, $showReconciled ? $last : null, $user);
+        $statements = BankStatement::withoutGlobalScopes()->where('account_id', $account->id)
             ->orderByDesc('statement_date')->orderByDesc('id')->get();
+        $reconciledAt = $statementDate ? $this->reconciledCents($account->id, $statementDate) : null;
+        // Review finding 10: saved ticks cleared in (last S, S] on lines not listed (dated after S while "Show later
+        // entries" is off, or past the line cap), so the tiles add up: last + receipts - payments + this = reconciled.
+        $notListed = null;
+        if ($statementDate !== null) {
+            $lastDate = $last?->statement_date->format('Y-m-d');
+            $listed = collect($lines)->filter(fn ($l) => ! $l['frozen'] && $l['mark'] && $l['mark']['cleared_date'] <= $statementDate
+                && ($lastDate === null || $l['mark']['cleared_date'] > $lastDate))
+                ->sum(fn ($l) => Money::toCents($l['in']) - Money::toCents($l['out']));
+            $notListed = $reconciledAt - ($last ? $this->reconciledCents($account->id, $lastDate) : 0) - $listed;
+        }
 
         return [
             'account' => ['id' => $account->id, 'code' => $account->code, 'name' => $account->name, 'status' => $account->status,
@@ -219,8 +267,10 @@ class BankReconciliation
             'last_statement' => $last ? ['id' => $last->id, 'statement_date' => $last->statement_date->format('Y-m-d'),
                 'statement_balance' => Money::fromCents($last->statement_balance_cents)] : null,
             'book_balance_at' => $statementDate ? Money::fromCents($this->bookCents($account->id, $statementDate)) : null,
-            'reconciled_at' => $statementDate ? Money::fromCents($this->reconciledCents($account->id, $statementDate)) : null,
+            'reconciled_at' => $reconciledAt === null ? null : Money::fromCents($reconciledAt),
+            'cleared_not_listed' => $notListed === null ? null : Money::fromCents($notListed),
             'lines' => $lines,
+            'lines_limited' => $limited,
             'late_entries_count' => $last ? $this->lateCount($last) : 0,
             'statements' => $this->presentAll($statements, $account, $user, $last),
         ];
@@ -231,6 +281,7 @@ class BankReconciliation
      * not frozen in a completed statement, dated on or before S (all dates with show_later). $frozenOf: also list the
      * lines frozen in that (latest completed) statement, read-only (F3 tooltip).
      */
+    /** @return array{0: array, 1: bool} the lines, and whether the line cap cut the list */
     private function lines(Account $account, ?string $statementDate, bool $showLater, ?BankStatement $frozenOf, User $user): array
     {
         $rows = DB::table('ledger_entries as le')->join('transactions as t', 't.id', '=', 'le.transaction_id')
@@ -242,14 +293,17 @@ class BankReconciliation
             ->where(fn ($w) => $w->whereNull('bs.id')->orWhere('bs.status', '!=', BankStatement::COMPLETED)
                 ->when($frozenOf, fn ($x, $s) => $x->orWhere('bs.id', $s->id)))
             ->when($statementDate && ! $showLater, fn ($q) => $q->whereDate('le.entry_date', '<=', $statementDate))
-            ->orderBy('le.entry_date')->orderBy('le.id')
+            ->orderBy('le.entry_date')->orderBy('le.id')->limit(self::SCREEN_LINES + 1)
             ->get(['le.id', 'le.transaction_id', 'le.entry_date', 't.ref_no', 't.type', 't.status', 't.payee_payer', 't.description', 't.reference',
                 't.created_by', 'o.ref_no as reversal_of_ref', 'm.id as mark_id', 'm.cleared_date', 'm.marked_by', 'm.marked_at', 'm.statement_id',
                 'bs.status as statement_status', 'bs.statement_date as frozen_date', DB::raw("{$this->dr()} as dr"), DB::raw("{$this->cr()} as cr")]);
+        // Review finding 9: the oldest SCREEN_LINES lines (ticking them, or an earlier statement date, brings in the rest).
+        $limited = $rows->count() > self::SCREEN_LINES;
+        $rows = $rows->take(self::SCREEN_LINES);
 
         $people = $this->people($rows->pluck('marked_by')->filter()->unique()->all(), (int) $account->branch_id);
 
-        return $rows->map(function ($r) use ($people, $user) {
+        $lines = $rows->map(function ($r) use ($people, $user) {
             $date = substr((string) $r->entry_date, 0, 10);
             $cleared = $r->mark_id ? substr((string) $r->cleared_date, 0, 10) : null;
             $frozen = $r->mark_id && $r->statement_status === BankStatement::COMPLETED;
@@ -277,6 +331,8 @@ class BankReconciliation
                 'cleared_before_booked' => $cleared !== null && $cleared < $date,
             ];
         })->values()->all();
+
+        return [$lines, $limited];
     }
 
     /**
@@ -303,14 +359,16 @@ class BankReconciliation
     {
         $people = $this->people($statements->pluck('completed_by')->merge($statements->pluck('undone_by'))->filter()->unique()->all(), (int) $account->branch_id);
         $mayUndoLast = $last && $this->mayUndo($last, $user);
+        $late = $this->withLateLines($statements->where('status', BankStatement::COMPLETED));
 
-        return $statements->map(fn (BankStatement $s) => $this->present($s, $people, $last?->id === $s->id && $mayUndoLast))->values()->all();
+        return $statements->map(fn (BankStatement $s) => $this->present($s, $people, $last?->id === $s->id && $mayUndoLast, $late))->values()->all();
     }
 
-    public function present(BankStatement $s, ?array $people = null, bool $canUndo = false): array
+    /** @param  array<int, true>|null  $late  statements with late lines (withLateLines); null: look up this one */
+    public function present(BankStatement $s, ?array $people = null, bool $canUndo = false, ?array $late = null): array
     {
         $people ??= $this->people(array_filter([$s->completed_by, $s->undone_by]), (int) $s->branch_id);
-        $now = $this->figures((int) $s->account_id, $s->statement_date->format('Y-m-d'));
+        $late ??= $this->withLateLines(collect([$s]));
 
         return [
             'id' => $s->id,
@@ -330,7 +388,7 @@ class BankReconciliation
             'undone_by' => $s->undone_by ? ($people[(int) $s->undone_by] ?? null) : null,
             'undone_at' => $s->undone_at?->toIso8601String(),
             'undo_reason' => $s->undo_reason,
-            'changed_since_completion' => $this->changed($s, $now),
+            'changed_since_completion' => $this->changedFast($s, $late),
             'can_undo' => $canUndo,
         ];
     }
@@ -439,8 +497,8 @@ class BankReconciliation
                         BankReconciliationMark::create(['branch_id' => $acc->branch_id, 'account_id' => $acc->id, 'ledger_entry_id' => $e->id,
                             'cleared_date' => $op['date'], 'marked_by' => $user->id, 'marked_at' => $now]);
                     } catch (QueryException $ex) {
-                        if ((string) $ex->getCode() !== '23000') {
-                            throw $ex;
+                        if (! self::isActiveMarkViolation($ex)) {
+                            throw $ex; // review finding 8: any other integrity error is a real fault
                         }
                         self::fail($ref($e).' is already reconciled.'); // unique active_key under a race (R12)
                     }
@@ -457,6 +515,16 @@ class BankReconciliation
 
             return ['marked' => count($mark), 'unmarked' => count($unmark)];
         }, LedgerService::ATTEMPTS);
+    }
+
+    /** The one-active-mark-per-line unique index (MySQL active_key, SQLite partial index), as YearEnd::isActiveKeyViolation. */
+    public static function isActiveMarkViolation(QueryException $e): bool
+    {
+        $driverCode = (int) ($e->errorInfo[1] ?? 0);
+        $msg = $e->getMessage();
+
+        return ($driverCode === 1062 && str_contains($msg, 'bank_reconciliation_marks_active_key_unique'))
+            || ($driverCode === 19 && str_contains($msg, 'UNIQUE constraint failed: bank_reconciliation_marks.ledger_entry_id'));
     }
 
     // ------------------------------------------------------------------ R6 complete
@@ -491,6 +559,8 @@ class BankReconciliation
                     .Money::format(Money::fromCents($reconciled)).').');
             }
             $f = $this->figures($acc->id, $s);
+            // Review finding 7: the high-water mark for late entries (the account row lock keeps new lines out meanwhile).
+            $maxEntryId = (int) DB::table('ledger_entries')->where('account_id', $acc->id)->max('id');
 
             // The marks this statement freezes: active, cleared in (last S, S].
             $marks = BankReconciliationMark::withoutGlobalScopes()->active()->where('account_id', $acc->id)
@@ -504,7 +574,7 @@ class BankReconciliation
                 'reconciled_cents' => $reconciled, 'book_balance_cents' => $f['book'], 'uncleared_receipts_cents' => $f['uncleared_receipts'],
                 'uncleared_payments_cents' => $f['uncleared_payments'], 'cleared_booked_later_cents' => $f['cleared_booked_later'],
                 'self_count' => $self, 'lines_count' => $marks->count(), 'status' => BankStatement::COMPLETED,
-                'completed_by' => $user->id, 'completed_at' => now(),
+                'completed_by' => $user->id, 'completed_at' => now(), 'max_entry_id' => $maxEntryId,
             ]);
             if ($marks->isNotEmpty()) {
                 BankReconciliationMark::withoutGlobalScopes()->whereIn('id', $marks->pluck('id'))->update(['statement_id' => $statement->id, 'updated_at' => now()]);
@@ -622,16 +692,27 @@ class BankReconciliation
             }
         }
 
+        // Review finding 2: a statement always lists every uncleared line (its rows add up to its totals), so Older than
+        // is ignored with statement_id, and the output says so.
+        $olderThan = isset($d['older_than']) ? (int) $d['older_than'] : null;
+
         return new ReportParams($asAt, $asAt, $branches, $all, $subset, [
             'as_at' => $asAt, 'account_ids' => $accountIds,
-            'older_than' => isset($d['older_than']) ? (int) $d['older_than'] : null, 'statement_id' => $statementId,
+            'older_than' => $statementId === null ? $olderThan : null, 'statement_id' => $statementId,
+            'older_than_ignored' => $statementId !== null && $olderThan !== null,
         ]);
     }
 
-    public function report(ReportParams $p): array
+    /**
+     * S3 data. $cap (the screen GET, review finding 9): at most this many uncleared rows in all; the rest are counted in
+     * `rows_not_shown` (exports pass null and are bounded by the export caps instead).
+     */
+    public function report(ReportParams $p, ?int $cap = null): array
     {
         $asAt = $p->extra['as_at'];
         $olderThan = $p->extra['older_than'];
+        $left = $cap;
+        $settings = app(Settings::class);
         $accounts = Account::withoutGlobalScopes()->with('branch:id,code,name,is_main')->where('type', 'bank')
             ->whereIn('branch_id', $p->branchIds())
             ->when($p->extra['account_ids'], fn ($q, $ids) => $q->whereIn('id', $ids))
@@ -653,8 +734,17 @@ class BankReconciliation
                     $row['stale'] = (int) $r->cr > 0 && $row['age_days'] > self::STALE_DAYS;
 
                     return $row;
-                })
-                ->filter(fn ($r) => $olderThan === null || $r['age_days'] >= $olderThan)->values()->all();
+                });
+            $uncleared = $rows->count();
+            $rows = $rows->filter(fn ($r) => $olderThan === null || $r['age_days'] >= $olderThan)->values();
+            $filteredOut = $uncleared - $rows->count();
+            $notShown = 0;
+            if ($left !== null) {
+                $notShown = max(0, $rows->count() - $left);
+                $rows = $rows->take($left);
+                $left -= $rows->count();
+            }
+            $rows = $rows->all();
             $later = $this->clearedLaterQuery($a->id, $asAt)->join('transactions as t', 't.id', '=', 'le.transaction_id')
                 ->leftJoin('transactions as o', 'o.id', '=', 't.reversal_of_id')
                 ->orderBy('le.entry_date')->orderBy('le.id')
@@ -674,6 +764,13 @@ class BankReconciliation
                 'cleared_booked_later_rows' => $later,
                 'expected_bank_balance' => Money::fromCents($f['expected']),
                 'rows' => $rows,
+                'rows_filtered_out' => $filteredOut,
+                'rows_not_shown' => $notShown,
+                // Review finding 2: the empty text tells "all reconciled" from "none older than N days".
+                'empty_text' => $rows || $notShown ? null : ($filteredOut
+                    ? "No uncleared entries older than {$olderThan} days. {$filteredOut} newer uncleared "
+                        .($filteredOut === 1 ? 'entry is' : 'entries are').' included in the totals.'
+                    : 'All bank entries up to '.$settings->formatDate($asAt).' are reconciled.'),
             ];
         }
 
@@ -712,10 +809,23 @@ class BankReconciliation
             'provisional' => false, // a status as at a date, not period figures (S3)
             'as_at' => $asAt,
             'older_than' => $olderThan,
+            'older_than_ignored' => $p->extra['older_than_ignored'] ?? false,
+            'filter_note' => self::filterNote($olderThan, $p->extra['older_than_ignored'] ?? false),
             'basis' => self::BASIS,
             'accounts' => $out,
             'statement' => $statement,
         ]);
+    }
+
+    /** Review finding 2: the Older than filter (or that it was ignored), printed with the header on screen, PDF and Excel. */
+    public static function filterNote(?int $olderThan, bool $ignored): ?string
+    {
+        if ($ignored) {
+            return 'Older than is ignored for a reconciliation statement: every uncleared entry is listed.';
+        }
+
+        return $olderThan === null ? null
+            : "Rows limited to entries older than {$olderThan} days; totals cover all uncleared entries.";
     }
 
     private function row(object $r): array
@@ -764,7 +874,7 @@ class BankReconciliation
                 'branch' => ['id' => $a->branch->id, 'code' => $a->branch->code],
                 'account' => ['id' => $a->id, 'code' => $a->code, 'name' => $a->name],
                 'last_statement_date' => $last?->statement_date->format('Y-m-d'),
-                'changed_since_completion' => $last ? $this->changed($last) : false,
+                'changed_since_completion' => $last ? $this->changedFast($last, $this->withLateLines(collect([$last]))) : false,
             ];
         }
 

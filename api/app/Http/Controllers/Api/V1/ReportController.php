@@ -57,7 +57,7 @@ class ReportController extends Controller
     /** AG-033 S3 Unreconciled bank entries (docs/specs/bank-reconciliation.md). */
     public function bankReconciliation(Request $request, BankReconciliation $recon)
     {
-        return $recon->report($recon->reportParams($request->all()));
+        return $recon->report($recon->reportParams($request->all()), BankReconciliation::SCREEN_ROWS); // review finding 9
     }
 
     /** AG-087 R1: validation first, then the count; a large Excel export is queued (202), anything else downloads. */

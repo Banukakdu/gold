@@ -14,7 +14,7 @@ class ReportWorkbook implements WithMultipleSheets
     {
         $titles = self::titles(array_column($this->sheets, 'title'));
 
-        return array_map(fn (array $s, string $title) => new ReportSheet($title, $this->headerLines, $s['columns'], $s['rows'], $s['notes'] ?? []),
+        return array_map(fn (array $s, string $title) => new ReportSheet($title, $this->headerLines, $s['columns'], $s['rows'], $s['notes'] ?? [], $s['intro'] ?? []),
             $this->sheets, $titles);
     }
 

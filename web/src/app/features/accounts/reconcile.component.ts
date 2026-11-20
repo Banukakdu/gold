@@ -31,6 +31,8 @@ export interface Reconciliation {
   account: { id: number; code: string | null; name: string; status: string; branch: { id: number; code: string; name: string } };
   last_statement: { id: number; statement_date: string; statement_balance: string } | null;
   book_balance_at: string | null; reconciled_at: string | null;
+  /** Saved ticks cleared in (last statement, S] on lines not listed (dated after S, or past the line cap). */
+  cleared_not_listed: string | null; lines_limited: boolean;
   lines: ReconLine[]; late_entries_count: number; statements: ReconStatement[];
 }
 
@@ -89,7 +91,7 @@ function previousMonthEnd(today: string): string {
         <p class="alert info">First reconciliation: choose a statement date after all cheques and deposits outstanding at go-live have cleared, and tick the opening balance line.</p>
       }
       @if (r.late_entries_count > 0 && r.last_statement) {
-        <p class="warn rc-late">{{ r.late_entries_count }} {{ r.late_entries_count === 1 ? 'entry' : 'entries' }} dated on or before {{ label(r.last_statement.statement_date) }} were added after that statement was completed. They are listed and can be ticked with a later cleared date.</p>
+        <p class="warn rc-late">@if (r.late_entries_count === 1) {1 entry dated on or before {{ label(r.last_statement.statement_date) }} was added after that statement was completed. It is listed and can be ticked with a later cleared date.} @else { {{ r.late_entries_count }} entries dated on or before {{ label(r.last_statement.statement_date) }} were added after that statement was completed. They are listed and can be ticked with a later cleared date.}</p>
       }
       <div class="rc-head">
         <label>Statement date
@@ -113,6 +115,10 @@ function previousMonthEnd(today: string): string {
           <small>{{ r.last_statement ? label(r.last_statement.statement_date) : 'None' }}</small></div>
         <div class="rc-tile"><span>Receipts ticked (+)</span><b>{{ text(sums().receipts) }}</b></div>
         <div class="rc-tile"><span>Payments ticked (-)</span><b>{{ text(sums().payments) }}</b></div>
+        @if (notListed()) {
+          <div class="rc-tile rc-notlisted" title="Ticks saved on lines not shown: dated after the statement date (tick Show later entries to see them).">
+            <span>Ticked, not shown (+/-)</span><b>{{ text(notListed()) }}</b></div>
+        }
         <div class="rc-tile"><span>Reconciled balance</span><b>{{ reconciled() === null ? '—' : text(reconciled()!) }}</b></div>
         <div class="rc-tile"><span>Statement balance</span><b>{{ balanceOk() ? text(balanceCents()!) : '—' }}</b></div>
         <div class="rc-tile"><span>Book balance at statement date</span><b>{{ r.book_balance_at === null ? '—' : (r.book_balance_at | money) }}</b></div>
@@ -129,6 +135,9 @@ function previousMonthEnd(today: string): string {
         }
       </div>
 
+      @if (r.lines_limited) {
+        <p class="warn rc-limited">Showing the oldest {{ r.lines.length }} lines only. Tick and complete these, or choose an earlier statement date, to see the rest.</p>
+      }
       @if (!r.lines.length) {
         <div class="card"><p class="muted">Nothing to reconcile up to {{ label(statementDate()) }}.</p></div>
       } @else {
@@ -190,10 +199,10 @@ function previousMonthEnd(today: string): string {
         @if (!r.statements.length) { <p class="muted">No statement completed yet.</p> }
         @for (s of r.statements; track s.id) {
           <div class="rc-hrow">
-            <div><b>{{ label(s.statement_date) }}</b> · {{ balanceText(s.statement_balance) }} · {{ s.lines_count }} lines
+            <div><b>{{ label(s.statement_date) }}</b> · {{ balanceText(s.statement_balance) }} · {{ s.lines_count }} {{ s.lines_count === 1 ? 'line' : 'lines' }}
               <span class="tag" [attr.data-s]="s.status === 'undone' ? 'void' : 'balanced'">{{ s.status === 'undone' ? 'Undone' : 'Completed' }}</span>
               @if (s.changed_since_completion) { <span class="tag att-late">Changed since completion</span> }</div>
-            <div class="muted">Prepared by {{ s.completed_by?.name }}@if (s.completed_by?.tag; as t) { ({{ t }}) } on {{ s.completed_at | appDateTime }} · {{ s.self_count }} of {{ s.lines_count }} lines were recorded by the preparer</div>
+            <div class="muted">Prepared by {{ s.completed_by?.name }}@if (s.completed_by?.tag; as t) { ({{ t }}) } on {{ s.completed_at | appDateTime }} · {{ s.self_count }} of {{ s.lines_count }} {{ s.lines_count === 1 ? 'line was' : 'lines were' }} recorded by the preparer</div>
             @if (s.status === 'undone') { <div class="muted">Undone by {{ s.undone_by?.name }} on {{ s.undone_at | appDateTime }}: {{ s.undo_reason }}</div> }
             <div class="rc-hact">
               @if (auth.can('report.view')) { <a class="rc-link" [routerLink]="['/reports/bank-reconciliation']" [queryParams]="{ statement_id: s.id }">View</a> }
@@ -312,16 +321,25 @@ export class ReconcileComponent implements OnInit {
     }
     return { mark, unmark, count: mark.length + unmark.length };
   });
+  /** Review finding 10: in cents; 0 when every saved tick of the period is on a listed line. */
+  notListed = computed(() => signedCents(this.r()?.cleared_not_listed ?? '0') ?? 0);
   canComplete = computed(() => !!this.statementDate() && !this.dateError() && this.balanceOk() && this.difference() === 0);
 
   ngOnInit() {
     const id = Number(this.id() ?? 0);
     this.accountId.set(id > 0 ? id : null);
+    // QA D5: the account must be a bank account of the current branch (a branch switch re-creates this page) before
+    // the reconciliation is requested, so a switch never produces a 404.
     this.http.get<Account[]>('/api/v1/accounts').subscribe({
-      next: a => { this.accounts.set(a); this.loadedAccounts.set(true); },
+      next: a => {
+        this.accounts.set(a);
+        this.loadedAccounts.set(true);
+        if (id <= 0) return;
+        if (this.banks().some(b => b.id === id)) this.start();
+        else { this.accountId.set(null); this.router.navigate(['/accounts/reconcile']); }
+      },
       error: () => { this.accounts.set([]); this.loadedAccounts.set(true); },
     });
-    if (id > 0) this.start();
   }
 
   @HostListener('window:beforeunload', ['$event'])

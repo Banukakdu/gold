@@ -403,7 +403,7 @@ tr.rc-frozen td, .rc-line.rc-frozen { color: var(--muted); }
   .rc-table { display: none; }
   .rc-cards { display: block; }
   .rc-bar button { flex: 1; min-height: 44px; }
-  .rc-hact > * { flex: 1; min-height: 44px; justify-content: center; }
+  .rc-hact { flex-direction: column; > * { width: 100%; min-height: 44px; justify-content: center; } }
   .rc-actions button, .rc-actions a { min-height: 44px; }
   .rc-dialog { left: 16px; right: 16px; width: auto; transform: none; }
   .br-table { display: none; }

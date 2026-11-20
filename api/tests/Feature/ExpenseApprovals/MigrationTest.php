@@ -131,10 +131,13 @@ class MigrationTest extends TestCase
     /** Review 2: a pre-AG-051 install upgraded in one deploy (AG-051, AG-094, AG-064 migrations together). */
     public function test_ac29_pre_ag051_install_upgraded_in_one_deploy(): void
     {
+        // AG-033 review 3: account.reconcile is added later too, so roll it back first; AG-051 and AG-064 must not
+        // require it of a full copy (their exclusion lists) or they would grant nothing.
+        $this->rollback('database/migrations/2026_12_01_000000_bank_reconciliation.php');
         $this->rollback();
         $this->rollback('database/migrations/2026_11_29_000000_create_notifications_table.php');
         $this->rollback(self::AG051);
-        $this->assertFalse(DB::table('permissions')->whereIn('name', ['transfer.approve', 'expense.approve'])->exists());
+        $this->assertFalse(DB::table('permissions')->whereIn('name', ['transfer.approve', 'expense.approve', 'account.reconcile'])->exists());
 
         $now = now();
         $kdy = DB::table('branches')->insertGetId(['code' => 'KDY', 'name' => 'Kandy', 'is_main' => false, 'status' => 'active', 'created_at' => $now, 'updated_at' => $now]);
@@ -152,6 +155,10 @@ class MigrationTest extends TestCase
         $this->assertContains('expense.approve', Role::find($mainAdmin)->permissionKeys());
         $this->assertContains('transfer.approve', Role::find($mainAdmin)->permissionKeys());
         $this->assertNotContains('expense.approve', Role::find($cashier)->permissionKeys());
+        // ...and AG-033 then finds both full copies (review finding 4).
+        $this->assertContains('account.reconcile', Role::find($kdyAdmin)->permissionKeys());
+        $this->assertContains('account.reconcile', Role::find($mainAdmin)->permissionKeys());
+        $this->assertNotContains('account.reconcile', Role::find($cashier)->permissionKeys());
     }
 
     /** Review 5: rollback refuses while a limit is set, and audits every grant it removes. */

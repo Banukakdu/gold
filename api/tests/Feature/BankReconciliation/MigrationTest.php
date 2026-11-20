@@ -53,7 +53,7 @@ class MigrationTest extends TestCase
         return Role::whereNull('branch_id')->get()->mapWithKeys(fn (Role $r) => [$r->name => $r->permissionKeys()])->all();
     }
 
-    public function test_ac1_existing_install_gets_the_key_on_star_templates_only(): void
+    public function test_ac1_existing_install_gets_the_key_on_star_templates_and_full_branch_copies(): void
     {
         $this->rollback();
         $this->assertFalse(Schema::hasTable('bank_statements'));
@@ -71,6 +71,9 @@ class MigrationTest extends TestCase
             return $id;
         };
         $admin = $copy('Branch Admin', DB::table('permissions')->pluck('name')->all());
+        // Review finding 4: a non-MAIN full copy lacks the MAIN-only transfer.approve and still qualifies; a narrowed one does not.
+        $kdyAdmin = $copy('Branch Admin 2', array_diff(DB::table('permissions')->pluck('name')->all(), ['transfer.approve']));
+        $narrowed = $copy('Branch Admin 3', array_diff(DB::table('permissions')->pluck('name')->all(), ['audit.view']));
         $accountant = $copy('Accountant', array_diff(PermissionSeeder::TEMPLATES['Accountant'], ['account.reconcile']));
         // The Accountant template of an old install does not hold the key either.
         $tpl = Role::whereNull('branch_id')->where('name', 'Accountant')->firstOrFail();
@@ -86,17 +89,52 @@ class MigrationTest extends TestCase
         foreach (['Accountant', 'Cashier', 'Viewer'] as $name) {
             $this->assertNotContains('account.reconcile', $t[$name], $name);
         }
-        $this->assertNotContains('account.reconcile', Role::find($admin)->permissionKeys());
+        $this->assertContains('account.reconcile', Role::find($admin)->permissionKeys());
+        $this->assertContains('account.reconcile', Role::find($kdyAdmin)->permissionKeys());
+        $this->assertNotContains('account.reconcile', Role::find($narrowed)->permissionKeys());
         $this->assertNotContains('account.reconcile', Role::find($accountant)->permissionKeys());
         $this->assertNotContains('account.reconcile', $tpl->fresh()->permissionKeys());
-        // No other role gained anything.
-        $this->assertSame($before, DB::table('role_has_permissions')->whereNotIn('role_id', Role::whereNull('branch_id')->where('name', 'Branch Admin')->pluck('id'))->count());
+        // No other role gained anything: the two full copies gained one key each.
+        $this->assertSame($before + 2, DB::table('role_has_permissions')->whereNotIn('role_id', Role::whereNull('branch_id')->where('name', 'Branch Admin')->pluck('id'))->count());
+        // Each grant is audited as a Roles-screen change would be.
+        $audits = DB::table('audit_logs')->where('event', 'role.updated')->where('auditable_type', Role::class)->whereIn('auditable_id', [$admin, $kdyAdmin])->get();
+        $this->assertCount(2, $audits);
+        foreach ($audits as $a) {
+            $this->assertSame($kdy, (int) $a->branch_id);
+            $new = json_decode($a->new_values, true);
+            $old = json_decode($a->old_values, true);
+            $this->assertSame('migration bank_reconciliation (AG-033)', $new['source']);
+            $this->assertSame(['account.reconcile'], array_values(array_diff($new['permissions'], $old['permissions'])));
+        }
 
         // Running again (a partial run, or the seeder afterwards) adds nothing twice and changes no template.
         (require base_path(self::FILE))->up();
         $this->seed(PermissionSeeder::class);
         $this->assertSame($t, $this->templates());
         $this->assertSame(1, DB::table('permissions')->where('name', 'account.reconcile')->count());
+        $this->assertSame(2, DB::table('audit_logs')->where('event', 'role.updated')->whereIn('auditable_id', [$admin, $kdyAdmin])->count());
+    }
+
+    /** Review finding 5: a run that stopped after the tables were created adds the one-active-row constraints next time. */
+    public function test_resumes_after_tables_without_active_constraints(): void
+    {
+        $this->rollback();
+        $m = require base_path(self::FILE);
+        $m->up();
+        $mysql = DB::connection()->getDriverName() === 'mysql';
+        if ($mysql) {
+            DB::statement('ALTER TABLE bank_reconciliation_marks DROP INDEX bank_reconciliation_marks_active_key_unique');
+            DB::statement('ALTER TABLE bank_reconciliation_marks DROP COLUMN active_key');
+            DB::statement('ALTER TABLE bank_statements DROP INDEX bank_statements_active_key_unique');
+        } else {
+            DB::statement('DROP INDEX bank_reconciliation_marks_active_unique');
+            DB::statement('DROP INDEX bank_statements_active_unique');
+        }
+        $m->up();
+        $this->assertTrue(Schema::hasIndex('bank_reconciliation_marks', $mysql ? 'bank_reconciliation_marks_active_key_unique' : 'bank_reconciliation_marks_active_unique'));
+        $this->assertTrue(Schema::hasIndex('bank_statements', $mysql ? 'bank_statements_active_key_unique' : 'bank_statements_active_unique'));
+        $m->up(); // and once more: nothing to do
+        $this->artisan('migrate', ['--force' => true])->assertExitCode(0);
     }
 
     public function test_one_active_row_indexes(): void

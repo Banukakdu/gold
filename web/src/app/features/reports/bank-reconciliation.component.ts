@@ -23,9 +23,11 @@ export interface BankSection {
   last_statement: { id: number; statement_date: string; statement_balance: string } | null;
   book_balance: string; uncleared_receipts: string; uncleared_payments: string; cleared_booked_later: string;
   cleared_booked_later_rows: BankRow[]; expected_bank_balance: string; rows: BankRow[];
+  /** Review finding 2: rows hidden by Older than; finding 9: rows past the screen cap (exports list them). */
+  rows_filtered_out: number; rows_not_shown: number; empty_text: string | null;
 }
 export interface BankReport extends ReportMeta {
-  as_at: string; older_than: number | null; basis: string; accounts: BankSection[];
+  as_at: string; older_than: number | null; older_than_ignored: boolean; filter_note: string | null; basis: string; accounts: BankSection[];
   statement: {
     id: number; status: 'completed' | 'undone'; statement_date: string; statement_balance: string; overdrawn: boolean;
     expected_bank_balance: string; difference: string; changed_since_completion: boolean;
@@ -75,6 +77,7 @@ export interface BankReport extends ReportMeta {
         <p class="alert br-undone">UNDONE on {{ u.at | appDate }} by {{ u.by?.name }}: {{ u.reason }}. This statement is superseded.</p>
       }
       <ag-report-head [meta]="r" [title]="r.statement ? 'Bank reconciliation statement' : 'Unreconciled bank entries'" [basis]="r.basis" [periodText]="'As at ' + (r.as_at | appDate)" />
+      @if (r.filter_note) { <p class="warn br-filter">{{ r.filter_note }}</p> }
       @for (a of r.accounts; track a.account.id) {
         <section class="book">
           <h2>{{ a.account.branch.code }} · {{ a.account.name }}@if (a.account.code) { ({{ a.account.code }}) } —
@@ -82,7 +85,7 @@ export interface BankReport extends ReportMeta {
             @else { never reconciled }</h2>
           <div class="card br-card-wrap">
             @if (!a.rows.length) {
-              <p class="muted">All bank entries up to {{ label(r.as_at) }} are reconciled.</p>
+              <p class="muted br-empty">{{ a.empty_text }}</p>
             } @else {
               <table class="list br-table">
                 <thead><tr><th>Date</th><th>Ref</th><th>Type</th><th>Description / payee</th><th>Reference</th><th class="num">In</th><th class="num">Out</th><th class="num">Age</th></tr></thead>
@@ -109,6 +112,7 @@ export interface BankReport extends ReportMeta {
                   </div>
                 }
               </div>
+              @if (a.rows_not_shown) { <p class="warn br-more">{{ a.rows_not_shown }} more {{ a.rows_not_shown === 1 ? 'line is' : 'lines are' }} not shown here; they are in the totals and in the Excel export.</p> }
             }
             <table class="br-totals">
               <tr><td>Book balance at {{ label(r.as_at) }}</td><td class="num">{{ a.book_balance | money }}</td></tr>
@@ -142,7 +146,7 @@ export interface BankReport extends ReportMeta {
           </div>
         }
         <p>Prepared by {{ s.completed_by?.name }} on {{ s.completed_at | appDateTime }}</p>
-        <p>{{ s.self_count }} of {{ s.lines_count }} lines were recorded by the preparer</p>
+        <p>{{ s.self_count }} of {{ s.lines_count }} {{ s.lines_count === 1 ? 'line was' : 'lines were' }} recorded by the preparer</p>
         <div class="signatures print-only">
           @for (who of ['Checked by', 'Approved by']; track who) { <div><b>{{ who }}</b><span>Name</span><span>Signature</span><span>Date</span></div> }
         </div>

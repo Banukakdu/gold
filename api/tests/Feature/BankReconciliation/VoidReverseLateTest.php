@@ -81,7 +81,8 @@ class VoidReverseLateTest extends BankReconciliationTestCase
         $late = collect($this->report(['statement_id' => $s1->id], $this->acc)->json('statement.late_entries'));
         $this->assertSame(['recorded', 'voided'], $late->pluck('kind')->all());
         $this->assertSame($this->acc->name, $late[1]['by']);
-        $this->assertSame(2, $this->screen(['statement_date' => '2026-11-20'])->json('late_entries_count'));
+        // Review finding 6: the S1 banner counts what it can list and tick; the voided entry is only on the reprint.
+        $this->assertSame(1, $this->screen(['statement_date' => '2026-11-20'])->json('late_entries_count'));
         $this->assertVerifies();
     }
 
@@ -134,5 +135,17 @@ class VoidReverseLateTest extends BankReconciliationTestCase
         $this->assertSame([], array_filter(collect($this->screen(['statement_date' => '2026-11-20'])->json('lines'))->pluck('entry_id')->all(),
             fn ($id) => DB::table('ledger_entries')->where('id', $id)->value('account_id') !== $this->kdyBank->id));
         $this->assertVerifies();
+    }
+
+    /** Review finding 7: an entry written in the same second as Complete is still a late entry (line id, not timestamp). */
+    public function test_late_entry_in_the_same_second_as_completion(): void
+    {
+        Carbon::setTestNow('2026-11-20 10:00:00');
+        $s1 = $this->statementOne();
+        $this->assertSame(Carbon::now()->format('Y-m-d H:i:s'), $s1->completed_at->format('Y-m-d H:i:s'));
+        $late = $this->expense($this->csh, '1000.00', '2026-10-25', '001236');
+        $this->screen(['statement_date' => '2026-11-20'])->assertJsonPath('late_entries_count', 1);
+        $this->report(['statement_id' => $s1->id], $this->acc)->assertJsonPath('statement.late_entries.0.ref_no', $late->ref_no)
+            ->assertJsonPath('statement.changed_since_completion', true);
     }
 }

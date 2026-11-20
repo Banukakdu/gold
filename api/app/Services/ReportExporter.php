@@ -339,17 +339,23 @@ class ReportExporter
                 : 'Receipt: '.implode(', ', array_map([TransferReceipts::class, 'label'], $receipt));
         }
         $periodWord = 'Period';
-        $banner = null;
+        $banner = $pdfBanner = null;
         if ($name === 'bank-reconciliation') {
             // AG-033 S3: a status as at a date. An undone statement says so on every page (review finding 5).
             $periodWord = 'As at';
+            // Review finding 2: the Older than filter (rows only; totals cover every uncleared entry), or that it was ignored.
+            if ($data['filter_note'] ?? null) {
+                $notes[] = $data['filter_note'];
+            }
             $st = $data['statement'] ?? null;
             if ($st) {
                 $title = self::STATEMENT_TITLE;
                 if ($st['undone']) {
-                    // Excel keeps the whole reason; the PDF page header has a fixed height, so it shortens a long one (the
-                    // full banner is printed again under the header on the first page).
+                    // Excel keeps the whole reason; the PDF page header has a fixed height, so it shortens the reason only
+                    // (review finding 1: "This statement is superseded." is on every page; the full banner is printed again
+                    // under the header on the first page).
                     $banner = self::undoneBanner($st);
+                    $pdfBanner = self::undoneBanner($st, self::BANNER_REASON_PDF);
                 }
             }
         }
@@ -370,7 +376,7 @@ class ReportExporter
             $data['provisional'] ? 'PROVISIONAL - period not locked' : null,
         ]));
         if ($banner !== null) {
-            $notes[] = Str::limit($banner, 230);
+            $notes[] = $pdfBanner;
         }
 
         return [
@@ -390,14 +396,27 @@ class ReportExporter
         ];
     }
 
-    /** AG-033 review finding 5: "UNDONE on <date> by <name>: <reason>. This statement is superseded." */
-    public static function undoneBanner(array $statement): string
+    /**
+     * AG-033 review finding 5: "UNDONE on <date> by <name>: <reason>. This statement is superseded." $reasonLimit
+     * shortens the reason only (PDF page header), never the closing sentence.
+     */
+    public static function undoneBanner(array $statement, ?int $reasonLimit = null): string
     {
         $u = $statement['undone'];
         $date = app(Settings::class)->formatDate(CarbonImmutable::parse($u['at'])->setTimezone('Asia/Colombo')->format('Y-m-d'));
+        $by = $u['by']['name'] ?? 'unknown';
+        $reason = $u['reason'];
+        if ($reasonLimit !== null) {
+            [$by, $reason] = [Str::limit($by, 60), Str::limit($reason, $reasonLimit)];
+        }
 
-        return "UNDONE on {$date} by ".($u['by']['name'] ?? 'unknown').": {$u['reason']}. This statement is superseded.";
+        return "UNDONE on {$date} by {$by}: {$reason}. ".self::SUPERSEDED;
     }
+
+    public const SUPERSEDED = 'This statement is superseded.';
+
+    /** Characters of the undo reason in the PDF page header (the body has the whole reason). */
+    public const BANNER_REASON_PDF = 140;
 
     /** AG-033 review finding 3: a negative statement balance reads "Overdrawn 2,500.00". */
     public static function statementBalanceText(string $balance): string
@@ -634,8 +653,8 @@ class ReportExporter
                 $rows[] = $row([$r['date'], $r['ref_no'], ReportService::typeLabel($r['type']), $r['description'], $r['reference'] ?? '',
                     Money::cmp($r['in'], 0) ? $r['in'] : null, Money::cmp($r['out'], 0) ? $r['out'] : null, $r['age_days'], $r['stale'] ? BankReconciliation::STALE_TAG : '']);
             }
-            if (! $a['rows']) {
-                $rows[] = $row(['', 'All bank entries up to '.$settings->formatDate($d['as_at']).' are reconciled.', '', '', '', null, null, null, '']);
+            if ($a['empty_text'] ?? null) {
+                $rows[] = $row(['', $a['empty_text'], '', '', '', null, null, null, '']);
             }
             foreach ($a['cleared_booked_later_rows'] as $r) {
                 $rows[] = $row([$r['date'], $r['ref_no'], ReportService::typeLabel($r['type']), $r['description'].' (cleared '.$settings->formatDate($r['cleared_date']).')',
@@ -654,8 +673,11 @@ class ReportExporter
                 $rows[] = $total('Difference', $st['difference']);
             }
             $last = $a['last_statement'];
-            $notes = [$acc['branch']['code'].' · '.$acc['name'].($acc['code'] ? " ({$acc['code']})" : '').' - '
-                .($last ? 'last reconciled to '.$settings->formatDate($last['statement_date']).' (statement balance '.self::statementBalanceText($last['statement_balance']).')' : 'never reconciled')];
+            // QA D2: the account line above the table, as in the PDF and on screen.
+            $intro = [$acc['branch']['code'].' · '.$acc['name'].($acc['code'] ? " ({$acc['code']})" : '').' — '
+                .($last ? 'last reconciled to '.$settings->formatDate($last['statement_date']).' (statement balance '.self::statementBalanceText($last['statement_balance']).')' : 'never reconciled')
+                .($acc['status'] !== 'active' ? ' ('.ucfirst($acc['status']).')' : '')];
+            $notes = [];
             if ($st) {
                 $notes[] = 'Statement balance: '.self::statementBalanceText($st['statement_balance']);
                 if ($st['changed_since_completion']) {
@@ -666,14 +688,15 @@ class ReportExporter
                         .' at '.CarbonImmutable::parse($l['at'])->setTimezone('Asia/Colombo')->format('Y-m-d H:i');
                 }
                 $notes[] = 'Prepared by '.($st['completed_by']['name'] ?? '-').' on '.CarbonImmutable::parse($st['completed_at'])->setTimezone('Asia/Colombo')->format('Y-m-d H:i');
-                $notes[] = "{$st['self_count']} of {$st['lines_count']} lines were recorded by the preparer";
+                $notes[] = "{$st['self_count']} of {$st['lines_count']} ".($st['lines_count'] === 1 ? 'line was' : 'lines were').' recorded by the preparer';
             }
             $sheets[] = [
                 'title' => $acc['branch']['code'].' '.$acc['name'],
                 'columns' => [['Date', 'date'], ['Ref', 'text'], ['Type', 'text'], ['Description / payee', 'text'], ['Reference', 'text'],
-                    ['In', 'amount'], ['Out', 'amount'], ['Age (days)', 'text'], ['Note', 'text']],
+                    ['In', 'amount'], ['Out', 'amount'], ['Age (days)', 'integer'], ['Note', 'text']],
                 'rows' => $rows,
                 'notes' => $notes,
+                'intro' => $intro,
             ];
         }
         if (! $sheets) {

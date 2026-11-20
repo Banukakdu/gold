@@ -8,6 +8,7 @@ use App\Models\User;
 use App\Support\Settings;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use PhpOffice\PhpSpreadsheet\Cell\DataType;
 
 /** Section 8 "Statement, report, review": AC 26-33; review AC 37 and 41; SHOULD 10. */
 class ReportTest extends BankReconciliationTestCase
@@ -206,5 +207,100 @@ class ReportTest extends BankReconciliationTestCase
         $this->assertArrayNotHasKey('last_reconciled_date', $list[$this->kdyCash->id]);
         Carbon::setTestNow('2026-11-20 12:00:00');
         $this->assertSame(BankStatement::COMPLETED, BankStatement::withoutGlobalScopes()->sole()->status);
+    }
+
+    /** Review finding 1: a 400-character reason is shortened in the PDF page header, never the closing sentence. */
+    public function test_ac37_long_undo_reason_keeps_the_superseded_sentence_on_every_page(): void
+    {
+        $this->statementOne();
+        $s2 = $this->statementTwo();
+        for ($i = 0; $i < 45; $i++) {
+            $this->income($this->csh, '1.00', '2026-11-1'.($i % 9));
+        }
+        $reason = 'Wrong closing balance typed '.str_repeat('because the teller copied the wrong line of the statement ', 7);
+        $reason = substr($reason, 0, 400);
+        $this->undo($s2->id, $reason)->assertOk();
+        $pages = $this->pdfPages($this->export(['statement_id' => $s2->id], 'pdf')->assertOk()->getContent());
+        $this->assertGreaterThan(1, count($pages));
+        $date = app(Settings::class)->formatDate('2026-12-01');
+        foreach ($pages as $n => $p) {
+            $flat = preg_replace('/\s+/', ' ', $p);
+            $this->assertStringContainsString("UNDONE on {$date} by {$this->acc->name}: Wrong closing balance typed", $flat, "page {$n}");
+            $this->assertStringContainsString('This statement is superseded.', $flat, "page {$n}");
+        }
+        // Excel keeps the whole reason.
+        $ws = $this->xlsx($this->export(['statement_id' => $s2->id], 'xlsx')->assertOk())->getSheet(0);
+        $this->assertStringContainsString(trim($reason).'. This statement is superseded.', implode(' ', array_map(fn ($r) => (string) $r[0], $ws->toArray(null, false, false))));
+    }
+
+    /** Review finding 2 / QA D1: Older than limits the rows only, and every output says so. */
+    public function test_ac29_older_than_is_disclosed_and_has_its_own_empty_text(): void
+    {
+        $this->statementOne();
+        // As at 2026-11-05 with older than 30: E2 (10-30) and I2 (10-31) are newer, so no rows, but uncleared totals remain.
+        $r = $this->report(['as_at' => '2026-11-05', 'older_than' => 30])->assertOk();
+        $note = 'Rows limited to entries older than 30 days; totals cover all uncleared entries.';
+        $r->assertJsonPath('filter_note', $note)->assertJsonPath('accounts.0.rows', [])->assertJsonPath('accounts.0.rows_filtered_out', 2)
+            ->assertJsonPath('accounts.0.empty_text', 'No uncleared entries older than 30 days. 2 newer uncleared entries are included in the totals.')
+            ->assertJsonPath('accounts.0.uncleared_payments', '25000.00');
+        // Without the filter: nothing is said.
+        $this->report(['as_at' => '2026-11-05'])->assertJsonPath('filter_note', null)->assertJsonPath('accounts.0.empty_text', null);
+        // All reconciled keeps its own text.
+        $this->assertSame('All bank entries up to '.app(Settings::class)->formatDate('2026-01-01').' are reconciled.',
+            $this->report(['as_at' => '2026-01-01'])->json('accounts.0.empty_text'));
+
+        $pdf = implode(' ', $this->pdfPages($this->export(['as_at' => '2026-11-05', 'older_than' => 30], 'pdf')->assertOk()->getContent()));
+        $pdf = preg_replace('/\s+/', ' ', $pdf);
+        $this->assertStringContainsString($note, $pdf);
+        $this->assertStringContainsString('No uncleared entries older than 30 days.', $pdf);
+        $cells = implode(' | ', array_map(fn ($r) => implode(' ', array_map('strval', $r)),
+            $this->xlsx($this->export(['as_at' => '2026-11-05', 'older_than' => 30], 'xlsx')->assertOk())->getSheet(0)->toArray(null, false, false)));
+        $this->assertStringContainsString($note, $cells);
+        $this->assertStringContainsString('No uncleared entries older than 30 days.', $cells);
+    }
+
+    /** Review finding 2: a statement lists every uncleared line, so Older than is ignored with statement_id, and said so. */
+    public function test_older_than_is_ignored_with_statement_id(): void
+    {
+        $s1 = $this->statementOne();
+        $r = $this->report(['statement_id' => $s1->id, 'older_than' => 3650], $this->acc)->assertOk();
+        $r->assertJsonPath('older_than', null)->assertJsonPath('older_than_ignored', true)
+            ->assertJsonPath('filter_note', 'Older than is ignored for a reconciliation statement: every uncleared entry is listed.');
+        $this->assertCount(2, $r->json('accounts.0.rows'));
+        $pdf = preg_replace('/\s+/', ' ', implode(' ', $this->pdfPages($this->export(['statement_id' => $s1->id, 'older_than' => 3650], 'pdf')->assertOk()->getContent())));
+        $this->assertStringContainsString('Older than is ignored for a reconciliation statement', $pdf);
+    }
+
+    /** QA D2: the account line above the table, Age as a number. */
+    public function test_excel_account_line_above_the_table_and_numeric_age(): void
+    {
+        $this->statementOne();
+        $ws = $this->xlsx($this->export(['as_at' => '2026-11-20'], 'xlsx')->assertOk())->getSheet(0);
+        $rows = $ws->toArray(null, false, false);
+        $head = null;
+        $account = null;
+        foreach ($rows as $i => $r) {
+            if ($r[0] === 'Date' && $r[7] === 'Age (days)') {
+                $head = $i;
+            }
+            if (is_string($r[0]) && str_starts_with($r[0], 'KDY · KDY Bank')) {
+                $account = $i;
+            }
+        }
+        $this->assertNotNull($head);
+        $this->assertNotNull($account);
+        $this->assertLessThan($head, $account);
+        $this->assertStringContainsString('— last reconciled to', $rows[$account][0]);
+        $age = $ws->getCell([8, $head + 2]);
+        $this->assertSame(DataType::TYPE_NUMERIC, $age->getDataType());
+        $this->assertIsInt($age->getValue());
+    }
+
+    /** AC 28 (second half): a branch user asking for another branch is refused. */
+    public function test_ac28_branch_user_asking_for_another_branch_is_403(): void
+    {
+        $this->report(['as_at' => '2026-11-20', 'branches' => [$this->gal->id]], $this->acc)->assertForbidden();
+        $this->as($this->acc, $this->kdy)->postJson('/api/v1/reports/bank-reconciliation/export', ['as_at' => '2026-11-20', 'branches' => [$this->gal->id], 'format' => 'pdf'])
+            ->assertForbidden();
     }
 }

@@ -39,7 +39,7 @@ function recon(over: Partial<Reconciliation> = {}): Reconciliation {
   return {
     account: { id: 5, code: 'B1', name: 'BOC Current', status: 'active', branch: { id: 2, code: 'KDY', name: 'Kandy' } },
     last_statement: { id: 3, statement_date: '2026-01-31', statement_balance: '50000.00' },
-    book_balance_at: '130000.00', reconciled_at: '50000.00',
+    book_balance_at: '130000.00', reconciled_at: '50000.00', cleared_not_listed: '0.00', lines_limited: false,
     lines: [
       line(),
       line({ entry_id: 2, transaction_id: 12, ref_no: 'KDY-EXP-2026-000102', type: 'expense', in: '0.00', out: '20000.00', description: 'Cheque 1001' }),
@@ -176,6 +176,55 @@ describe('AG-033 bank reconciliation (web)', () => {
     expect(button(bar, 'Save').getBoundingClientRect().height).toBeGreaterThanOrEqual(44);
     expect(frame.doc.documentElement.scrollWidth).toBeLessThanOrEqual(390);
     frame.remove();
+  });
+
+  it('review finding 10: a saved tick on a line not shown has its own tile, so the tiles add up', async () => {
+    const f = await screen(recon({ reconciled_at: '49500.00', cleared_not_listed: '-500.00' }));
+    const c = f.componentInstance as ReconcileComponent;
+    const tile = el.querySelector('.rc-notlisted')!;
+    expect(tile.textContent).toContain('-500.00');
+    // last 50,000.00 + receipts 0 - payments 0 + not shown -500.00 = reconciled 49,500.00
+    expect(5_000_000 + c.sums().receipts - c.sums().payments + c.notListed()).toBe(c.reconciled()!);
+  });
+
+  it('QA D4: one late entry reads "was added", one line reads "1 line"', async () => {
+    const statement = { id: 3, statement_date: '2026-01-31', statement_balance: '50000.00', lines_count: 1, self_count: 1, status: 'completed' as const,
+      completed_by: { id: 7, name: 'M. Silva', tag: null }, completed_at: '2026-02-01T10:00:00Z', undone_by: null, undone_at: null, undo_reason: null,
+      changed_since_completion: false, can_undo: true };
+    await screen(recon({ late_entries_count: 1, statements: [statement] }));
+    expect(el.querySelector('.rc-late')!.textContent).toContain('1 entry dated on or before 31 Jan 2026 was added after that statement was completed. It is listed');
+    const row = el.querySelector('.rc-hrow')!.textContent!.replace(/\s+/g, ' ');
+    expect(row).toContain('· 1 line ');
+    expect(row).toContain('1 of 1 line was recorded by the preparer');
+  });
+
+  it('QA D3: at 390px the history buttons are full width', async () => {
+    const statement = { id: 3, statement_date: '2026-01-31', statement_balance: '50000.00', lines_count: 2, self_count: 1, status: 'completed' as const,
+      completed_by: { id: 7, name: 'M. Silva', tag: null }, completed_at: '2026-02-01T10:00:00Z', undone_by: null, undone_at: null, undo_reason: null,
+      changed_since_completion: false, can_undo: true };
+    const f = await screen(recon({ statements: [statement] }));
+    const frame = await phoneFrame();
+    frame.adopt(el);
+    await settle(f);
+    const acts = el.querySelector<HTMLElement>('.rc-hact')!;
+    const width = acts.getBoundingClientRect().width;
+    const items = Array.from(acts.children) as HTMLElement[];
+    expect(items.length).toBe(2); // View, Undo (no report.export)
+    for (const b of items) expect(Math.round(b.getBoundingClientRect().width)).toBe(Math.round(width));
+    frame.remove();
+  });
+
+  it('QA D5: an account outside the branch goes back to the picker without asking for it (no 404)', async () => {
+    setup(ACCOUNTANT);
+    http = TestBed.inject(HttpTestingController);
+    const m = mount(ReconcileComponent);
+    el = m.el;
+    m.fixture.componentRef.setInput('id', '9');
+    m.fixture.detectChanges();
+    http.expectOne('/api/v1/accounts').flush([{ id: 5, name: 'BOC Current', type: 'bank', branch: { id: 2, code: 'KDY' } }]);
+    await settle(m.fixture);
+    http.expectNone(r => r.url.startsWith('/api/v1/accounts/9'));
+    expect((m.fixture.componentInstance as ReconcileComponent).accountId()).toBeNull();
   });
 
   describe('AC 2: the Reconcile action needs account.reconcile', () => {

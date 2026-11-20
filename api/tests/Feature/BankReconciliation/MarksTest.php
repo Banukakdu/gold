@@ -4,6 +4,8 @@ namespace Tests\Feature\BankReconciliation;
 
 use App\Models\AuditLog;
 use App\Models\BankReconciliationMark;
+use App\Services\BankReconciliation;
+use App\Support\Money;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 
@@ -159,5 +161,43 @@ class MarksTest extends BankReconciliationTestCase
     private static function sorted(array $v, array $order): array
     {
         return array_merge(array_flip($order), $v);
+    }
+
+    /** Review finding 8: only the one-active-mark unique index means "already reconciled"; other integrity errors are rethrown. */
+    public function test_only_the_active_mark_index_is_read_as_already_reconciled(): void
+    {
+        // A real violation of the index, raised by the database in use.
+        $this->tick([[$this->top, '2026-10-31']])->assertOk();
+        $m = BankReconciliationMark::withoutGlobalScopes()->sole();
+        try {
+            BankReconciliationMark::create(['branch_id' => $m->branch_id, 'account_id' => $m->account_id, 'ledger_entry_id' => $m->ledger_entry_id,
+                'cleared_date' => '2026-10-30', 'marked_by' => $m->marked_by, 'marked_at' => now()]);
+            $this->fail('No unique violation.');
+        } catch (QueryException $e) {
+            $this->assertTrue(BankReconciliation::isActiveMarkViolation($e));
+        }
+        // A NOT NULL / foreign-key error is not.
+        try {
+            DB::transaction(fn () => DB::table('bank_reconciliation_marks')->insert(['branch_id' => $m->branch_id, 'account_id' => $m->account_id,
+                'ledger_entry_id' => $m->ledger_entry_id, 'cleared_date' => '2026-10-30', 'marked_by' => null, 'marked_at' => now(), 'unmarked_at' => now()]));
+            $this->fail('No integrity error.');
+        } catch (QueryException $e) {
+            $this->assertFalse(BankReconciliation::isActiveMarkViolation($e));
+        }
+    }
+
+    /** Review finding 10: the tiles add up with "Show later entries" off (last + receipts - payments + not listed = reconciled). */
+    public function test_cleared_not_listed_makes_the_tiles_add_up(): void
+    {
+        $this->tick([[$this->top, '2026-10-31'], [$this->e1, '2026-10-31'], [$this->i1, '2026-10-31']])->assertOk();
+        $e3 = $this->expense($this->acc, '500.00', '2026-11-02', null, null, 'Bank charges');
+        $this->tick([[$e3, '2026-10-31']])->assertOk();
+        $hidden = $this->screen(['statement_date' => '2026-10-31'])->assertOk();
+        $hidden->assertJsonPath('cleared_not_listed', '-500.00');
+        $this->assertFalse(collect($hidden->json('lines'))->contains('transaction_id', $e3->id));
+        $listed = collect($hidden->json('lines'))->filter(fn ($l) => $l['mark'] && $l['mark']['cleared_date'] <= '2026-10-31')
+            ->sum(fn ($l) => Money::toCents($l['in']) - Money::toCents($l['out']));
+        $this->assertSame(Money::toCents($hidden->json('reconciled_at')), $listed + Money::toCents($hidden->json('cleared_not_listed')));
+        $this->screen(['statement_date' => '2026-10-31', 'show_later' => 1])->assertJsonPath('cleared_not_listed', '0.00')->assertJsonPath('lines_limited', false);
     }
 }
