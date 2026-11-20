@@ -7,6 +7,7 @@ use App\Models\Role;
 use App\Models\Transaction;
 use App\Models\User;
 use App\Notifications\AccessChangedNotification;
+use App\Support\BusinessDate;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Route;
 
@@ -111,7 +112,7 @@ class AccessAuditTest extends UsersAndRolesTestCase
 
     public function test_ac42_authors_stay_visible_and_totals_unchanged_after_leaving(): void
     {
-        $today = now()->toDateString();
+        $today = BusinessDate::today();
         $x = $this->userIn($this->kdy, 'Accountant');
         $y = $this->userIn($this->kdy, 'Cashier');
         $viewer = $this->userIn($this->kdy, 'Viewer');
@@ -156,7 +157,7 @@ class AccessAuditTest extends UsersAndRolesTestCase
         $this->userIn($this->kdy, 'Branch Admin');
         $token = $this->flushHeaders()->postJson('/api/v1/auth/login', ['email' => 'x@example.com', 'password' => 'secret123'])->json('token');
         $pending = Transaction::withoutGlobalScopes()->create([
-            'branch_id' => $this->kdy->id, 'type' => 'expense', 'txn_date' => now()->toDateString(), 'amount' => '50.00',
+            'branch_id' => $this->kdy->id, 'type' => 'expense', 'txn_date' => BusinessDate::today(), 'amount' => '50.00',
             'account_id' => $this->cashOf($this->kdy)->id, 'category_id' => $this->category('expense')->id, 'status' => 'pending', 'created_by' => $x->id,
         ]);
 
@@ -170,7 +171,7 @@ class AccessAuditTest extends UsersAndRolesTestCase
 
     public function test_ac47_self_cancellation_is_flagged(): void
     {
-        $today = now()->toDateString();
+        $today = BusinessDate::today();
         $x = $this->userIn($this->kdy, 'Accountant');
         $y = $this->userIn($this->kdy, 'Accountant');
         $gle = $this->makeBranch('GLE');

@@ -6,6 +6,7 @@ use App\Models\AuditLog;
 use App\Models\Role;
 use App\Models\User;
 use App\Notifications\InvitationNotification;
+use App\Support\BusinessDate;
 use Illuminate\Support\Facades\Notification;
 
 /** Spec users-and-roles: users, memberships, invitation (AC 1-19, 33, 34, 41). */
@@ -201,7 +202,7 @@ class UserManagementTest extends UsersAndRolesTestCase
     public function test_ac14_super_admin_removes_user_from_branch(): void
     {
         $u = $this->addTo($this->userIn($this->kdy, 'Accountant'), $this->main, 'Viewer');
-        $today = now()->toDateString();
+        $today = BusinessDate::today();
         $this->admin()->postJson('/api/v1/capital', ['account_id' => $this->mainAcc->id, 'amount' => '1000', 'txn_date' => $today])->assertCreated();
         $txn = $this->as($u, $this->kdy)->postJson('/api/v1/incomes', [
             'account_id' => $this->cashOf($this->kdy)->id, 'category_id' => $this->category('income')->id, 'txn_date' => $today, 'amount' => '500',

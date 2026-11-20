@@ -6,14 +6,27 @@ use App\Models\Account;
 use App\Models\AuditLog;
 use App\Models\LedgerEntry;
 use App\Models\PeriodLock;
+use App\Support\BusinessDate;
+use Carbon\CarbonImmutable;
 
 class LedgerFlowTest extends AccountingTestCase
 {
+    /**
+     * The clock is fixed at midday in Colombo: the business date (Asia/Colombo) and the UTC date that some defaults
+     * still use (the dashboard's month) are then the same day, whenever the suite runs. Before, the test failed between
+     * 18:30 and 24:00 UTC, when Colombo is already on the next day.
+     */
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->travelTo(CarbonImmutable::parse('2026-11-20 12:00:00', 'Asia/Colombo'));
+    }
+
     public function test_capital_opening_allocation_transfer_income_expense_and_reversal(): void
     {
         $kdy = $this->makeBranch('KDY');
         $gle = $this->makeBranch('GLE');
-        $today = now()->toDateString();
+        $today = BusinessDate::today();
 
         // Capital into Main, then opening balance to Kandy
         $this->asAdmin()->postJson('/api/v1/capital', ['account_id' => $this->mainAcc->id, 'amount' => '1000000', 'txn_date' => $today])->assertCreated();
@@ -85,11 +98,11 @@ class LedgerFlowTest extends AccountingTestCase
         $gle = $this->makeBranch('GLE');
         $this->asAdmin()->postJson('/api/v1/transfers', [
             'from_account_id' => $this->cashOf($kdy)->id, 'to_account_id' => $this->cashOf($gle)->id,
-            'amount' => '10', 'txn_date' => now()->toDateString(), 'note' => 'x',
+            'amount' => '10', 'txn_date' => BusinessDate::today(), 'note' => 'x',
         ])->assertStatus(422)->assertJsonFragment(['message' => 'Insufficient balance in KDY Cash (available 0.00).']);
 
-        PeriodLock::create(['branch_id' => null, 'period' => now()->format('Y-m'), 'locked_by' => $this->admin->id]);
-        $this->asAdmin()->postJson('/api/v1/capital', ['account_id' => $this->mainAcc->id, 'amount' => '5', 'txn_date' => now()->toDateString()])
+        PeriodLock::create(['branch_id' => null, 'period' => BusinessDate::currentPeriod(), 'locked_by' => $this->admin->id]);
+        $this->asAdmin()->postJson('/api/v1/capital', ['account_id' => $this->mainAcc->id, 'amount' => '5', 'txn_date' => BusinessDate::today()])
             ->assertStatus(422);
     }
 }
