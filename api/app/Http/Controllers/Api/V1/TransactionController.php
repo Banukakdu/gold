@@ -30,6 +30,7 @@ class TransactionController extends Controller
             'created_by' => 'nullable|integer', 'min' => 'nullable|numeric', 'max' => 'nullable|numeric',
             'q' => 'nullable|string|max:100', 'per_page' => 'nullable|integer|max:200',
             'branches' => 'nullable|array', 'branches.*' => 'integer|exists:branches,id', 'category_only' => 'nullable|boolean',
+            'files' => 'nullable|in:with,none,removed',
         ]);
         // Reports spec E1: branches[] narrows All mode; in branch mode it may only name the active branch.
         $ctx = app(BranchContext::class);
@@ -61,7 +62,18 @@ class TransactionController extends Controller
             ->when($f['max'] ?? null, fn ($q, $v) => $q->where('amount', '<=', $v))
             ->when($f['q'] ?? null, fn ($q, $v) => $q->where(fn ($w) => $w->where('ref_no', 'like', "%$v%")->orWhere('description', 'like', "%$v%")->orWhere('payee_payer', 'like', "%$v%")->orWhere('reference', 'like', "%$v%")));
 
-        $page = $q->withCount('entries')->paginate($f['per_page'] ?? 25);
+        // AG-062 finding 6: find entries without evidence, or with removed files. Only income/expense carry files.
+        if ($files = $f['files'] ?? null) {
+            $active = fn ($a) => $a->whereNull('removed_at');
+            $q->whereIn('type', AttachmentController::ENTRY_TYPES);
+            match ($files) {
+                'with' => $q->whereHas('attachments', $active),
+                'none' => $q->whereDoesntHave('attachments', $active),
+                'removed' => $q->whereHas('attachments', fn ($a) => $a->whereNotNull('removed_at')),
+            };
+        }
+
+        $page = $q->withCount(self::attachmentCounts())->withCount('entries')->paginate($f['per_page'] ?? 25);
         $this->tagAuthors($page->getCollection());
         $this->markLegacyVoids($page->getCollection());
 
@@ -72,10 +84,20 @@ class TransactionController extends Controller
     {
         $transaction->load(['entries', 'branch', 'category.parent', 'account', 'fromAccount.branch', 'toAccount.branch', 'creator:id,name,status,is_super_admin']);
         $transaction->setAttribute('entries_count', $transaction->entries->count());
+        $transaction->loadCount(self::attachmentCounts());
         $this->tagAuthors(collect([$transaction]));
         $this->markLegacyVoids(collect([$transaction]));
 
         return $transaction;
+    }
+
+    /** AG-062: active attachments (R9) and removed ones (finding 6). */
+    private static function attachmentCounts(): array
+    {
+        return [
+            'attachments as attachments_count' => fn ($q) => $q->whereNull('removed_at'),
+            'attachments as attachments_removed_count' => fn ($q) => $q->whereNotNull('removed_at'),
+        ];
     }
 
     /** Options for the "Created by" filter: everyone who created an entry here, former members included (finding 3). */

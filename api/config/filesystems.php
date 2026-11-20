@@ -47,6 +47,17 @@ return [
             'report' => false,
         ],
 
+        // AG-062 evidence files: private, never served or linked. Files are only streamed by the attachments
+        // download endpoint after an access check (docs/specs/attachments.md section 5). No `url`, no `serve`.
+        'attachments' => [
+            'driver' => 'local',
+            'root' => storage_path('app/attachments'),
+            'visibility' => 'private',
+            'serve' => false,
+            'throw' => true,
+            'report' => false,
+        ],
+
         's3' => [
             'driver' => 's3',
             'key' => env('AWS_ACCESS_KEY_ID'),

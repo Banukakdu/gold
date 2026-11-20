@@ -34,6 +34,12 @@ In production, run `php artisan queue:work` under a process manager (e.g. Superv
 
 Tests: `cd api && php artisan test` (runs on in-memory SQLite).
 
+Uploading attachments locally: PHP's default `upload_max_filesize = 2M` refuses most 5 MB files. `php -d
+upload_max_filesize=6M artisan serve` does **not** work: `artisan serve` starts a child PHP process that does not
+inherit `-d` options. Set the limits in the `php.ini` that `php --ini` shows, or put a file such as
+`uploads.ini` (`upload_max_filesize = 6M` and `post_max_size = 8M`) in a folder and start the server with
+`PHP_INI_SCAN_DIR=:/path/to/folder php artisan serve` (the leading `:` keeps the default scan dir).
+
 ### Deploying the controls release (void with contra entries, audit log, period locks)
 
 The migration `2026_11_20_000000_accounting_controls` adds database triggers that refuse UPDATE/DELETE on
@@ -52,6 +58,32 @@ The migration `2026_11_20_000000_accounting_controls` adds database triggers tha
    legacy void list: where a report for that month was printed and signed before the void, re-print it and mark the
    old copy superseded. No ledger correction is made.
 5. Rolling back is possible only while no lock has been unlocked (unlock history has two rows per branch and month).
+
+### Deploying the attachments release (AG-062 receipts and invoices)
+
+The migration `2026_11_21_000000_create_attachments_table` adds the `attachments` table with triggers that refuse
+DELETE and any UPDATE other than the one-time removal (same MySQL trigger privilege as above). Files are stored on the
+private `attachments` disk (`api/storage/app/attachments`, never under `public/`, no `storage:link`) and are only
+streamed by the API after an access check.
+
+1. **PHP upload limits.** Each file may be 5 MB. Set `upload_max_filesize = 6M` and `post_max_size = 8M` (or more) in
+   the PHP-FPM `php.ini`; PHP's default 2M refuses most phone photos and scanned PDFs. Allow a request body of at least
+   8 MB in the web server too (nginx `client_max_body_size 8m;`, Apache `LimitRequestBody 8388608`).
+2. **Storage.** `storage/app/attachments` must exist and be writable by the PHP user (files are written read-only,
+   `0440`). Do not serve it from the web server.
+3. **Backups.** Back up `storage/app/attachments` **together with** the database, in the same backup run, so a
+   restore never pairs attachment rows with older files. Rows and files are never deleted by the app; keep them at
+   least as long as the statutory record period (confirm with the tax adviser; normally at least 5 years).
+4. `php artisan migrate --force`, then **`php artisan attachments:verify`**. It checks that every attachment row
+   (removed ones included) has its file on disk with the stored sha256, lists missing or changed files by entry ref
+   and attachment id, and exits 1 on any problem. Run it after every deploy and after every backup restore, next to
+   `php artisan ledger:verify`.
+5. **Database user hardening.** The triggers stop DELETE and UPDATE, but `TRUNCATE TABLE` skips triggers (on
+   `attachments`, `ledger_entries` and `audit_logs` alike). MySQL needs the DROP privilege for TRUNCATE, so the app's
+   runtime DB user must not hold DROP (nor ALTER/TRIGGER): grant it `SELECT, INSERT, UPDATE, DELETE` on the schema and
+   run migrations with a separate admin user.
+6. Rolling back the migration is refused once any attachment exists (rows and files are evidence); restore a backup
+   taken before the migration instead.
 
 ## How it works
 
@@ -88,6 +120,8 @@ All under `/api/v1`, bearer token from `POST auth/login`, plus `X-Branch-Id`.
 `GET accounts/{id}/statement?from&to` · `GET accounts/destinations` · `GET|POST categories` · `PUT categories/{id}` ·
 `GET transactions` · `GET|PUT transactions/{id}` · `POST transactions/{id}/void` · `POST transactions/{id}/reverse` ·
 `POST incomes` · `POST expenses` · `POST capital` · `POST allocations` · `POST transfers` ·
+`GET|POST transactions/{id}/attachments` · `GET transactions/{id}/attachments/{attachment}/download` ·
+`POST transactions/{id}/attachments/{attachment}/remove` ·
 `GET permissions` · `GET|POST roles` · `PUT roles/{id}` · `GET|POST users` · `PUT users/{id}` · `POST users/{id}/role`
 
 ## Status against the backlog (docs/Account-gold_Product_Backlog.xlsx)
@@ -99,5 +133,7 @@ AG-040/041/043 opening balance, top-up, capital, AG-042 fund return, AG-050/053/
 AG-060/061/063/065 income, expense, void, list and filters, AG-070/072 categories (API; tree editor UI next),
 AG-080/081 dashboards, AG-090 audit log (writing; viewer UI next), AG-092 settings table, AG-091 period lock (enforced; UI next).
 
-Next up: users and roles screens, category editor, attachments (AG-062), reports AG-082 to AG-085 with PDF/Excel export,
+AG-062 attachments on income and expense entries (private files, soft removal, `attachments:verify`).
+
+Next up: users and roles screens, category editor, reports AG-082 to AG-085 with PDF/Excel export,
 password reset (AG-002), audit log viewer, then the R2 approval workflow.

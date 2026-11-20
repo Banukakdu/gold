@@ -73,6 +73,7 @@ export class AllocationFormComponent implements OnInit {
   capital() { this.post('/api/v1/capital', this.c); }
 
   private post(url: string, body: object) {
+    if (this.busy()) return; // double-submit guard (QA Q1): a second click can fire before the button disables
     this.busy.set(true);
     this.error.set('');
     this.http.post<{ ref_no: string }>(url, body).subscribe({

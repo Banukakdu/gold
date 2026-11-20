@@ -67,7 +67,8 @@ class PeriodLockController extends Controller
     }
 
     /**
-     * Finding 7: count of self-voids / self-reversals of entries dated in the month, for the lock confirm.
+     * Finding 7: count of self-voids / self-reversals of entries dated in the month, for the lock confirm, and
+     * (AG-062 finding 5) files removed from those entries, by the uploader or by someone else.
      * Information only; it never blocks the lock.
      */
     public function review(Request $request)
@@ -82,29 +83,34 @@ class PeriodLockController extends Controller
         $after = $branches->mapWithKeys(fn ($b) => [$b->id => PeriodLock::throughFor($through, $b->id)]); // '' = nothing closed yet
         $open = $after->filter(fn ($t) => $t < $period);
 
-        $rows = AuditLog::whereIn('event', ['transaction.voided', 'transaction.reversed'])
+        $rows = AuditLog::whereIn('event', ['transaction.voided', 'transaction.reversed', 'attachment.removed'])
             ->where('auditable_type', Transaction::class)
             ->whereIn('branch_id', $open->keys())
-            ->get(['id', 'event', 'branch_id', 'auditable_id', 'new_values'])
-            ->filter(fn ($r) => ($r->new_values['self'] ?? false) === true);
+            ->get(['id', 'event', 'branch_id', 'auditable_id', 'new_values']);
 
-        // Voids are dated on the original entry; reversals on the reversal entry.
-        $dated = fn ($r) => $r->event === 'transaction.voided' ? $r->auditable_id : ($r->new_values['reversal_id'] ?? 0);
+        // Voids and file removals are dated on the original entry; reversals on the reversal entry.
+        $dated = fn ($r) => $r->event === 'transaction.reversed' ? ($r->new_values['reversal_id'] ?? 0) : $r->auditable_id;
         $dates = Transaction::withoutGlobalScopes()->whereIn('id', $rows->map($dated))->pluck('txn_date', 'id');
         $newlyClosed = function ($r) use ($dates, $dated, $open, $period) {
             $month = isset($dates[$dated($r)]) ? $dates[$dated($r)]->format('Y-m') : null;
 
             return $month !== null && $month <= $period && $month > $open[$r->branch_id];
         };
+        $rows = $rows->filter($newlyClosed);
+        $self = fn ($r) => ($r->new_values['self'] ?? false) === true;
         $first = $open->isEmpty() ? $period : $open->min();
+        $files = $rows->where('event', 'attachment.removed');
 
         return [
             'period' => $period,
             'branch_id' => $d['branch_id'] ?? null,
             // First month this lock newly closes; null = every earlier month (no earlier lock).
             'closes_from' => $open->isEmpty() ? $period : ($first === '' ? null : CarbonImmutable::createFromFormat('!Y-m', $first)->addMonth()->format('Y-m')),
-            'self_voids' => $rows->where('event', 'transaction.voided')->filter($newlyClosed)->count(),
-            'self_reversals' => $rows->where('event', 'transaction.reversed')->filter($newlyClosed)->count(),
+            'self_voids' => $rows->where('event', 'transaction.voided')->filter($self)->count(),
+            'self_reversals' => $rows->where('event', 'transaction.reversed')->filter($self)->count(),
+            // AG-062 finding 5: evidence removed from entries in the months being closed (information only).
+            'files_removed' => $files->count(),
+            'files_removed_self' => $files->filter($self)->count(),
         ];
     }
 

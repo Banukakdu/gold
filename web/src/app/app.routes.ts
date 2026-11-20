@@ -15,6 +15,8 @@ export const routes: Routes = [
       { path: 'transactions', canActivate: [permissionGuard('transaction.view')],
         loadComponent: () => import('./features/transactions/transaction-list.component').then(m => m.TransactionListComponent) },
       { path: 'transactions/new/:kind', loadComponent: () => import('./features/transactions/entry-form.component').then(m => m.EntryFormComponent) },
+      { path: 'transactions/:id', canActivate: [permissionGuard('transaction.view')],
+        loadComponent: () => import('./features/transactions/transaction-detail.component').then(m => m.TransactionDetailComponent) },
       { path: 'transfers/new', canActivate: [permissionGuard('transfer.create')],
         loadComponent: () => import('./features/transfers/transfer-form.component').then(m => m.TransferFormComponent) },
       { path: 'allocations/new', canActivate: [superAdminGuard],

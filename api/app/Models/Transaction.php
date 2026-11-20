@@ -65,6 +65,12 @@ class Transaction extends Model
         return $this->belongsTo(Account::class, 'to_account_id')->withoutGlobalScopes();
     }
 
+    /** AG-062 evidence files (income and expense only). */
+    public function attachments(): HasMany
+    {
+        return $this->hasMany(Attachment::class);
+    }
+
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
