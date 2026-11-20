@@ -10,7 +10,9 @@ Built on `feature/background-exports`. Fixed decisions:
 - **Notification = the Exports page and an email.** There is a new Exports page (`/exports`), and the requester gets an email when the export is ready or has failed. The email links to the page, never to the file. The AG-094 hook is an `ExportFinished` event. AG-094 adds an in-app listener; nothing else changes.
 - **Only the requester can download**, and only while signed in. Access is checked again at download. The file expires **24 h after it is ready**.
 - Files are written to a new private disk, `exports`. It is set up like `attachments` (private, `serve => false`), is not part of the backup set, and only `exports:prune` deletes files from it.
-- Rows in `exports` are never deleted. Only the files are removed when they expire.
+- Rows in `exports` are never deleted. Only the files are removed when they expire. Database triggers refuse a DELETE and any change to the columns that tie a file to its request (R15).
+- **Snapshot (accounting review findings 1, 2, 12).** Every Excel export, synchronous or queued, reads its data inside one read-only consistent snapshot. The file says "everything recorded before time T" ("Data extracted"), never "as at", which in accounting means the reporting cut-off date.
+- **Completeness (finding 5).** A queued file is only marked ready after the rows written and the printed totals have been checked against the snapshot.
 
 Which exports are affected:
 | Export | Async? | Why |
@@ -42,9 +44,9 @@ The permissions required for each export are the ones its endpoint uses today: r
 1. Transactions, no filters (40,000 rows), then **Excel**.
 2. The API counts 40,000 rows, which is over 5,000 and at most 100,000. It stores an `exports` row (status `queued`), writes the `export.requested` audit row, dispatches `RunExport` on the `exports` queue, and returns 202.
 3. A blue notice under the button: "This export has 40,000 rows, so it is being prepared in the background. We will email you when it is ready. View exports".
-4. The worker builds the file (R3, R4) and the row becomes `ready`. The `export.ready` audit row is written and the email is sent.
+4. The worker builds the file (R3, R4, R5), checks it is complete (R5), and the row becomes `ready`. The `export.ready` audit row (a system event, R11) is written and the email is sent.
 5. The user opens Exports, sees Ready with "Expires in 23 h", and clicks **Download**.
-6. The file downloads and the `export.downloaded` audit row is written.
+6. The file downloads and the `export.downloaded` audit row is written, with the IP and user agent of the download request.
 
 **F2 Branch user (KDY Accountant).** Same as F1. Branch scope is KDY because the request had `X-Branch-Id: KDY`. The job runs with KDY scope even if the user has switched to GAL in the meantime (R2).
 
@@ -52,7 +54,7 @@ The permissions required for each export are the ones its endpoint uses today: r
 
 **F4 Failure.** The job fails (R9). The row becomes `failed` with a plain reason, and `export.failed` is written. The user gets a "could not be prepared" email, and the page shows the reason and **Run again**.
 
-**F5 Expiry.** 24 h after ready, Download is replaced by "Expired" and **Run again**. The hourly `exports:prune` deletes the file and writes `export.expired`.
+**F5 Expiry.** 24 h after ready, Download is replaced by "Expired" and **Run again**. The hourly `exports:prune` deletes the file and writes `export.expired` (no user; `requested_by` names the requester).
 
 **F6 Run again.** This opens the original screen (report or Transactions) with the stored filters in the URL. The user presses Excel again, which is a new request. There is no new endpoint.
 
@@ -64,7 +66,7 @@ The permissions required for each export are the ones its endpoint uses today: r
 - While waiting: "Preparing..." (unchanged).
 
 ### S2 Exports `/exports` (new; guard: signed in. Nav link "Exports" under Reports, shown if Super Admin or `auth.can('report.export')`)
-Title "Exports". Line under it: "Exports over 5,000 rows are prepared in the background. Files can be downloaded for 24 hours after they are ready."
+Title "Exports". Line under it: "Exports over 5,000 rows are prepared in the background. Files can be downloaded for 24 hours after they are ready." A second line (finding 10): "Save the file if you need to keep it. A file run again later may differ if entries in an unlocked period were voided or changed."
 
 Table (the user's own exports from the last 30 days, newest first, 25 per page; the same for a Super Admin):
 | Column | Content |
@@ -76,7 +78,7 @@ Table (the user's own exports from the last 30 days, newest first, 25 per page; 
 | Period | from to to, or "All dates" for transactions without dates |
 | Rows | `12,345` (the final count when ready, otherwise the estimate) |
 | Status | badge: Queued (grey), Preparing (blue), Ready (green), Failed (red), Expired (grey) |
-| Data as at | `HH:mm` of the snapshot when ready (R3), else blank |
+| Data extracted | `YYYY-MM-DD HH:mm` (Asia/Colombo) of the snapshot when ready (R3), else blank. The words "as at" are not used. |
 | Expires | Ready: "in 23 h" / "in 40 min"; else blank |
 | Size | `3.4 MB` when ready |
 | Actions | Ready: **Download**. Failed / Expired: **Run again** (F6). Failed: the reason below the badge. |
@@ -88,9 +90,9 @@ Table (the user's own exports from the last 30 days, newest first, 25 per page; 
 - **Error:** the API message in `.alert`.
 
 ### Email (queued notifications, like `InvitationNotification`)
-- **Ready.** Subject "Your export is ready". Body: "<Title> (Excel), <branches>, <period>, <rows> rows. Download it from Exports before <expires_at YYYY-MM-DD HH:mm> (Asia/Colombo)." Button "Open Exports" -> `APP_URL/exports?id=<ulid>`.
+- **Ready.** Subject "Your export is ready". Body: "<Title> (Excel), <branches>, <period>, <rows> rows. Download it from Exports before <expires_at YYYY-MM-DD HH:mm> (Asia/Colombo)." Then "Save the file if you need to keep it. A file run again later may differ if entries in an unlocked period were voided or changed." (finding 10). Button "Open Exports" -> `APP_URL/exports?id=<ulid>`.
 - **Failed.** Subject "Your export could not be prepared". Body: the same lines, the reason, and "Narrow the filters and run it again."
-- Neither email contains figures or the file.
+- Neither email contains figures or the file, and neither uses "as at" for the extraction time.
 - Sent when `config('exports.email')` is true (the default).
 
 ## 5. API (all under `auth:sanctum` + `branch`)
@@ -107,11 +109,12 @@ Table (the user's own exports from the last 30 days, newest first, 25 per page; 
 Export resource: `id` (ULID), `kind` (`report|transactions`), `name`, `title`, `format`, `branches_label`, `period_label`, `rows`, `status` (`queued|running|ready|failed|expired`), `error`, `requested_at`, `data_as_at`, `ready_at`, `expires_at`, `size_bytes`, `download_count`, `rerun_url` (web path + query). No file path, user id or params internals.
 
 Download responses:
-- 200: the file, `Content-Disposition: attachment; filename="<name>_<from>_<to>.xlsx"` (transactions: as today).
-- 404: unknown id or someone else's export. This includes a Super Admin trying to download another user's export.
+- 200: the file, `Content-Disposition: attachment; filename="<name>_<from>_<to>.xlsx"` (transactions: as today), with `Cache-Control: no-store, private` and `X-Content-Type-Options: nosniff` (finding 4).
+- 404: unknown id or someone else's export. This includes a Super Admin trying to download another user's export. Not audited.
 - 409: "This export is not ready yet."
-- 410: "This export expired on <date time>. Run it again." or "This export failed and has no file."
-- 403: "You no longer have access to this export."
+- 410: "This export expired on <date time>. Run it again." or "This export failed and has no file." or "This export file is missing. Run it again." (a `ready` row whose file is gone: the row becomes `failed`, `export.failed` with code `missing`).
+- 403: "You no longer have access to this export." (writes `export.download_denied` with the reason, finding 8).
+- 500: "This export file is damaged. Run it again." (sha256 mismatch: the row becomes `failed`, `export.failed` with code `damaged`).
 
 Request errors added to both export endpoints:
 - 429 "You already have 2 exports being prepared. Wait for one to finish."
@@ -124,7 +127,8 @@ Request errors added to both export endpoints:
 - `file_path`, `size_bytes`, `sha256`
 - `requested_at`, `started_at`, `data_as_at`, `ready_at`, `expires_at`, `downloaded_at`, `download_count`, `attempts`
 - `ip`, `user_agent`
-- Index on `(user_id, status)` and on `(status, expires_at)`.
+- Index on `(user_id, status)` and on `(status, expires_at)`. Each foreign key (`user_id`, `branch_id`) also has an index of its own (MySQL).
+- Triggers (finding 11, MySQL and SQLite): `BEFORE DELETE` always aborts; `BEFORE UPDATE` aborts a change to `id`, `user_id`, `branch_id`, `kind`, `name`, `format`, `params`, `branch_ids` or `requested_at`, and a change to `sha256` once it is set. `down()` drops both triggers.
 
 **Queue:** a new connection `exports` (database driver, table `jobs`, queue `exports`, `retry_after` 900, `after_commit` true). The default connection's `retry_after` is 90 s, shorter than an export can take, so it would start a second copy of a running job.
 
@@ -145,13 +149,20 @@ Request errors added to both export endpoints:
     - in branch mode, the user is still a member of that branch (`belongsToBranch`);
     - the user still holds the export's permissions in that branch team.
   - If any check fails, the job fails without a retry: `failure_code = access_revoked`, error "Your access changed after this export was requested."
-- **R3 Snapshot.**
-  - All reads for one file run inside a single read-only database transaction with a consistent snapshot (MySQL `REPEATABLE READ`, `START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY`; SQLite: one read transaction). This covers the count, the report data and the settings used in the header.
+- **R3 Snapshot (accounting review findings 1, 2).**
+  - All reads for one file run inside a single read-only database transaction with a consistent snapshot. This covers the count, the report data, and the settings and period-lock reads used in the header and the PROVISIONAL line.
+  - MySQL: `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`, then `START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY`. The isolation level is set explicitly for that transaction and never taken from the server default (under `READ COMMITTED` the consistent-snapshot clause has no effect).
+  - SQLite: one deferred read transaction. Its snapshot starts at the first read, not at `BEGIN`, so the first statement inside the transaction is the count.
+  - When the connection is already inside a transaction (for example a test wrapped in one), no snapshot can be opened; the reads run in that transaction as they are.
+  - No locking read (`lockForUpdate`, `sharedLock`, `PeriodLock::lockedQuery(..., share: true)`) runs inside an export: InnoDB answers a locking read from the latest committed data, not from the snapshot.
+  - Chunked reads (R5) run on the same connection inside the same transaction, ordered by a unique key (the list order, ending with `transactions.id`), so no row is read twice or skipped between chunks.
   - Totals, row lists and header therefore come from one moment. A posting or void that commits during the build is not in the file.
-  - `data_as_at` is the time the snapshot opened, normally seconds after `requested_at`.
-  - The header adds a line after "Printed by": "Data as at <YYYY-MM-DD HH:mm> (Asia/Colombo); requested <HH:mm>". If the period is not locked, the existing "PROVISIONAL - period not locked" line also applies.
-  - A strict "as at the request time" is not possible, because void and reversal change `transactions.status` in place (Q2).
+  - `data_as_at` is taken immediately **before** the snapshot statement runs, so that "recorded before this time" is always true. The "Printed by ... at" time stays the build time, as in the sync file.
+  - The header adds a line after "Printed by": "Data extracted <YYYY-MM-DD HH:mm:ss> (Asia/Colombo). Includes every entry, void and reversal recorded before this time. Requested <YYYY-MM-DD HH:mm>." Both times carry the date, because a queued export can run after midnight; seconds let the reader match the file against the audit log. When the range is not fully locked, the existing "PROVISIONAL - period not locked" line stays and nothing else is added; when it is fully locked, nothing else is added either.
+  - The term "as at" is not used for this time anywhere (header, S2, email). The API field keeps the name `data_as_at`.
+  - A strict "as at the request time" is not possible, because void and reversal change `transactions.status` in place, and a void's contra is dated on the original date (Q2). A void committed between the request and the job start is therefore in the file.
   - Updates to the `exports` row happen outside the snapshot transaction.
+  - The synchronous Excel and PDF exports read inside the same snapshot (finding 12). Their header is otherwise unchanged (no "Data extracted" line), and `report.exported` is written after the snapshot closes.
 - **R4 Row count at run time.** The job recounts inside the snapshot.
   - Count > `max_rows`: fail, no retry, `over_limit`, "The export now has N rows; the limit is 100,000. Narrow the filters."
   - Count now <= 5,000: the export still completes in the background.
@@ -159,18 +170,26 @@ Request errors added to both export endpoints:
 - **R5 Building.**
   - Same builders as the sync path: `ReportExporter` (sheets + header), `TransactionExporter` (rows + header). The file content is identical apart from the R3 line. Typed cells, no formulas.
   - The "Printed by" name is the requester's.
-  - The file is written to a temp name on the `exports` disk (`<user_id>/<ulid>.xlsx.part`) and renamed to `.xlsx` only after it succeeds.
+  - The file is written to a temp name on the `exports` disk (`<user_id>/<ulid>.xlsx.part`) with mode `0600` and renamed to `.xlsx` (also `0600`) only after it succeeds and passes the completeness check. The disk root is outside `public/` and has no `storage:link` (finding 4).
+  - **Completeness check (finding 5)**, before the rename:
+    - the number of data rows written equals the count taken inside the snapshot (for reports: the export's detail rows, `ReportExporter::countRows`), and every sheet holds all the rows built for it;
+    - each total printed in the file equals the sum of the rows written for it: I&E type totals = sum of the category lines; cash book receipts and payments per account = sum of its lines; Transfers & Allocations net moved = sum of the movements; Branch Comparison totals = sum of the branch rows; trial balance totals = sum of the account rows. For the Transactions list the header prints only a count ("Rows: N"), which must equal the data rows written; it prints no money totals.
+    - On any difference the job fails without a retry (`failure_code = incomplete`, "The export could not be prepared. Try again later.") and the `.part` file is deleted. A generator that ends early must never produce a ready file that understates the totals.
   - Next, `size_bytes` and `sha256` are recorded, then status `ready`, `expires_at = ready_at + 24 h`, the audit row and the `ExportFinished` event.
   - The job raises `memory_limit` to 1024M like `raisePdfLimits` (it never lowers it). Excel rows should be generated in chunks (FromGenerator / chunked query) rather than one array of 100,000 rows. How is up to the developer, as long as AC 9 passes.
 - **R6 Download.**
   - Only the requester can download (`user_id = auth id`); otherwise 404.
   - Status must be `ready` and `now < expires_at`. It is checked at the request, not only by prune.
   - Access is re-checked as in R2, against the export's stored branch context, not the current `X-Branch-Id`. A user who lost `report.export` or the branch gets 403.
-  - The file's `sha256` must match. On a mismatch: 500 "This export file is damaged. Run it again.", the row is set to `failed`, and `report()` is called.
+  - A user who lost access gets 403 and an `export.download_denied` audit row with the reason (`inactive`, `not_super_admin`, `not_member`, `missing_permission`) (finding 8). A 404 for someone else's id is not audited.
+  - The file's `sha256` must match. On a mismatch: 500 "This export file is damaged. Run it again.", the row is set to `failed` (`failure_code = damaged`), `export.failed` is written with `old_values.sha256` (stored) and `new_values.actual_sha256`, and `report()` is called (finding 3).
+  - A `ready` row whose file is missing: 410 "This export file is missing. Run it again.", the row is set to `failed` (`missing`) and `export.failed` is written (finding 3). The Laravel log is not the audit trail.
+  - The response sends `Cache-Control: no-store, private` and `X-Content-Type-Options: nosniff` (finding 4).
   - Repeat downloads within 24 h are allowed, and each one writes an audit row.
   - There is no signed public URL. A signed link that works without sign-in would let a forwarded email download financial data. The UI fetches with the user's token.
 - **R7 Concurrency.** At most `per_user_active` (2) exports in `queued` or `running` per user; a third request gets 429, and no row is created.
-  - An identical request (same user, kind, name, format, params and branch context) while one is queued or running returns 202 with the existing export. It creates no new row or audit row.
+  - An identical request (same user, kind, name, format, params and branch context) while one is **queued** returns 202 with the existing export. It creates no new row or audit row.
+  - If the identical export is already **running**, its snapshot opened before the new request, so a new export is created (still subject to the 2-active limit) (finding 9).
   - Across users, the single `exports` worker runs exports one at a time.
 - **R8 Size limit.** If the finished file is bigger than `max_bytes` (50 MB), the file is deleted and the job fails without a retry: `too_large`, "The file is larger than 50 MB. Narrow the filters."
 - **R9 Failures and retries.** `RunExport`: `$tries = 2`, `$backoff = 60`, `$timeout = 600`, `$failOnTimeout = true`.
@@ -187,8 +206,10 @@ Request errors added to both export endpoints:
   - Prune is the only code that deletes from the `exports` disk.
 - **R11 Audit rows.** All go in the audit screen's existing **Reports** group, with labels "Export requested / ready / failed / downloaded / expired".
   - `branch_id` follows the existing `report.exported` rule: the single branch when exactly one branch is in scope, else null.
-  - `user_id` is the requester, with the request's IP and user agent passed as `$client` (as `SendPasswordResetLink` does), except `export.expired`, which has `user_id` null.
-  - `new_values` holds `export_id`, `name`, `format`, `params`, `rows`, plus `size_bytes` and `sha256` (ready), `failure_code` and `attempts` (failed), and `download_count` (downloaded).
+  - `user_id` is the requester, with the request's IP and user agent passed as `$client` (as `SendPasswordResetLink` does), except `export.expired`, which has `user_id` null. `export.downloaded` and `export.download_denied` carry the IP and user agent of the **download** request (finding 3).
+  - `new_values` holds `export_id`, `name`, `format`, `params`, `rows`, plus `branch_ids` (requested), `size_bytes`, `sha256` and `data_as_at` (ready), `failure_code` and `attempts` (failed), `download_count`, `sha256` and `data_as_at` (downloaded), `reason` (download_denied) and `requested_by` (expired).
+  - System events (finding 7): `export.ready`, `export.failed` (from the job or prune) and `export.expired` carry `new_values.by_system = true`. Ready and failed keep `user_id` = requester so the user filter finds them; the audit screen shows "System" in the User column when `by_system` is true. A failure found at download (`damaged`, `missing`) is not a system event.
+  - Labels: "Export requested / ready / failed / downloaded / expired / download refused".
   - Async exports do not write `report.exported`. Sync exports still do, unchanged.
 - **R12 AG-094 hook.** `ExportFinished($export)` is dispatched on ready and on failed. The email is sent by a listener for it. AG-094 adds a second listener (database notification); there is no other coupling.
 - **R13 Branch and user edge cases.**
@@ -196,6 +217,8 @@ Request errors added to both export endpoints:
   - A user who is deactivated while their export is queued: the job fails with `access_revoked`, and no email is sent to an inactive user.
   - A Super Admin who is demoted: All-mode exports fail at run time and at download.
   - Changing the export's settings (company name, date format) after `ready` does not change the file.
+- **R14 Private files (finding 4).** The `exports` disk is excluded from the backup set. The Super Admin cannot download someone else's export: oversight is through the audit log, not the file.
+- **R15 Evidence rows (finding 11).** See the triggers under "Table `exports`". The `exports` row and its `sha256` are what tie a file to a request.
 
 ## 7. Acceptance criteria
 Fixture: Super Admin SA, and a KDY Accountant AK (also a GAL Viewer). Config `exports.sync_rows = 5`, `max_rows = 20`, `per_user_active = 2`. KDY has 8 posted incomes in October 2026 in 8 different sub-categories (so I&E has 8 lines) and 25 transactions in total. A fake clock is used where times matter. The `exports` queue is processed with `Queue::fake` or a sync worker, as the AC says.
@@ -208,8 +231,8 @@ Fixture: Super Admin SA, and a KDY Accountant AK (also a GAL Viewer). Config `ex
 5. Given an invalid range (cash book over 31 days), Then 422 as today, and no `exports` row.
 
 **Job and snapshot**
-6. Given AC 2's export is processed, Then status `ready`, `data_as_at`/`ready_at` set, `expires_at = ready_at + 24 h`, and the file exists on the `exports` disk. Its sheet rows and totals equal the synchronous export of the same filters (run with `sync_rows` raised), apart from the "Data as at" header line. `export.ready` is written with `user_id` AK and the request's IP.
-7. Given a test hook that posts a new KDY income after the job's snapshot opens and before it reads rows, Then the file contains neither the new row nor its amount in any total, and the header row count equals the data rows.
+6. Given AC 2's export is processed, Then status `ready`, `data_as_at`/`ready_at` set, `expires_at = ready_at + 24 h`, and the file exists on the `exports` disk. Its sheet rows and totals equal the synchronous export of the same filters (run with `sync_rows` raised), apart from the "Data extracted" header line. The header contains "Data extracted <date time:ss>" equal to `data_as_at` and "Requested <date time>" equal to `requested_at`. `export.ready` is written with `user_id` AK and the request's IP.
+7. Given a test hook that posts a new KDY income after the job's snapshot opens and before it reads rows, Then the file contains neither the new row nor its amount in any total, and the header row count equals the data rows. Given a void of an October KDY income committed after the request and before the job starts, Then the file excludes that income from the totals and the extraction time is after the void's audit time.
 8. Given AK's export is queued, and AK switches to GAL before it runs, Then the file contains KDY rows only and the header reads "Branches: KDY ...".
 9. Given `max_rows = 100000` and 100,000 KDY transactions (performance test, MySQL), When the job runs with `memory_limit` 1024M, Then it finishes within 600 s and the file has 100,000 data rows.
 10. Given AK's KDY role loses `report.export` (or AK is removed from KDY, or deactivated) after the request, When the job runs, Then `failed` with code `access_revoked`, no file, a single attempt (no retry), and `export.failed` is written.
@@ -219,15 +242,15 @@ Fixture: Super Admin SA, and a KDY Accountant AK (also a GAL Viewer). Config `ex
 14. Given a job for an export already `ready`, When it runs again, Then nothing changes and no second audit row is written.
 
 **Download**
-15. Given AC 6's export, When AK calls download, Then 200 with `filename="transactions_2026-10-01_2026-10-31.xlsx"`, bytes whose sha256 matches, `download_count` 1, and `export.downloaded` written. A second download gives 200, `download_count` 2, and a second audit row.
+15. Given AC 6's export, When AK calls download, Then 200 with `filename="transactions_2026-10-01_2026-10-31.xlsx"`, bytes whose sha256 matches, the response has `Cache-Control: no-store`, `download_count` 1, and `export.downloaded` written. A second download gives 200, `download_count` 2, and a second audit row.
 16. Given SA (or another KDY user) calls download for AK's export, Then 404. `GET /exports` as SA does not list it.
 17. Given the export is `queued`, Then download returns 409 "This export is not ready yet.".
 18. Given the clock is 24 h and 1 min after `ready_at` and prune has not run, Then download returns 410 "This export expired on ...". After `exports:prune`, the status is `expired`, the file is gone, `file_path` is null, the row still exists, and `export.expired` is written with `user_id` null.
 19. Given AK loses `report.export` in KDY after the export is ready, When downloading (with any `X-Branch-Id`), Then 403 "You no longer have access to this export.". Given SA made an All-mode export and is no longer Super Admin, Then 403.
-20. Given the file on disk was altered, Then download returns 500 "This export file is damaged. Run it again." and the row is `failed`.
+20. Given the file on disk was altered, Then download returns 500 "This export file is damaged. Run it again.", the row is `failed`, and one `export.failed` row with code `damaged` exists.
 
 **Concurrency and prune**
-21. Given AK has 2 exports `queued`, When requesting a third (different filters), Then 429 "You already have 2 exports being prepared. Wait for one to finish." and no row is created. When repeating one of the queued requests exactly, Then 202 with that export's id and no new row or audit.
+21. Given AK has 2 exports `queued`, When requesting a third (different filters), Then 429 "You already have 2 exports being prepared. Wait for one to finish." and no row is created. When repeating one of the queued requests exactly, Then 202 with that export's id and no new row or audit. Given the identical export is `running`, Then a new row is created.
 22. Given an export `queued` 121 minutes ago, When prune runs, Then `failed` with `stale` and `export.failed` written. Given a file without a ready row older than 25 h, Then it is deleted. Given one 1 h old, Then it is kept.
 23. `php artisan schedule:list` shows `exports:prune` hourly.
 
@@ -242,13 +265,22 @@ Fixture: Super Admin SA, and a KDY Accountant AK (also a GAL Viewer). Config `ex
 29. Given a Viewer (no `report.export`), Then there is no "Exports" nav link. Given a Cashier who opens `/exports`, Then "No background exports in the last 30 days.".
 30. Given the audit log screen filtered to the Reports group, Then rows "Export requested / ready / downloaded / expired / failed" appear for AC 2–22. A KDY user with `audit.view` sees KDY rows only.
 
-## 8. Open questions (assumption in bold, so work is not blocked)
-- **Q1 Who gets async exports.** The backlog says Super Admin. **Assumed: every user who can export**, because the 5,000 cap blocks branch users too and a per-persona rule would add complexity without protecting anything (scope and permissions are unchanged).
-- **Q2 "As at request time".** A strict as-at-request report would need every report to filter by creation time and by status history, because void changes `status` in place. **Assumed: a consistent snapshot at job start (normally seconds after the request), with both times printed in the header.** In locked periods the two are identical. Accountant to confirm.
+**Accounting review additions**
+31. (Finding 3) Given the file of a ready export is deleted from disk, When AK downloads, Then 410 "This export file is missing. Run it again." and `export.failed` with code `missing`. `export.downloaded` records the IP and user agent of the download request, not those of the export request.
+32. (Finding 5) Given a test hook that makes the generator skip one chunk, Then `failed` with `incomplete`, no file and no `.part` file.
+33. (Finding 4) The stored file and the `.part` file have mode `0600`.
+34. (Finding 7) `export.ready`, `export.failed` (job and prune) and `export.expired` have `new_values.by_system = true`, and the audit screen shows "System" as their user. `export.expired` has `requested_by`; `export.downloaded` has `sha256` and `data_as_at`; `export.requested` has `branch_ids`.
+35. (Finding 8) Given AK lost `report.export` after the export is ready, When downloading, Then 403 and one `export.download_denied` row with the reason. A 404 for another user's export writes nothing.
+36. (Finding 11) Deleting an `exports` row, or changing its `params`, `user_id` or a set `sha256`, is refused by the database; setting `status`, `file_path` and the times is allowed.
+37. (Finding 12) A synchronous Excel export runs inside the read-only snapshot (no write is possible inside it), and `report.exported` is still written.
+
+## 8. Open questions (decided in the accounting review)
+- **Q1 Who gets async exports.** The backlog says Super Admin. **Decided: every user who can export** (accounting review: agreed). Async exports give no new data and no new right, and exporting moves no money, so there is no segregation-of-duties conflict.
+- **Q2 "As at request time".** A strict as-at-request report would need every report to filter by creation time and by status history, because void changes `status` in place. **Decided: a consistent snapshot at job start, labelled "Data extracted" with the request time also printed (R3), never "as at".** In locked periods the two are identical while no unlock happens in between (an unlock is Super Admin only and audited).
 - **Q3 Audit log export.** **Assumed out of scope** (it is not a report and has its own query in `AuditLogController`). It can reuse the same `exports` mechanism later as a small follow-up.
 - **Q4 PDF over 1,000 rows.** **Assumed still refused**, with the user directed to Excel. Raising the PDF cap needs a different renderer, which is not part of this item.
 - **Q5 Email always on.** **Assumed: one global switch (`exports.email`)**, no per-user preference. Per-user notification preferences belong to AG-094.
-- **Q6 Limits.** **Assumed: 100,000 rows, 50 MB, 2 active per user, 24 h after ready, list shows 30 days.** These are config values and can be changed without code.
+- **Q6 Limits.** **Decided: 100,000 rows, 50 MB, 2 active per user, 24 h after ready, list shows 30 days** (accounting review: agreed; PDF stays at 1,000). These are config values and can be changed without code; changing them is an operational decision. The recount at run time fails on over-limit and never truncates.
 
 ## Accounting review
 Reviewed against `feature/background-exports` as it stands: `LedgerService::void` (status set to `void` in place, contra entries dated on the **original** date, only while that month is open), `ReportService::provisional`, the "Printed by" header in `ReportExporter`/`TransactionExporter`, `report.exported` audit rows, `PermissionSeeder::TEMPLATES` and the attachments review (finding 2, integrity). No ledger, balance or double-entry effect: the job only reads, through the same builders, so the totals reconcile exactly as the synchronous export does (R5, AC 6). The private disk, re-checking access at download, requester-only download, no signed public link, no file or figures in the email, and rows that are never deleted are all right. Findings below.
