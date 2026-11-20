@@ -1,6 +1,6 @@
 import { Component, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { Router } from '@angular/router';
+import { ActivatedRoute, Router } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
 import { errorText } from '../../core/api.interceptor';
 
@@ -12,6 +12,7 @@ import { errorText } from '../../core/api.interceptor';
       <form class="card" (ngSubmit)="submit()">
         <div class="brand big">Account<span>gold</span></div>
         <p class="muted">Multi-branch accounting</p>
+        @if (passwordSet) { <div class="ok">Your password is set. Sign in to continue.</div> }
         <label>Email <input type="email" name="email" [(ngModel)]="email" required autocomplete="username" /></label>
         <label>Password <input type="password" name="password" [(ngModel)]="password" required autocomplete="current-password" /></label>
         @if (error()) { <div class="alert">{{ error() }}</div> }
@@ -23,6 +24,7 @@ import { errorText } from '../../core/api.interceptor';
 export class LoginComponent {
   private auth = inject(AuthService);
   private router = inject(Router);
+  passwordSet = inject(ActivatedRoute).snapshot.queryParamMap.has('password_set');
   email = '';
   password = '';
   busy = signal(false);

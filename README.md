@@ -21,6 +21,7 @@ composer install
 cp .env.example .env && php artisan key:generate
 php artisan migrate --seed                # Main branch, Main Account, permissions, role templates, categories, Super Admin
 php artisan serve                         # http://localhost:8000
+php artisan queue:work                    # sends invitation emails and access alerts (or set QUEUE_CONNECTION=sync)
 
 cd ../web
 npm install
@@ -28,6 +29,8 @@ npx ng serve                              # http://localhost:4200 (proxies /api 
 ```
 
 Sign in with `admin@accountgold.local` / `ChangeMe123` (set `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `api/.env` before seeding).
+
+In production, run `php artisan queue:work` under a process manager (e.g. Supervisor); without it invitation emails are never sent.
 
 Tests: `cd api && php artisan test` (runs on in-memory SQLite).
 

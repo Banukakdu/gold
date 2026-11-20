@@ -47,6 +47,8 @@ export interface Transaction {
   account?: { name: string };
   from_account?: { name: string };
   to_account?: { name: string };
+  creator?: { id: number; name: string };
+  creator_tag?: string | null;
 }
 
 export interface Page<T> {
@@ -54,4 +56,46 @@ export interface Page<T> {
   current_page: number;
   last_page: number;
   total: number;
+}
+
+export interface Membership {
+  branch_id: number;
+  branch_code: string;
+  branch_name: string;
+  role_id: number | null;
+  role_name: string | null;
+  role_status: 'active' | 'inactive' | null;
+}
+
+export interface UserRow {
+  id: number;
+  name: string;
+  email: string;
+  phone?: string | null;
+  status: 'active' | 'inactive';
+  is_super_admin: boolean;
+  last_login_at: string | null;
+  memberships: Membership[];
+  roles_in_branch?: string[];
+  /** Detail only: why the actor cannot change profile/status/invitation (B5, B6, B2), or null. */
+  profile_locked_reason?: string | null;
+}
+
+export interface RoleRow {
+  id: number;
+  name: string;
+  branch_id: number | null;
+  is_template: boolean;
+  status: 'active' | 'inactive';
+  users_count: number;
+  permissions: string[];
+}
+
+/** Module order of the permission catalogue (prefix before the dot). */
+export const PERMISSION_MODULES = ['branch', 'user', 'role', 'account', 'transfer', 'transaction', 'income', 'expense', 'category', 'report', 'audit'];
+
+/** Field errors of a Laravel 422 response, keyed by field. */
+export function fieldErrors(err: unknown): Record<string, string> {
+  const errors = (err as { error?: { errors?: Record<string, string[]> } })?.error?.errors ?? {};
+  return Object.fromEntries(Object.entries(errors).map(([k, v]) => [k, v.join(' ')]));
 }

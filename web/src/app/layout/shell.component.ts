@@ -19,16 +19,19 @@ import { AuthService } from '../core/auth.service';
           @if (auth.isSuperAdmin()) { <a routerLink="/allocations/new" routerLinkActive="on">Fund a branch</a> }
           @if (auth.can('account.view')) { <a routerLink="/accounts" routerLinkActive="on">Accounts</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/branches" routerLinkActive="on">Branches</a> }
+          @if (auth.can('user.view')) { <a routerLink="/users" routerLinkActive="on">Users</a> }
+          @if (auth.can('role.view')) { <a routerLink="/roles" routerLinkActive="on">Roles</a> }
         </nav>
       </aside>
       <div class="main">
         <header class="top">
           <label class="switcher">
             <span>Branch</span>
-            <select [value]="auth.activeBranchId()" (change)="switch($any($event.target).value)">
-              @if (auth.isSuperAdmin()) { <option value="all">All branches</option> }
+            <!-- [selected] per option: the options render after /me loads, so [value] on the select alone is lost on reload -->
+            <select (change)="switch($any($event.target).value)">
+              @if (auth.isSuperAdmin()) { <option value="all" [selected]="auth.activeBranchId() === 'all'">All branches</option> }
               @for (b of auth.me()?.branches; track b.id) {
-                <option [value]="b.id">{{ b.code }} · {{ b.name }}</option>
+                <option [value]="b.id" [selected]="auth.activeBranchId() === '' + b.id">{{ b.code }} · {{ b.name }}</option>
               }
             </select>
           </label>
@@ -55,6 +58,9 @@ export class ShellComponent {
     // Entry forms and statements need a single branch; send the user back to the dashboard.
     if (this.router.url.includes('/new/') || this.router.url.includes('/statement')) {
       this.router.navigateByUrl('/dashboard');
+    } else if (/^\/(users|roles)\/./.test(this.router.url)) {
+      // User/role pages belong to one branch; go back to the list for the new branch.
+      this.router.navigateByUrl(this.router.url.startsWith('/users') ? '/users' : '/roles');
     }
   }
 }

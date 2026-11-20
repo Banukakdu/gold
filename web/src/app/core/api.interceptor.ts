@@ -14,8 +14,9 @@ export const apiInterceptor: HttpInterceptorFn = (req, next) => {
   let headers = req.headers.set('Accept', 'application/json');
   const token = auth.token();
   if (token) headers = headers.set('Authorization', `Bearer ${token}`);
+  // A request may target another branch explicitly (Super Admin managing memberships); keep its header.
   const branch = auth.activeBranchId();
-  if (branch) headers = headers.set('X-Branch-Id', branch);
+  if (branch && !req.headers.has('X-Branch-Id')) headers = headers.set('X-Branch-Id', branch);
 
   return next(req.clone({ url: environment.apiUrl + req.url, headers })).pipe(
     catchError((err: HttpErrorResponse) => {
