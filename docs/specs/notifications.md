@@ -58,14 +58,15 @@ Only `status = 'active'` users are ever notified. The user who caused the event 
 
 | Method, path | Request | Response / errors |
 |---|---|---|
-| `GET /v1/notifications` | `filter=unread\|all` (default all), `page`, `per_page` (10 or 20; default 20) | `{data:[row], meta:{current_page,last_page,per_page,total}, unread_count, fetched_at}`. Row: `id` (uuid), `kind`, `title`, `body`, `branch:{id,code}\|null`, `url` (app path, e.g. `/transactions/41`), `created_at`, `read_at`. Only the caller's rows, newest first |
+| `GET /v1/notifications` | `filter=unread\|all` (default all), `page`, `per_page` (10 or 20; default 20) | `{data:[row], meta:{current_page,last_page,per_page,total}, unread_count, fetched_at, fetched_id}`. `fetched_id` (uuid, optional for clients) is a high-water mark taken at the list query, ordered like row ids (see Storage), to send back as `before_id`. Row: `id` (uuid), `kind`, `title`, `body`, `branch:{id,code}\|null`, `url` (app path, e.g. `/transactions/41`), `created_at`, `read_at`. Only the caller's rows, newest first |
 | `GET /v1/notifications/unread-count` | — | `{unread_count}`. The poll endpoint (R9) |
 | `POST /v1/notifications/{id}/read` | — | 200 `{id, read_at}`. Idempotent: an already-read row keeps its first `read_at`. Another user's id or unknown id -> 404 |
-| `POST /v1/notifications/read-all` | `before` (ISO time, optional; the `fetched_at` the client showed) | 200 `{marked: n}`. Marks the caller's unread rows with `created_at <= before` (or all when absent) |
+| `GET /v1/notifications/{id}` | — | 200 one row (same shape and R5 redaction as the list). Used by the email link (S3). Another user's id, unknown id or non-uuid -> 404 "Notification not found." (Super Admin included) |
+| `POST /v1/notifications/read-all` | `before` (ISO time, optional; the `fetched_at` the client showed), `before_id` (uuid, optional; the `fetched_id` of the same list) | 200 `{marked: n}`. Marks the caller's unread rows with `created_at <= before` and `id <= before_id` (each condition only when sent; all unread when neither). `before_id` keeps a row written after the list in the same second unread. Invalid `before` or `before_id` -> 422 |
 | `GET /v1/notifications/preferences` | — | `{approval_request_email: bool, can_approve: bool}`. `can_approve` = Super Admin or holds `transfer.approve` through a MAIN role |
 | `PUT /v1/notifications/preferences` | `approval_request_email` (required, boolean) | 200 same shape. 422 "Approval request email must be true or false." Audit R10 |
 
-No DELETE route. `fetched_at` is the server time of the list query.
+No DELETE route. `fetched_at` is the server time of the list query. Row ids are ordered UUIDs (`Str::orderedUuid()`, time first), so `id <= fetched_id` means "written no later than the list query"; clients that send only `before` keep the second-level behaviour.
 
 **Storage: Laravel's built-in database notifications** (`php artisan make:notifications-table`: `id` uuid, `type`, `notifiable_type/id`, `data` text, `read_at`, timestamps). No package, no custom table. One database-only class `App\Notifications\InAppNotification` (not queued, R3) whose `databaseType()` returns the kind, so `type` holds e.g. `transfer.approval_requested`; `data` = `{title, body, branch_id, branch_code, url, transaction_id?, export_id?}`. New column `users.approval_request_email` boolean default true (same migration).
 
@@ -164,3 +165,23 @@ Verdict: **approved with changes.** The changes below have been written into the
 8. **Fine: other recipients.** Receipt requests go only to `transfer.acknowledge` holders in the receiving branch, never the creator (matches transfer-receipt R5) and never Viewers; decisions only to the requester; exports only to the requester; backup failures only to Super Admins, with no error text. User-typed text (reject comments, dispute notes) is never copied (R1). Inactive users get no rows and no endpoint access (R2, AC 1, 18).
 9. **Fine: audit of the preference change (R10)** with old/new values, only on a real change.
 
+## Accountant sign-off (build, 2026-11-20)
+Checked `git diff feature/transfer-approvals...feature/notifications` at 50e16d2 (code, tests, QA and review reports). `php artisan test`: 733 passed, 1 skipped; `pint --test` passed; `npx ng build` passed.
+
+| Finding | Status | Evidence |
+|---|---|---|
+| 1 MUST dispute reaches someone independent | DONE | `SendInAppNotifications::handleReceiptChanged` adds every active Super Admin to disputed and settled rows, all transfer types, actor excluded. `test_ac30a_a_dispute_reaches_a_super_admin_when_the_sender_is_the_only_reverser`, AC 8-10 tests |
+| 2 MUST no amounts or names after access is removed | DONE | `InAppNotifications::present` redacts at read time (title without amount or names, `body = null`, stored row unchanged) in the list and in `GET /notifications/{id}`. Also redacts `transfer.approval_requested` rows once the user is no longer an approver (they are tagged MAIN but describe another branch's transfer): this closes the gap the reviewer found and goes beyond what I asked. `test_ac30b_...`, `test_review1_approval_requests_are_redacted_once_the_user_is_no_longer_an_approver`, `test_r5_redaction_helper_never_changes_super_admin_rows` |
+| 3 MUST approval email content | DONE | `TransferApprovalRequestedMail::toMail`: ref, branch codes and account names, amount, requester, requested-for date, expiry, link. No balance, "available", bank account number or note. `test_ac30c_...` (text and HTML bodies) |
+| 4 SHOULD re-check at send time | DONE | `TransferApprovalRequestedMail::shouldSend`: recipient fresh, active, still an approver, email preference still on, and the request still pending. `test_ac30c_...`, `test_review2_queued_approval_email_is_dropped_when_decided_or_switched_off` |
+| 5 MUST narrow, documented prune | PARTLY (open condition) | Narrow: `NotificationsPrune` deletes from `notifications` only, by `created_at` only, in chunks, no cascade, logs the count; its docblock records the exception and says it is no precedent. `test_ac22_...`, `test_ac30d_...`. CLAUDE.md is intentionally not edited in this branch: the project owner has been asked to allow the 90-day delete |
+| 6 no posting (AC 30d) | DONE | The only `LedgerService` change passes the actor id into the two after-commit events; no balance, line or status change. `test_ac30d_no_notification_flow_touches_the_ledger` (ledger state, every `current_balance`, `ledger:verify`) |
+| 7-9 segregation, recipients, preference audit | DONE (as reviewed) | Requester/actor never notified as approver (`test_review7_...`, AC 1); receipt requests only to receiving-branch `transfer.acknowledge` holders; free text never copied (AC 4); preference change audited with old/new only on change, reads not audited (AC 20, 21, `test_r10_...`) |
+
+**Mark all as read (`before_id`).** Fine from a control view: it only narrows which rows get `read_at`, changes nothing else and writes no audit row (R10). Section 5 now documents `fetched_id` and `before_id`, and the `GET /notifications/{id}` route the reviewer accepted.
+
+**Figures and role templates.** No figure, report or role template changes in this item. Amounts in notifications and the email use `Money::format` from the stored transaction (e.g. "150,000.00").
+
+**Verdict: SIGNED OFF, with one open condition.** Nothing in the code must change. Before the pull request is merged, the project owner must decide on the 90-day delete (Q1, finding 5):
+- If they agree, add to CLAUDE.md under "Nothing is hard-deleted", in this pull request: "Exception: `notifications` rows are pruned after 90 days, AG-094."
+- If they do not agree, remove the `notifications:prune` schedule (or the command) and change R11 to "kept", before merge. No other change is needed: notifications are not accounting records either way.
