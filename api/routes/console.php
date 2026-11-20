@@ -38,3 +38,8 @@ Schedule::command('expenses:expire-approvals')->description('Expire expense appr
 // only; see App\Console\Commands\NotificationsPrune).
 Schedule::command('notifications:prune')->description('Delete in-app notifications older than 90 days')
     ->dailyAt('02:30')->timezone($tz)->withoutOverlapping(60)->onOneServer();
+
+// AG-088 R4 scheduled email reports: queue due runs (on the exports queue), record missed ones, fail stale ones. Posts
+// nothing. Run files are removed by exports:prune (R12).
+Schedule::command('reports:dispatch-scheduled')->description('Queue scheduled email reports')
+    ->everyMinute()->withoutOverlapping(10)->onOneServer();

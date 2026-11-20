@@ -440,3 +440,39 @@ tr.rc-frozen td, .rc-line.rc-frozen { color: var(--muted); }
   .tpl-dup .tpl-save-anyway { align-self: stretch; width: 100%; min-height: 44px; }
   .tpl-dialog { gap: 8px; }
 }
+
+/* AG-088 scheduled email reports (S1-S3): badges, table vs cards, the form's sticky Save at phone width. */
+.tag[data-s='sr-green'] { background: #dff1e6; color: var(--pos); }
+.tag[data-s='sr-amber'] { background: #fdf0d5; color: #8a5a00; }
+.tag[data-s='sr-red'] { background: #f4e1df; color: var(--neg); }
+.tag[data-s='sr-grey'] { background: #f1f0ed; color: var(--muted); }
+.sr-tabs { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.sr-name { overflow-wrap: anywhere; min-width: 0; }
+.sr-sub { font-size: 12px; }
+.sr-actions { white-space: nowrap; a { margin: 0 4px; } }
+.sr-cards { display: none; }
+.sr-more { position: relative; summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center; justify-content: center;
+  min-width: 44px; min-height: 44px; border: 1px solid var(--line); border-radius: 6px; font-weight: 700; } }
+.sr-menu { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; button { min-height: 44px; width: 100%; } }
+.sr-form { display: flex; flex-direction: column; gap: 10px; max-width: 760px; overflow-x: visible;
+  label { display: flex; flex-direction: column; gap: 4px; } }
+.sr-set { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 0; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.sr-form label.sr-check { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; input { width: auto; } }
+.sr-email { overflow-wrap: anywhere; }
+.sr-hint { margin: 2px 0 0; font-size: 12px; }
+.sr-multi { margin: 0 0 4px; }
+.sr-next { margin: 0; }
+.sr-save { display: flex; justify-content: flex-end; gap: 8px; }
+.sr-reason, .sr-recips { overflow-wrap: anywhere; }
+.sr-run-card { margin-bottom: 8px; }
+@media (max-width: 760px) {
+  .sr-toolbar { flex-direction: column; align-items: stretch; input, button { width: 100%; min-height: 44px; } }
+  .sr-tabs button { flex: 1; min-height: 44px; }
+  .sr-table { display: none; }
+  .sr-cards { display: block; }
+  .sr-card .ea-line { justify-content: space-between; }
+  .sr-form input, .sr-form select, .sr-form textarea { width: 100%; min-height: 44px; }
+  .sr-form label.sr-check { min-height: 44px; input { min-height: 0; width: 20px; height: 20px; } }
+  .sr-save { position: sticky; bottom: 0; background: var(--card); padding: 8px 0; border-top: 1px solid var(--line); button { flex: 1; min-height: 44px; } }
+  .sr-form a { display: inline-flex; align-items: center; min-height: 44px; }
+}

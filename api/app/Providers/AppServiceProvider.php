@@ -2,11 +2,13 @@
 
 namespace App\Providers;
 
+use App\Notifications\ScheduledReportMail;
 use App\Services\Backups\BackupException;
 use App\Services\Backups\DatabaseDumper;
 use App\Services\Backups\MySqlDumper;
 use App\Services\Backups\SqliteDumper;
 use App\Services\ReportService;
+use App\Services\ScheduledReportRuns;
 use App\Support\BranchContext;
 use App\Support\Minutes;
 use App\Support\ReadSnapshot;
@@ -14,6 +16,7 @@ use App\Support\Settings;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Events\MigrationsEnded;
 use Illuminate\Http\Request;
+use Illuminate\Notifications\Events\NotificationSent;
 use Illuminate\Queue\Events\JobTimedOut;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
@@ -52,6 +55,13 @@ class AppServiceProvider extends ServiceProvider
         // AG-087 (reviewer M1): a timed-out export ends its read snapshot before anything else runs on the connection.
         // RunExport::failed() does this too; this also covers a worker that does not fail jobs on timeout.
         Event::listen(JobTimedOut::class, fn () => ReadSnapshot::abandon());
+
+        // AG-088 R9: a scheduled report delivery is `sent` once the mailer has accepted the email.
+        Event::listen(NotificationSent::class, function (NotificationSent $e) {
+            if ($e->notification instanceof ScheduledReportMail) {
+                app(ScheduledReportRuns::class)->markSent($e->notification->deliveryId);
+            }
+        });
 
         // Password reset spec R10: the one password policy. Every endpoint (and the console command) that accepts a
         // new password uses ['required', 'string', Password::defaults(), 'confirmed'] and keeps no rule of its own.

@@ -83,6 +83,17 @@ export function readQuery(route: ActivatedRoute, allBranches: boolean): { q: Par
   return { q, branches: allBranches ? q.getAll('branches').map(Number).filter(n => n > 0) : [] };
 }
 
+/**
+ * AG-088 W1: reportBranchGuard drops `branch` when the user may switch to it; when it is still there the user has no
+ * access, and the screen shows this message and sends no report request. '' = no problem.
+ */
+export function branchDenied(route: ActivatedRoute, auth: AuthService): string {
+  const branch = route.snapshot.queryParamMap.get('branch');
+  if (branch === null) return '';
+  const code = branch === 'all' ? 'All branches' : auth.me()?.branches.find(b => String(b.id) === branch)?.code;
+  return `You do not have access to ${code ?? 'this branch'}.`;
+}
+
 /** Laravel 422 field errors as { field: 'message' } (array fields folded onto their base name). */
 export function fieldErrors(err: unknown): Record<string, string> {
   const body = (err as HttpErrorResponse)?.error;

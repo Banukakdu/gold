@@ -45,3 +45,21 @@ export const entryBranchGuard: CanActivateFn = route => {
   if (!auth.isAllBranches()) return true;
   return inject(Router).parseUrl(route.queryParamMap.get('template') ? '/expense-templates' : '/transactions');
 };
+
+/**
+ * AG-088 W1: a report link may carry `?branch=<id|all>` (the scheduled report email). A Super Admin, or a member when
+ * the value is a branch id, is switched to it and the parameter is dropped. Otherwise the parameter stays, and the
+ * report screen says "You do not have access to ..." and loads nothing (branchDenied in report-common).
+ */
+export const reportBranchGuard: CanActivateFn = route => {
+  const auth = inject(AuthService);
+  const router = inject(Router);
+  const branch = route.queryParamMap.get('branch');
+  if (branch === null) return true;
+  const member = !!auth.me()?.branches.some(b => String(b.id) === branch);
+  const allowed = branch === 'all' ? auth.isSuperAdmin() : member;
+  if (!allowed) return true;
+  if (auth.activeBranchId() !== branch) auth.switchBranch(branch);
+  const { branch: _drop, ...rest } = route.queryParams;
+  return router.createUrlTree(['/', ...route.pathFromRoot.flatMap(r => r.url.map(u => u.path))], { queryParams: rest });
+};

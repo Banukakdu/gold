@@ -11,6 +11,11 @@
     header .title { font-size: 12px; font-weight: bold; margin: 2px 0 4px; }
     header .line { margin: 1px 0; }
     header .provisional { color: #b3362c; font-weight: bold; font-size: 11px; margin-top: 3px; }
+    /* AG-088 R6: a scheduled report also prints the "Data extracted" line, so its header is taller. */
+    @if (! empty($head['extracted']))
+    @page { margin-top: 190px; }
+    header { top: -172px; height: 162px; }
+    @endif
     /* AG-092 R3: the logo at the top left of every page, max 48 px high, aspect kept. */
     header table.hd { width: auto; border-collapse: collapse; }
     header table.hd td { border: 0; padding: 0 10px 0 0; vertical-align: top; }
@@ -47,6 +52,7 @@
     <div class="line">{{ $head['period_word'] ?? 'Period' }}: {{ $head['period'] }}</div>
     <div class="line">{{ $head['currency'] ?? 'Amounts in LKR' }} &middot; {{ $head['basis'] ?? \App\Services\ReportService::BASIS }}</div>
     <div class="line">{{ $head['printed'] }}</div>
+    @if (! empty($head['extracted']))<div class="line">{{ $head['extracted'] }}</div>@endif
     @foreach ($head['notes'] ?? [] as $note)<div class="line"><b>{{ $note }}</b></div>@endforeach
     @if ($head['provisional'])<div class="provisional">PROVISIONAL - period not locked</div>@endif
     </td></tr></table>

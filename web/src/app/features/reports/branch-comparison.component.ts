@@ -7,7 +7,7 @@ import { MoneyPipe } from '../../core/money.pipe';
 import {
   BranchPickerComponent, ExportButtonsComponent, FiscalPresetsComponent, ReportBranch, ReportHeadComponent, ReportMeta, ReportParams, SignaturesComponent,
   fieldErrors, isoDate, periodRange, toHttpParams,
-  readQuery, reportError, writeQuery,
+  branchDenied, readQuery, reportError, writeQuery,
 } from './report-common';
 
 type Figures = Record<'opening' | 'capital' | 'funds_received' | 'income' | 'expenses' | 'transfers_in' | 'transfers_out' | 'closing', string>;
@@ -90,12 +90,16 @@ export class BranchComparisonComponent implements OnInit {
   errLine() { return Object.values(this.errs()).join(' '); }
 
   ngOnInit() {
+    // AG-088 W1: a link for a branch this user cannot open loads nothing.
+    const denied = branchDenied(this.route, this.auth);
+    if (denied) { this.msg.set(denied); return; }
     const { q, branches } = readQuery(this.route, this.auth.isAllBranches());
     const period = q.get('period');
     const from = q.get('from');
     const to = q.get('to');
-    if (period && ['month', 'quarter', 'year', 'custom'].includes(period) && from && to) {
-      this.ptype = period as typeof this.ptype;
+    // AG-088 W1: a link with from/to and no period (the scheduled report email) opens that range as Custom.
+    if (from && to && (!period || ['month', 'quarter', 'year', 'custom'].includes(period))) {
+      this.ptype = (period ?? 'custom') as typeof this.ptype;
       const m = Number(from.slice(5, 7));
       this.p = { month: from.slice(0, 7), quarter: Math.floor((m - 1) / 3) + 1, year: Number(from.slice(0, 4)), from, to };
     }

@@ -1,5 +1,7 @@
-import { Component, OnInit, inject } from '@angular/core';
-import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+import { Component, OnInit, computed, inject } from '@angular/core';
+import { toSignal } from '@angular/core/rxjs-interop';
+import { filter, map } from 'rxjs';
+import { NavigationEnd, Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { AuthService } from '../core/auth.service';
 import { SettingsService } from '../core/settings.service';
 import { ToastService } from '../core/toast.service';
@@ -31,6 +33,7 @@ import { NotificationBellComponent } from './notification-bell.component';
           @if (auth.can('category.manage')) { <a routerLink="/categories" routerLinkActive="on" class="subnav">Categories</a> }
           @if (auth.can('report.view')) { <a routerLink="/reports" routerLinkActive="on">Reports</a> }
           @if (auth.isSuperAdmin() || auth.can('report.export')) { <a routerLink="/exports" routerLinkActive="on" class="subnav">Exports</a> }
+          @if (auth.isSuperAdmin()) { <a routerLink="/scheduled-reports" routerLinkActive="on" class="subnav">Scheduled reports</a> }
           @if (auth.can('audit.view')) { <a routerLink="/audit-log" routerLinkActive="on">Audit log</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/period-locks" routerLinkActive="on">Period locks</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/year-end" routerLinkActive="on">Year-end</a> }
@@ -63,8 +66,9 @@ import { NotificationBellComponent } from './notification-bell.component';
           </div>
         </header>
         <main class="content">
-          <!-- Re-create the page whenever the active branch changes so it refetches its data -->
-          @for (k of [auth.activeBranchId()]; track k) { <router-outlet /> }
+          <!-- Re-create the page whenever the active branch changes so it refetches its data (AG-088: except the
+               scheduled reports pages, which carry their own branches and keep their state) -->
+          @for (k of [outletKey()]; track k) { <router-outlet /> }
         </main>
         <div class="toast" role="status" aria-live="polite">@if (toast.text()) { <span [class.toast-warn]="toast.kind() === 'warning'">{{ toast.text() }}</span> }</div>
       </div>
@@ -76,6 +80,10 @@ export class ShellComponent implements OnInit {
   settings = inject(SettingsService);
   toast = inject(ToastService);
   private router = inject(Router);
+  private url = toSignal(this.router.events.pipe(filter((e): e is NavigationEnd => e instanceof NavigationEnd), map(e => e.urlAfterRedirects)),
+    { initialValue: this.router.url });
+  /** The outlet is keyed on the active branch; AG-088: the scheduled reports pages are not reloaded by a branch switch. */
+  outletKey = computed(() => (/^\/scheduled-reports(\/|\?|$)/.test(this.url()) ? 'scheduled-reports' : this.auth.activeBranchId()));
 
   ngOnInit() { this.settings.load(); }
 
