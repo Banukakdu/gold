@@ -67,6 +67,8 @@ export const routes: Routes = [
         loadComponent: () => import('./features/scheduled-reports/schedule-form.component').then(m => m.ScheduleFormComponent) },
       { path: 'scheduled-reports/:id', canActivate: [superAdminGuard],
         loadComponent: () => import('./features/scheduled-reports/schedule-history.component').then(m => m.ScheduleHistoryComponent) },
+      // AG-005 S5: the signed-in user's own two-factor sign-in; signed in only, any switcher mode.
+      { path: 'account/security', loadComponent: () => import('./features/account/account-security.component').then(m => m.AccountSecurityComponent) },
       // AG-094 S2 / S3: any signed-in user (their own notifications only); /notifications/:id is the email link.
       { path: 'notifications', loadComponent: () => import('./features/notifications/notifications.component').then(m => m.NotificationsComponent) },
       { path: 'notifications/:id',

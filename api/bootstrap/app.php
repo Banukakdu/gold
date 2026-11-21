@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Middleware\EnsureTwoFactorCompliance;
 use App\Http\Middleware\RequirePermission;
 use App\Http\Middleware\SetBranchContext;
 use App\Http\Middleware\SuperAdminOnly;
@@ -22,6 +23,8 @@ return Application::configure(basePath: dirname(__DIR__))
             'branch' => SetBranchContext::class,
             'perm' => RequirePermission::class,
             'super' => SuperAdminOnly::class,
+            // AG-005 R9
+            'two-factor' => EnsureTwoFactorCompliance::class,
         ]);
         // The active branch must be known before route-model binding, so bound models are branch-scoped too.
         $middleware->prependToPriorityList(

@@ -23,6 +23,9 @@ export const apiInterceptor: HttpInterceptorFn = (req, next) => {
       if (err.status === 401) {
         auth.clear();
         router.navigateByUrl('/login');
+      } else if (err.status === 403 && err.error?.code === 'two_factor_enrolment_required') {
+        // AG-005 R9 / F4: an admin who must set up two-factor sign-in first.
+        router.navigateByUrl('/account/security?required=1');
       }
       return throwError(() => err);
     }),

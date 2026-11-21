@@ -1,4 +1,4 @@
-import { Component, OnInit, computed, inject } from '@angular/core';
+import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { filter, map } from 'rxjs';
 import { NavigationEnd, Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
@@ -19,6 +19,8 @@ import { NotificationBellComponent } from './notification-bell.component';
           @if (settings.logoUrl(); as logo) { <img [src]="logo" [alt]="settings.companyName()" /> }
           <span>{{ settings.companyName() }}</span>
         </div>
+        <!-- AG-005 F4: while two-factor set-up is required, the menu is hidden (only "Log out" stays) -->
+        @if (!required()) {
         <nav>
           <a routerLink="/dashboard" routerLinkActive="on">Dashboard</a>
           @if (auth.can('transaction.view')) { <a routerLink="/transactions" routerLinkActive="on">Transactions</a> }
@@ -43,10 +45,12 @@ import { NotificationBellComponent } from './notification-bell.component';
           @if (auth.can('user.view')) { <a routerLink="/users" routerLinkActive="on">Users</a> }
           @if (auth.can('role.view')) { <a routerLink="/roles" routerLinkActive="on">Roles</a> }
         </nav>
+        }
         <div class="side-foot"><span class="brand">Account<span>gold</span></span></div>
       </aside>
       <div class="main">
         <header class="top">
+          @if (!required()) {
           <label class="switcher">
             <span>Branch</span>
             <!-- [selected] per option: the options render after /me loads, so [value] on the select alone is lost on reload -->
@@ -59,10 +63,26 @@ import { NotificationBellComponent } from './notification-bell.component';
           </label>
           <!-- AG-094 S1: before .who; at phone width it stays next to the branch switcher -->
           <ag-notification-bell />
+          }
           <div class="who">
-            <span>{{ auth.me()?.name }} @if (auth.isSuperAdmin()) { <span class="tag">Super Admin</span> }</span>
-            <small>{{ auth.isSuperAdmin() ? '' : auth.activeBranch()?.roles?.join(', ') }}</small>
-            <button class="ghost" (click)="auth.logout()">Log out</button>
+            @if (required()) {
+              <span>{{ auth.me()?.name }}</span>
+              <button class="ghost" (click)="auth.logout()">Log out</button>
+            } @else {
+              <!-- AG-005 S5: the user name is a menu with "Security" and "Log out" -->
+              <div class="tf-menu">
+                <button type="button" class="link tf-menu-btn" aria-haspopup="menu" [attr.aria-expanded]="menuOpen()" (click)="menuOpen.set(!menuOpen())">
+                  {{ auth.me()?.name }} ▾</button>
+                @if (menuOpen()) {
+                  <div class="tf-menu-list" role="menu">
+                    <a role="menuitem" routerLink="/account/security" (click)="menuOpen.set(false)">Security</a>
+                    <button type="button" role="menuitem" class="link" (click)="menuOpen.set(false); auth.logout()">Log out</button>
+                  </div>
+                }
+              </div>
+              @if (auth.isSuperAdmin()) { <span class="tag">Super Admin</span> }
+              <small>{{ auth.isSuperAdmin() ? '' : auth.activeBranch()?.roles?.join(', ') }}</small>
+            }
           </div>
         </header>
         <main class="content">
@@ -83,6 +103,9 @@ export class ShellComponent implements OnInit {
   private url = toSignal(this.router.events.pipe(filter((e): e is NavigationEnd => e instanceof NavigationEnd), map(e => e.urlAfterRedirects)),
     { initialValue: this.router.url });
   /** The outlet is keyed on the active branch; AG-088: the scheduled reports pages are not reloaded by a branch switch. */
+  /** AG-005 F4 / S5: /account/security?required=1 shows no menu, no branch switcher and no bell. */
+  required = computed(() => /^\/account\/security\?(.*&)?required=1(&|$)/.test(this.url()));
+  menuOpen = signal(false);
   outletKey = computed(() => (/^\/scheduled-reports(\/|\?|$)/.test(this.url()) ? 'scheduled-reports' : this.auth.activeBranchId()));
 
   ngOnInit() { this.settings.load(); }

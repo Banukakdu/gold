@@ -24,6 +24,7 @@ use App\Http\Controllers\Api\V1\TransactionController;
 use App\Http\Controllers\Api\V1\TransferApprovalController;
 use App\Http\Controllers\Api\V1\TransferController;
 use App\Http\Controllers\Api\V1\TransferReceiptController;
+use App\Http\Controllers\Api\V1\TwoFactorController;
 use App\Http\Controllers\Api\V1\UserController;
 use Illuminate\Support\Facades\Route;
 
@@ -33,10 +34,25 @@ Route::prefix('v1')->group(function () {
     // AG-002 password reset (docs/specs/password-reset.md N1, N2), public, rate limited per IP and per email (R4).
     Route::post('auth/forgot-password', [AuthController::class, 'forgotPassword'])->middleware('throttle:password-forgot');
     Route::post('auth/reset-password', [AuthController::class, 'resetPassword'])->middleware('throttle:password-reset');
+    // AG-005 two-factor sign-in (docs/specs/two-factor.md P1-P3): public, challenge-based, 10 per minute per IP.
+    Route::middleware('throttle:two-factor')->group(function () {
+        Route::post('auth/two-factor/verify', [TwoFactorController::class, 'verify']);
+        Route::post('auth/two-factor/enrol/start', [TwoFactorController::class, 'enrolStart']);
+        Route::post('auth/two-factor/enrol/confirm', [TwoFactorController::class, 'enrolConfirm']);
+    });
 
-    Route::middleware('auth:sanctum')->group(function () {
+    // AG-005 R9: `two-factor` limits a user who must set up 2FA to its allow list (EnsureTwoFactorCompliance).
+    Route::middleware(['auth:sanctum', 'two-factor'])->group(function () {
         Route::post('auth/logout', [AuthController::class, 'logout']);
         Route::get('me', [AuthController::class, 'me']);
+
+        // AG-005 M1-M5: the caller's own two-factor sign-in. Outside `branch`: 2FA belongs to the person (R18). There is
+        // deliberately no DELETE route (recovery codes and challenges are kept).
+        Route::get('me/two-factor', [TwoFactorController::class, 'status']);
+        Route::post('me/two-factor/setup', [TwoFactorController::class, 'setup']);
+        Route::post('me/two-factor/confirm', [TwoFactorController::class, 'confirm']);
+        Route::post('me/two-factor/recovery-codes', [TwoFactorController::class, 'recoveryCodes']);
+        Route::post('me/two-factor/disable', [TwoFactorController::class, 'disable']);
 
         // AG-092 settings (docs/specs/settings.md section 5): outside `branch`, like `me`. The logo is removed with a POST
         // action; there is deliberately no DELETE route (nothing is hard-deleted).
@@ -47,6 +63,8 @@ Route::prefix('v1')->group(function () {
             Route::put('settings', [SettingsController::class, 'update']);
             Route::post('settings/logo', [SettingsController::class, 'uploadLogo'])->middleware('throttle:attachments-upload');
             Route::post('settings/logo/remove', [SettingsController::class, 'removeLogo']);
+            // AG-005 A1: reset another user's two-factor sign-in (R16). Outside `branch`: 2FA is per user (R18).
+            Route::post('users/{user}/two-factor/reset', [TwoFactorController::class, 'reset'])->whereNumber('user');
             // AG-093 S1 backups (docs/specs/backups.md section 5): read-only. There is deliberately no POST, PUT or
             // DELETE route: backups are started, restored and pruned on the server only.
             Route::get('backups', [BackupController::class, 'index']);

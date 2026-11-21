@@ -68,6 +68,9 @@ class AppServiceProvider extends ServiceProvider
             Limit::perMinutes(15, 10)->by('pw-reset-email:'.self::emailKey($r))->response(self::tooMany(...)),
         ]);
 
+        // AG-005 R6: the public second sign-in step (P1-P3), 10 per minute per IP.
+        RateLimiter::for('two-factor', fn (Request $r) => Limit::perMinute(10)->by('two-factor:'.$r->ip())->response(self::tooMany(...)));
+
         // AG-062 (reviewer S1, N4): every download writes an audit row and reads up to 5 MB, so both routes are
         // limited per user (per IP before sign-in, which the auth middleware refuses anyway).
         RateLimiter::for('attachments-upload', fn (Request $r) => Limit::perMinute(self::ATTACHMENT_UPLOADS_PER_MINUTE)

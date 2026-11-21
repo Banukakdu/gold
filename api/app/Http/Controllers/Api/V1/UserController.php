@@ -9,10 +9,14 @@ use App\Models\User;
 use App\Notifications\EmailChangedNotification;
 use App\Notifications\InvitationNotification;
 use App\Services\AccessAlerts;
+use App\Services\TwoFactor;
 use App\Support\BranchAdmins;
 use App\Support\BranchContext;
 use App\Support\Memberships;
+use App\Support\Settings;
+use App\Support\TwoFactorPolicy;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Password;
@@ -44,7 +48,10 @@ class UserController extends Controller
         $page = $q->paginate(50);
         $memberships = Memberships::forUsers($page->getCollection()->pluck('id'), $me->is_super_admin ? null : $branchId);
 
-        return $page->through(fn (User $u) => $this->present($u, $memberships->get($u->id, collect()), $branchId));
+        $twoFactor = $me->is_super_admin ? $this->twoFactorOf($page->getCollection()) : null;
+
+        return $page->through(fn (User $u) => $this->present($u, $memberships->get($u->id, collect()), $branchId)
+            + ($twoFactor !== null ? ['two_factor' => $twoFactor[$u->id]] : []));
     }
 
     /** N1 */
@@ -56,8 +63,16 @@ class UserController extends Controller
         $memberships = Memberships::forUsers([$user->id], $me->is_super_admin ? null : $branchId);
 
         // Spec 4.3: the UI disables profile editing up front, with the reason (B5 / B6 / B2).
-        return $this->present($user, $memberships->get($user->id, collect()), $branchId)
+        $out = $this->present($user, $memberships->get($user->id, collect()), $branchId)
             + ['profile_locked_reason' => $this->profileLockReason($me, $user)];
+        if ($me->is_super_admin) {
+            // AG-005 S8 (Super Admin only): the status, and the R16 recent-lock warning of the reset dialog.
+            $lock = TwoFactor::resetBlockedBy($user);
+            $out['two_factor'] = $this->twoFactorOf(collect([$user]))[$user->id]
+                + ['reset_blocked_since' => $lock?->created_at?->toIso8601String()];
+        }
+
+        return $out;
     }
 
     /** Create a user in the active branch with a role and send the invitation (AG-020 / AG-021, E2). */
@@ -234,6 +249,7 @@ class UserController extends Controller
             $user->update($data);
             if ($deactivating) {
                 $user->tokens()->delete(); // AG-024: immediate lock-out
+                TwoFactor::consumeOpenChallenges($user); // AG-005 R14: 2FA settings are kept
             }
             AuditLog::record('user.updated', $user, $old, $data, $branchId);
         });
@@ -253,6 +269,26 @@ class UserController extends Controller
         }
 
         return $user->fresh();
+    }
+
+    /**
+     * AG-005 section 2 / S8: the 2FA summary per user, returned to Super Admins only.
+     *
+     * @param  Collection<int, User>  $users
+     * @return array<int, array{enabled: bool, confirmed_at: ?string, required: bool, recovery_codes_left: int}>
+     */
+    private function twoFactorOf($users): array
+    {
+        $left = DB::table('two_factor_recovery_codes')->whereIn('user_id', $users->pluck('id'))->whereNull('used_at')->whereNull('superseded_at')
+            ->groupBy('user_id')->select('user_id', DB::raw('count(*) as codes_left'))->pluck('codes_left', 'user_id');
+        $required = app(Settings::class)->twoFactorRequiredForAdmins();
+
+        return $users->mapWithKeys(fn (User $u) => [$u->id => [
+            'enabled' => $u->hasTwoFactor(),
+            'confirmed_at' => $u->two_factor_confirmed_at?->toIso8601String(),
+            'required' => $required && TwoFactorPolicy::isAdmin($u),
+            'recovery_codes_left' => $u->hasTwoFactor() ? (int) ($left[$u->id] ?? 0) : 0,
+        ]])->all();
     }
 
     private function present(User $u, $memberships, ?int $branchId): array

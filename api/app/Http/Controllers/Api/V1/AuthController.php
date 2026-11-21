@@ -8,9 +8,11 @@ use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\User;
 use App\Services\PasswordResets;
+use App\Services\TwoFactor;
 use App\Support\DummyHash;
 use App\Support\LoginThrottle;
 use App\Support\Minutes;
+use App\Support\TwoFactorPolicy;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
@@ -58,11 +60,28 @@ class AuthController extends Controller
             return response()->json(['message' => 'You do not have access to any branch. Contact your administrator.'], 403); // B12
         }
 
+        // AG-005: the 2FA lock (R6), then a challenge instead of a token when 2FA is on or required (R4, R8). No token,
+        // no last_login_at and no auth.login row until the second step.
+        if ($seconds = TwoFactor::lockedFor($user)) {
+            return TwoFactor::lockedResponse($seconds);
+        }
+        $purpose = match (true) {
+            $user->hasTwoFactor() => 'verify',
+            TwoFactorPolicy::requiredFor($user) => 'enrol',
+            default => null,
+        };
+        if ($purpose !== null) {
+            [$token, $expires] = TwoFactor::createChallenge($user, $purpose, $request);
+
+            return ['two_factor' => $purpose === 'verify' ? 'challenge' : 'enrol', 'challenge_token' => $token,
+                'expires_at' => $expires->toIso8601String()];
+        }
+
         $user->forceFill(['last_login_at' => now()])->save();
         auth()->setUser($user);
-        AuditLog::record('auth.login', $user);
+        AuditLog::record('auth.login', $user, null, ['two_factor' => null]);
 
-        return ['token' => $user->createToken('web')->plainTextToken, 'user' => $this->profile($user)];
+        return ['token' => $user->createToken('web')->plainTextToken, 'user' => self::profile($user)];
     }
 
     /** G4: one auth.locked_out row per lock, written by the one request whose Cache::add started it. */
@@ -159,12 +178,14 @@ class AuthController extends Controller
 
     public function me(Request $request)
     {
-        return $this->profile($request->user());
+        return self::profile($request->user());
     }
 
-    /** Profile + branches the user can switch to + permissions per branch. */
-    private function profile(User $user): array
+    /** Profile + branches the user can switch to + permissions per branch, and the user's own 2FA summary (AG-005). */
+    public static function profile(User $user): array
     {
+        $twoFactor = TwoFactor::status($user);
+
         $branches = $user->is_super_admin
             ? Branch::orderByDesc('is_main')->orderBy('name')->get()
             : $user->branches()->orderBy('name')->get();
@@ -184,6 +205,7 @@ class AuthController extends Controller
                     'permissions' => $user->is_super_admin ? ['*'] : $user->getAllPermissions()->pluck('name')->values(),
                 ];
             })->values(),
+            'two_factor' => array_intersect_key($twoFactor, array_flip(['enabled', 'required', 'recovery_codes_left'])),
         ];
     }
 }

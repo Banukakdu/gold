@@ -6,11 +6,12 @@ import { RouterLink } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
 import { Membership, RoleRow, UserRow, fieldErrors } from '../../core/models';
 import { errorText } from '../../core/api.interceptor';
+import { CodeInputComponent } from '../account/code-input.component';
 
 /** User detail /users/:id (spec 4.3): profile, status, invitation and branch access. */
 @Component({
   standalone: true,
-  imports: [FormsModule, AppDateTimePipe, RouterLink],
+  imports: [FormsModule, AppDateTimePipe, RouterLink, CodeInputComponent],
   template: `
     <p><a routerLink="/users">← Users</a></p>
     @if (notFound()) {
@@ -30,6 +31,19 @@ import { errorText } from '../../core/api.interceptor';
         <label>Phone <input name="phone" [(ngModel)]="p.phone" [disabled]="!canEdit(u)" maxlength="30" /></label>
         <label>Status <span><span class="tag" [attr.data-s]="u.status">{{ u.status }}</span></span></label>
         <label>Last login <span>{{ u.last_login_at ? (u.last_login_at | appDateTime) : 'Invitation pending' }}</span></label>
+        <!-- AG-005 S8: Super Admin only -->
+        @if (u.two_factor; as t) {
+          <label>Two-factor sign-in
+            <span data-testid="two-factor-row">
+              @if (t.enabled) { On since {{ t.confirmed_at | appDateTime }} · recovery codes left {{ t.recovery_codes_left }} }
+              @else if (t.required) { <span class="tf-2fa-off">Off (required: will be asked at next sign-in)</span> }
+              @else { Off }
+            </span>
+          </label>
+          @if (t.enabled && u.id !== auth.me()?.id) {
+            <div class="wide"><button type="button" class="ghost" data-testid="reset-two-factor" (click)="openReset()">Reset two-factor</button></div>
+          }
+        }
         @if (auth.can('user.edit') && u.profile_locked_reason) { <p class="muted wide">{{ u.profile_locked_reason }}</p> }
         @if (canEdit(u)) {
           <div class="wide actions" style="gap: 8px">
@@ -87,6 +101,35 @@ import { errorText } from '../../core/api.interceptor';
           </form>
         }
       </div>
+
+      @if (resetOpen()) {
+        <div class="att-backdrop" (click)="resetOpen.set(false)"></div>
+        <form class="att-dialog ap-dialog tf-dialog" role="dialog" aria-modal="true" (ngSubmit)="reset(u)">
+          <h2>Reset two-factor for {{ u.name }}</h2>
+          @if (u.two_factor?.reset_blocked_since; as since) {
+            <div class="banner amber">Someone entered this user's password without the code on {{ since | appDateTime }}. They must reset their
+              password before two-factor can be reset.</div>
+          }
+          <p>This turns off their two-factor sign-in, removes their recovery codes and signs them out on every device. If they are an admin and
+            two-factor is required, they must set it up again at their next sign-in.</p>
+          @if (resetAlert()) { <div class="alert">{{ resetAlert() }}</div> }
+          <label>Reason
+            <textarea name="reason" rows="3" maxlength="500" required [(ngModel)]="resetForm.reason"></textarea>
+            <small class="muted">Say how you checked it was really them (for example: in person, phone call to their known number).</small>
+          </label>
+          @if (resetErrors()['reason']) { <div class="field-error">{{ resetErrors()['reason'] }}</div> }
+          <label>Your password <input type="password" name="password" autocomplete="current-password" required [(ngModel)]="resetForm.password" /></label>
+          @if (resetErrors()['password']) { <div class="field-error">{{ resetErrors()['password'] }}</div> }
+          @if (auth.me()?.two_factor?.enabled) {
+            <label>Your code <app-code-input [(value)]="resetCode" name="code" /></label>
+            @if (resetErrors()['code']) { <div class="field-error">{{ resetErrors()['code'] }}</div> }
+          }
+          <div class="tf-dialog-actions">
+            <button type="submit" [disabled]="resetBusy()">{{ resetBusy() ? 'Resetting…' : 'Reset' }}</button>
+            <button type="button" class="ghost" (click)="resetOpen.set(false)">Cancel</button>
+          </div>
+        </form>
+      }
     }
   `,
 })
@@ -107,6 +150,13 @@ export class UserDetailComponent implements OnInit {
   addRoleId: number | null = null;
   addBranchId: number | null = null;
   p = { name: '', email: '', phone: '' };
+  /** AG-005 S8 reset dialog. */
+  resetOpen = signal(false);
+  resetBusy = signal(false);
+  resetErrors = signal<Record<string, string>>({});
+  resetAlert = signal('');
+  resetForm = { reason: '', password: '' };
+  resetCode = signal('');
 
   ngOnInit() { this.load(); }
 
@@ -189,6 +239,35 @@ export class UserDetailComponent implements OnInit {
     this.errors.set({});
     this.http.put(`/api/v1/users/${u.id}`, { name: this.p.name, email: this.p.email, phone: this.p.phone || null }).subscribe({
       next: () => this.done('Profile saved.'), error: e => { this.errors.set(fieldErrors(e)); this.fail(e); } });
+  }
+
+  openReset() {
+    this.resetForm = { reason: '', password: '' };
+    this.resetCode.set('');
+    this.resetErrors.set({});
+    this.resetAlert.set('');
+    this.resetOpen.set(true);
+  }
+
+  /** A1: Super Admin only; the API checks R16 and the actor's password and code. */
+  reset(u: UserRow) {
+    if (this.resetBusy()) return;
+    this.resetBusy.set(true);
+    this.resetErrors.set({});
+    this.resetAlert.set('');
+    const body: Record<string, string> = { reason: this.resetForm.reason, password: this.resetForm.password };
+    if (this.auth.me()?.two_factor?.enabled) body['code'] = this.resetCode();
+    this.http.post(`/api/v1/users/${u.id}/two-factor/reset`, body).subscribe({
+      next: () => { this.resetBusy.set(false); this.resetOpen.set(false); this.done('Two-factor sign-in was reset.'); },
+      error: e => {
+        this.resetBusy.set(false);
+        const fields = fieldErrors(e);
+        const shown = Object.fromEntries(Object.entries(fields).filter(([k]) => ['reason', 'password', 'code'].includes(k)));
+        this.resetErrors.set(shown);
+        if (shown['code']) this.resetCode.set('');
+        if (!Object.keys(shown).length) this.resetAlert.set(errorText(e));
+      },
+    });
   }
 
   private done(msg: string) { this.error.set(''); this.ok.set(msg); this.load(); }
