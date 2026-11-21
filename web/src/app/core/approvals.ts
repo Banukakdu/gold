@@ -47,6 +47,8 @@ export interface ApprovalTarget {
   approver_onboarded_requester?: boolean;
   /** AG-064 SHOULD 7: the requested month is locked or its year closed now. */
   requested_period_locked?: boolean;
+  /** AG-066 R7a: the template facts recorded at request (from template, changes, changed since last use, duplicate). */
+  template_lines?: { text: string; warn?: boolean }[];
 }
 
 /**
@@ -71,6 +73,12 @@ export interface ApprovalTarget {
           <p class="muted">Posting date: today ({{ today | appDate }}). Requested for {{ target.requested_date | appDate }}.</p>
         }
         @if (target.requester_inactive) { <p class="neg">Requester is inactive.</p> }
+        @if (target.template_lines?.length) {
+          <!-- AG-066 R7a: what the template use recorded at request. -->
+          <ul class="tpl-facts">
+            @for (l of target.template_lines; track $index) { <li [class.warn]="l.warn">{{ l.text }}</li> }
+          </ul>
+        }
         @if (target.below_zero_line) { <p class="neg">{{ target.below_zero_line }}</p> }
         @if (target.approver_onboarded_requester) {
           <p class="alert">You added this requester to the branch. Super Admins will be told of this approval.</p>
@@ -84,6 +92,11 @@ export interface ApprovalTarget {
       } @else {
         <h2 id="ap-title">Reject {{ target.ref_no }}</h2>
         <p class="muted">{{ target.amount | money }} from {{ target.from }} to {{ target.to }}. Nothing is posted.</p>
+        @if (target.template_lines?.length) {
+          <ul class="tpl-facts">
+            @for (l of target.template_lines; track $index) { <li [class.warn]="l.warn">{{ l.text }}</li> }
+          </ul>
+        }
         <label>Reason, sent to the requester (10-500 characters)
           <textarea rows="3" name="comment" [(ngModel)]="comment" maxlength="500"></textarea>
         </label>

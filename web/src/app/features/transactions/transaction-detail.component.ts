@@ -14,8 +14,9 @@ import {
 import { LockBannerComponent } from '../period-locks/lock-banner.component';
 import { ReceiptDialogComponent, ReceiptResult, receiptLabel } from '../../core/receipts';
 import { ApprovalDialogComponent, ApprovalTarget, approvalLabel } from '../../core/approvals';
+import { TemplateFacts, TemplateLine, approvalTemplateLines } from '../../core/expense-templates';
 
-interface Detail {
+interface Detail extends TemplateFacts {
   id: number; ref_no: string; type: string; status: string; txn_date: string; amount: string;
   payee_payer?: string | null; payment_method?: string | null; reference?: string | null; description?: string | null;
   branch?: { code: string; name: string };
@@ -102,6 +103,14 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
           @if (t.description) { <dt>Description</dt><dd class="att-pre">{{ t.description }}</dd> }
           <dt>Created by</dt>
           <dd>{{ t.creator?.name }} @if (t.creator_tag) { <span class="tag" data-s="inactive">{{ t.creator_tag }}</span> }</dd>
+          @if (t.expense_template; as tpl) {
+            <!-- AG-066 S3: the template link and what its use recorded (R11). -->
+            <dt>From template</dt>
+            <dd class="tpl-detail">{{ tpl.name }} @if (tpl.archived) { <span class="tag" data-s="inactive">Archived</span> }
+              <!-- R7a: the same lines as the approver's, after "From template". -->
+              @for (l of templateLines(t); track $index) { <br /><span [class.tpl-warn]="l.warn">{{ l.text }}</span> }
+            </dd>
+          }
         </dl>
       </div>
 
@@ -320,6 +329,9 @@ export class TransactionDetailComponent implements OnInit {
 
   approvalText(s: string | null | undefined) { return approvalLabel(s); }
 
+  /** AG-066 S3: the R7a lines without the first ("From template <name>", already the label). */
+  templateLines(t: Detail): TemplateLine[] { return approvalTemplateLines(t).slice(1); }
+
   approvalDone(r: { ref_no: string }, mode: 'approve' | 'reject') {
     this.approvalMode.set(null);
     this.approvalOk.set(mode === 'approve' ? `${r.ref_no} approved and posted.` : `${r.ref_no} rejected.`);
@@ -333,7 +345,8 @@ export class TransactionDetailComponent implements OnInit {
       const c = t.category;
       return { ...base, kind: 'expense', from: `${t.branch?.code ?? ''} ${t.account?.name ?? ''}`.trim(),
         to: c ? (c.parent ? c.parent.name + ' > ' : '') + c.name : '', files_count: t.attachments_count ?? 0,
-        approver_onboarded_requester: !!t.approver_onboarded_requester, requested_period_locked: !!t.requested_period_locked };
+        approver_onboarded_requester: !!t.approver_onboarded_requester, requested_period_locked: !!t.requested_period_locked,
+        template_lines: approvalTemplateLines(t) };
     }
     return { ...base, from: (t.from_account?.branch?.code ?? '') + ' · ' + (t.from_account?.name ?? ''), to: (t.to_account?.branch?.code ?? '') + ' · ' + (t.to_account?.name ?? '') };
   }

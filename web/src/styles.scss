@@ -410,3 +410,33 @@ tr.rc-frozen td, .rc-line.rc-frozen { color: var(--muted); }
   .br-cards { display: block; }
   .br-card-wrap { overflow-x: visible; padding: 10px; }
 }
+
+/* AG-066 S1 / S2 / S5 expense templates (docs/specs/recurring-expenses.md, 390px layout). */
+.tpl-muted { color: var(--muted); }
+.tpl-muted td, .tpl-card.tpl-muted { opacity: .75; }
+.tpl-name { overflow-wrap: anywhere; min-width: 0; }
+.tpl-by { font-weight: normal; font-size: .85em; }
+.tpl-facts { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; li.warn { padding: 4px 8px; list-style: none; margin-left: -18px; } }
+.tpl-fact { display: inline-block; overflow-wrap: anywhere; }
+.tpl-warn { color: #8a5a00; font-weight: 600; }
+.tpl-detail { overflow-wrap: anywhere; }
+.tpl-dialog .field-error { margin: -6px 0 0; }
+.tpl-more { position: relative; summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center; justify-content: center;
+  padding: 8px 14px; border: 1px solid var(--gold); border-radius: 6px; color: var(--gold); }
+  &[open] { display: flex; flex-direction: column; gap: 6px; } }
+.tpl-buttons { flex-wrap: wrap; align-items: flex-start; }
+.tpl-buttons .tpl-more { flex: 1; }
+.tpl-dup { display: flex; flex-direction: column; gap: 8px; overflow-wrap: anywhere; }
+.tpl-dup .tpl-save-anyway { align-self: flex-start; }
+.tpl-info, .tpl-used { overflow-wrap: anywhere; margin: 0; }
+.tpl-pick select { min-width: 0; }
+@media (max-width: 760px) {
+  .tpl-toolbar { flex-direction: column; align-items: stretch; input, select, button, label { width: 100%; } }
+  .tpl-toolbar .tpl-new { min-height: 44px; }
+  .tpl-cards { display: block; }
+  .tpl-buttons .tpl-use { flex: 2 1 0; min-height: 44px; }
+  .tpl-buttons .tpl-more { flex: 1 1 0; summary { min-height: 44px; width: 100%; } button { min-height: 44px; width: 100%; } }
+  .tpl-buttons .tpl-more[open] { flex-basis: 100%; }
+  .tpl-dup .tpl-save-anyway { align-self: stretch; width: 100%; min-height: 44px; }
+  .tpl-dialog { gap: 8px; }
+}

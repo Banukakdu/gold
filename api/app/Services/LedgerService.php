@@ -274,7 +274,16 @@ class LedgerService
         $this->assertPositive((string) $data['amount']);
 
         return DB::transaction(function () use ($type, $data) {
+            // AG-066 R2 / R6 / R10: the template (active branch, not archived) is locked as the FIRST statement of this
+            // transaction, so two uses of it run one after the other and the second sees the first: on MySQL no snapshot
+            // exists before this lock (review finding 1, see ExpenseTemplates::lockForUse). Nothing may be read before it.
+            // It is only a link: every field posted below comes from the request (R5).
+            $templates = app(ExpenseTemplates::class);
+            $tpl = $type === Transaction::EXPENSE && ! empty($data['template_id']) ? $templates->lockForUse((int) $data['template_id']) : null;
             $acc = $this->moneyAccount((int) $data['account_id']);
+            if ($tpl) {
+                $templates->assertSameBranch($tpl, $acc);
+            }
             $cat = Category::findOrFail($data['category_id']);
             $this->assertEntryCategory($type, $cat, $acc);
             [$lines, $locked] = $this->prepare($this->rules->incomeExpense($type, $acc->id, $acc->branch_id, $cat->id, Money::toCents($data['amount'])), $data['txn_date']);
@@ -288,13 +297,23 @@ class LedgerService
                 $this->assertFunds($acc, $data['amount']);
             }
 
+            // AG-066 R6 / R11: the duplicate guard runs after every other check and before the AG-064 decision, which
+            // then runs unchanged on the submitted amount (R7). A 409 writes nothing.
+            $templateAudit = [];
+            $link = [];
+            if ($tpl) {
+                $dupes = $templates->assertNotDuplicate($tpl, $data['txn_date'], (bool) ($data['confirm_duplicate'] ?? false));
+                $templateAudit = $templates->useAudit($tpl, $data, $dupes);
+                $link = ['expense_template_id' => $tpl->id];
+            }
+
             // AG-064 R2 / R2b / R5: above the branch's limit a non-Super-Admin's expense waits for approval. Every check
             // above has run; the request posts nothing.
             $rule = null;
             if ($type === Transaction::EXPENSE) {
                 $rule = app(ExpenseApprovals::class)->rule(auth()->user(), $acc, $cat->id, $data['txn_date'], Money::toCents($data['amount']));
                 if ($rule['decision'] === ExpenseApprovals::HOLD) {
-                    return $this->expenseRequest($acc, $cat, $data, $rule);
+                    return $this->expenseRequest($acc, $cat, $data, $rule, $link, $templateAudit);
                 }
             }
 
@@ -305,11 +324,12 @@ class LedgerService
                 'payment_method' => $data['payment_method'] ?? null,
                 'reference' => $data['reference'] ?? null,
                 'description' => $data['description'] ?? null,
-            ]);
+            ] + $link);
             $this->post($txn, $lines);
 
             // AG-064 R2b compensating control: a Super Admin's expense above a set limit is flagged in the audit.
-            return $this->finish($txn, ($rule['decision'] ?? null) === ExpenseApprovals::NOT_REQUIRED_SUPER_ADMIN ? ['approval' => $rule['decision']] : []);
+            return $this->finish($txn, (($rule['decision'] ?? null) === ExpenseApprovals::NOT_REQUIRED_SUPER_ADMIN ? ['approval' => $rule['decision']] : [])
+                + $templateAudit);
         }, self::ATTEMPTS);
     }
 
@@ -331,8 +351,10 @@ class LedgerService
      * here (R17 warning) is consistent with the balance.
      *
      * @param  array{decision: ?string, reason: ?string, threshold: ?int, same_day: int}  $rule
+     * @param  array  $link  AG-066: ['expense_template_id' => id] when saved from a template
+     * @param  array  $templateAudit  AG-066 R11 / R7a: the template keys of the audit row
      */
-    private function expenseRequest(Account $acc, Category $cat, array $data, array $rule): Transaction
+    private function expenseRequest(Account $acc, Category $cat, array $data, array $rule, array $link = [], array $templateAudit = []): Transaction
     {
         $approvals = app(ExpenseApprovals::class);
         $other = $approvals->pendingOnAccount($acc->id, current: true);
@@ -349,7 +371,7 @@ class LedgerService
             'requested_date' => $data['txn_date'],
             'requested_on' => BusinessDate::today(),
             'approval_threshold' => Money::fromCents((int) $rule['threshold']),
-        ]);
+        ] + $link);
         $txn->ref_no = $this->refNo($txn);
         $txn->save();
         AuditLog::record('expense.approval_requested', $txn, null, [
@@ -358,7 +380,7 @@ class LedgerService
             'threshold' => Money::fromCents((int) $rule['threshold']), 'hold_reason' => $rule['reason'],
             'same_day_total' => Money::fromCents($rule['same_day']), 'super_admin_only' => $superAdminOnly,
             'other_pending_from_account' => Money::fromCents($other), 'files_count' => 0, 'status' => 'pending',
-        ]);
+        ] + $templateAudit);
         $id = $txn->id;
         $userId = auth()->id();
         DB::afterCommit(fn () => ExpenseApprovalRequested::dispatch($id, $userId));

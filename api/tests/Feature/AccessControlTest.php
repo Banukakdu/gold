@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\User;
+use App\Support\BusinessDate;
 
 class AccessControlTest extends AccountingTestCase
 {
@@ -37,7 +38,7 @@ class AccessControlTest extends AccountingTestCase
         $this->actingAs($cashier)->withHeader('X-Branch-Id', (string) $kdy->id)->postJson('/api/v1/transfers', [])->assertForbidden();
         // Cannot post an expense from another branch's account
         $this->actingAs($cashier)->withHeader('X-Branch-Id', (string) $kdy->id)->postJson('/api/v1/expenses', [
-            'account_id' => $this->cashOf($gle)->id, 'category_id' => $this->category('expense')->id, 'txn_date' => now()->toDateString(), 'amount' => 1,
+            'account_id' => $this->cashOf($gle)->id, 'category_id' => $this->category('expense')->id, 'txn_date' => BusinessDate::today(), 'amount' => 1,
         ])->assertNotFound();
     }
 

@@ -1,9 +1,10 @@
-import { Component, OnInit, computed, inject, input, signal } from '@angular/core';
+import { Component, ElementRef, OnInit, ViewChild, computed, inject, input, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { Account, Category } from '../../core/models';
 import { MoneyPipe } from '../../core/money.pipe';
+import { AppDatePipe } from '../../core/app-date.pipe';
 import { errorText } from '../../core/api.interceptor';
 import { LockBannerComponent } from '../period-locks/lock-banner.component';
 import { colomboToday } from '../../core/dates';
@@ -12,6 +13,7 @@ import { AuthService } from '../../core/auth.service';
 import { ToastService } from '../../core/toast.service';
 import { toCents } from '../../core/approvals';
 import { lateEntryWarning } from '../../core/reconciliation';
+import { ExpenseTemplate, ExpenseTemplateList, defaultPaymentMethod, useText } from '../../core/expense-templates';
 
 interface UploadLine { name: string; size: number; pct: number; error?: string; done?: boolean }
 interface SaveResult {
@@ -21,15 +23,39 @@ interface SaveResult {
 }
 interface SaveResponse { id: number; ref_no: string; status?: string; hold_reason?: string | null; same_day_total?: string | null; warning?: string | null; txn_date?: string }
 interface BranchLimit { id: number; expense_approval_threshold?: string | null }
+/** The fields whose typed value a template would replace. */
+const TYPED_KEYS = ['amount', 'payee_payer', 'reference', 'description', 'category_id'];
+/** AG-066 S2: the R6 409 (soft block) waiting for "Save anyway". */
+interface Duplicate { message: string }
 
 /** Record income or expense (route /transactions/new/:kind). */
 @Component({
   standalone: true,
-  imports: [FormsModule, MoneyPipe, LockBannerComponent, RouterLink],
+  imports: [FormsModule, MoneyPipe, AppDatePipe, LockBannerComponent, RouterLink],
   template: `
     <h1>Record {{ kind() }}</h1>
     <ag-lock-banner />
     <form class="card form" (ngSubmit)="save()">
+      @if (kind() === 'expense' && templates().length) {
+        <!-- AG-066 S2: a template only fills in this form (R5); nothing is posted until Save. -->
+        <label class="wide tpl-pick">From template
+          <select #tplSelect name="template" (change)="pickTemplate(tplSelect)">
+            <option value="" [selected]="!template()">- none -</option>
+            @for (t of templates(); track t.id) {
+              <option [value]="t.id" [selected]="template()?.id === t.id">{{ t.name }} · {{ t.amount === null ? 'enter amount' : (t.amount | money) }}</option>
+            }
+          </select>
+        </label>
+      }
+      @if (templateError()) { <div class="alert wide">{{ templateError() }}</div> }
+      @if (template(); as t) {
+        <p class="alert info wide tpl-info">Filled from template {{ t.name }}. Check the date, amount and reference against the bill before saving.</p>
+        @if (usedLine(); as u) { <p class="warn wide tpl-used">{{ u }}</p> }
+        @for (n of templateNotes(); track $index) { <p class="warn wide">{{ n }}</p> }
+        @if (t.changed_since_last_use && t.last_changed) {
+          <p class="alert info wide">This template was changed on {{ t.last_changed.on | appDate }} by {{ t.last_changed.by?.name }} since it was last used.</p>
+        }
+      }
       <label>Date <input type="date" name="txn_date" [(ngModel)]="m.txn_date" [max]="today" required /></label>
       <label>{{ kind() === 'income' ? 'Received into' : 'Paid from' }}
         <select name="account_id" [(ngModel)]="m.account_id" required>
@@ -47,7 +73,7 @@ interface BranchLimit { id: number; expense_approval_threshold?: string | null }
           @for (c of subs(); track c.id) { <option [ngValue]="c.id">{{ c.name }}</option> }
         </select>
       </label>
-      <label>Amount <input type="number" name="amount" [(ngModel)]="m.amount" (ngModelChange)="amount.set($event)" min="0.01" step="0.01" required /></label>
+      <label>Amount <input #amountInput type="number" name="amount" [(ngModel)]="m.amount" (ngModelChange)="amount.set($event)" min="0.01" step="0.01" required /></label>
       @if (needsApproval()) {
         <!-- AG-064 S2 (display only; the server decides, R2). -->
         <p class="alert info wide ap-hint">Above {{ threshold() | money }}: this expense needs approval before it is posted. Do not pay until it is approved.</p>
@@ -87,6 +113,11 @@ interface BranchLimit { id: number; expense_approval_threshold?: string | null }
         }
         @if (fileError()) { <div class="alert">{{ fileError() }}</div> }
       </div>
+      @if (duplicate(); as d) {
+        <!-- AG-066 R6: soft block; "Save anyway" resends with confirm_duplicate. -->
+        <div class="alert wide tpl-dup">{{ d.message }}
+          <button type="button" class="tpl-save-anyway" [disabled]="busy()" (click)="save(true)">Save anyway</button></div>
+      }
       @if (error()) { <div class="alert wide">{{ error() }}</div> }
       @if (result(); as r) {
         @if (r.failures.length) {
@@ -123,6 +154,22 @@ export class EntryFormComponent implements OnInit {
   });
   private router = inject(Router);
   private route = inject(ActivatedRoute);
+  /** AG-066 S2: the active branch's non-archived templates, the picked one, and its messages. */
+  templates = signal<ExpenseTemplate[]>([]);
+  template = signal<ExpenseTemplate | null>(null);
+  templateNotes = signal<string[]>([]);
+  templateError = signal('');
+  duplicate = signal<Duplicate | null>(null);
+  /** R6: "Already used for November 2026: KDY-EXP-2026-000510 (Posted, 2026-11-20)." */
+  usedLine = computed(() => {
+    const p = this.template()?.this_period;
+    return p?.transactions.length ? `Already used for ${p.label}: ${p.transactions.map(useText).join(', ')}.` : null;
+  });
+  @ViewChild('amountInput') amountInput?: ElementRef<HTMLInputElement>;
+  private loads = 0;
+  private urlTemplate: number | null = null;
+  /** The form values the picked template filled in (review finding 5), null without a template. */
+  private filled: Record<string, unknown> | null = null;
   today = colomboToday();
   accounts = signal<Account[]>([]);
   categories = signal<Category[]>([]);
@@ -142,20 +189,113 @@ export class EntryFormComponent implements OnInit {
   subs = computed(() => this.categories().find(c => c.id === this.parentIdSig())?.children ?? []);
 
   ngOnInit() {
+    const first = this.loads++ === 0;
     if (this.kind() === 'expense') {
       const active = Number(this.auth.activeBranchId());
       this.http.get<BranchLimit[]>('/api/v1/branches').subscribe(b => this.threshold.set(b.find(x => x.id === active)?.expense_approval_threshold ?? null));
     }
+    // AG-066 S2: ?template=<id> picks a template once, when the accounts, categories and templates have loaded.
+    if (first && this.kind() === 'expense') {
+      const id = Number(this.route.snapshot.queryParamMap.get('template') ?? 0);
+      this.urlTemplate = id > 0 ? id : null;
+    }
+    let pending = this.kind() === 'expense' ? 3 : 2;
+    const loaded = () => { if (--pending === 0) this.applyUrlTemplate(); };
     // AG-033 S1 "Record a bank entry": ?account_id= picks the account (when it is offered here).
     const wanted = Number(this.route.snapshot.queryParamMap.get('account_id') ?? 0);
     this.http.get<Account[]>('/api/v1/accounts').subscribe(a => {
       this.accounts.set(a.filter(x => x.status !== 'closed'));
       if (wanted && this.m['account_id'] == null && this.accounts().some(x => x.id === wanted)) this.m['account_id'] = wanted;
-      this.m['account_id'] ??= a[0]?.id;
+      if (!this.template()) this.m['account_id'] ??= a[0]?.id;
+      loaded();
     });
     // Categories spec S2: only parents with at least one active sub-category visible in this branch.
     this.http.get<Category[]>('/api/v1/categories', { params: { type: this.kind() } })
-      .subscribe(c => this.categories.set(c.filter(p => (p.children ?? []).length > 0)));
+      .subscribe(c => { this.categories.set(c.filter(p => (p.children ?? []).length > 0)); loaded(); });
+    if (this.kind() === 'expense') {
+      // The picker lists the active branch's non-archived templates (archived ones are never offered, R10).
+      this.http.get<ExpenseTemplateList>('/api/v1/expense-templates').subscribe({
+        next: r => { this.templates.set((r?.data ?? []).filter(t => !t.archived_at)); loaded(); },
+        error: () => { this.templates.set([]); loaded(); },
+      });
+    }
+  }
+
+  private applyUrlTemplate() {
+    const id = this.urlTemplate;
+    this.urlTemplate = null;
+    if (id === null) return;
+    const t = this.templates().find(x => x.id === id);
+    if (!t) { this.templateError.set('This template cannot be used (archived or not in this branch).'); return; }
+    this.fill(t);
+  }
+
+  /** S2 picker: "- none -" keeps the fields and drops the link; replacing typed values asks first. */
+  pickTemplate(select: HTMLSelectElement) {
+    const id = Number(select.value || 0);
+    const current = this.template();
+    if (!id) { this.clearTemplate(); return; }
+    const t = this.templates().find(x => x.id === id);
+    if (!t) return;
+    if (this.typed() && !confirm('Replace what you typed with the template?')) {
+      select.value = current ? String(current.id) : '';
+      return;
+    }
+    this.fill(t);
+  }
+
+  /**
+   * Something the user typed that a template would replace (review finding 5). Without a template: any amount, payee,
+   * reference, description or category (account, date and method are pre-set, so they do not count). After a template:
+   * only a field that now differs from what that template filled in.
+   */
+  private typed(): boolean {
+    const norm = (v: unknown) => (v === null || v === undefined ? '' : String(v).trim());
+    const base = this.filled;
+    const keys = base ? [...TYPED_KEYS, 'account_id', 'payment_method'] : TYPED_KEYS;
+    return keys.some(k => norm(this.m[k]) !== (base ? norm(base[k]) : ''));
+  }
+
+  /**
+   * R5: account, category, amount (empty when the template has none), payee, payment method and description. Never the
+   * date (kept) or the reference (cleared); files are never copied. An inactive account or category is left empty.
+   */
+  private fill(t: ExpenseTemplate) {
+    this.templateError.set('');
+    this.duplicate.set(null);
+    this.error.set('');
+    this.result.set(null);
+    const notes: string[] = [];
+    const accountOk = t.account.status === 'active' && this.accounts().some(a => a.id === t.account.id);
+    if (!accountOk) notes.push(`The template's account ${t.account.name} is inactive. Choose another account.`);
+    const parent = this.categories().find(c => c.id === t.category.parent_id);
+    const categoryOk = t.category.active && !!parent?.children?.some(c => c.id === t.category.id);
+    if (!categoryOk) notes.push(`The template's category ${t.category.path} is inactive. Choose another category.`);
+    this.parentId = categoryOk ? t.category.parent_id : null;
+    this.m = {
+      ...this.m,
+      account_id: accountOk ? t.account.id : null,
+      category_id: categoryOk ? t.category.id : null,
+      amount: t.amount,
+      payee_payer: t.payee_payer ?? '',
+      // QA D1 / SHOULD 7: a template without a method uses its account's default, as the server compares it.
+      payment_method: t.payment_method ?? defaultPaymentMethod(t.account.type),
+      description: t.description ?? '',
+      reference: '',
+    };
+    this.filled = { ...this.m };
+    // The AG-064 hint and the "Send for approval" button follow the amount signal.
+    this.amount.set(t.amount);
+    this.template.set(t);
+    this.templateNotes.set(notes);
+    if (t.amount === null) setTimeout(() => this.amountInput?.nativeElement.focus());
+  }
+
+  private clearTemplate() {
+    this.filled = null;
+    this.template.set(null);
+    this.templateNotes.set([]);
+    this.duplicate.set(null);
   }
 
   size(n: number) { return fileSize(n); }
@@ -175,12 +315,16 @@ export class EntryFormComponent implements OnInit {
     this.syncLines();
   }
 
-  save() {
+  save(confirmDuplicate = false) {
     if (this.fileError() || this.busy()) return; // double-submit guard (QA Q1): a second click can fire before the button disables
     this.busy.set(true);
     this.error.set('');
     this.result.set(null);
-    this.http.post<SaveResponse>(`/api/v1/${this.kind() === 'income' ? 'incomes' : 'expenses'}`, this.m).subscribe({
+    this.duplicate.set(null);
+    // AG-066: the template is only a link (R5); "Save anyway" confirms a second use in the period (R6).
+    const t = this.kind() === 'expense' ? this.template() : null;
+    const body = t ? { ...this.m, template_id: t.id, ...(confirmDuplicate ? { confirm_duplicate: true } : {}) } : this.m;
+    this.http.post<SaveResponse>(`/api/v1/${this.kind() === 'income' ? 'incomes' : 'expenses'}`, body).subscribe({
       next: async r => {
         // AG-064 S2: the response's status picks the message; the R17 warning follows it (never a block).
         const pending = r.status === 'pending';
@@ -196,10 +340,15 @@ export class EntryFormComponent implements OnInit {
         this.amount.set(null);
         this.files.set([]);
         this.uploads.set([]);
+        this.clearTemplate(); // the template link is cleared after a save (S2)
         this.busy.set(false);
-        this.ngOnInit(); // refresh balances
+        this.ngOnInit(); // refresh balances (and the templates' "this period")
       },
-      error: e => { this.error.set(errorText(e)); this.busy.set(false); },
+      error: e => {
+        if (e?.status === 409 && t) this.duplicate.set({ message: errorText(e) });
+        else this.error.set(errorText(e));
+        this.busy.set(false);
+      },
     });
   }
 

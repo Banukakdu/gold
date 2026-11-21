@@ -40,6 +40,9 @@ class ExpenseApprovals extends ApprovalRequests
 
     public const OWN_REQUEST = 'You recorded this expense. Someone else must approve it.';
 
+    /** AG-066 R7b (accountant sign-off finding A). */
+    public const TEMPLATE_AUTHOR = 'You set up or changed this template since its last approved use. Someone else must approve it.';
+
     public const SUPER_ADMIN_ONLY = "This expense was recorded by a user who manages this branch's users. Only a Super Admin can approve it.";
 
     public const MISSING_PERMISSION = 'Missing permission: expense.approve';
@@ -189,6 +192,20 @@ class ExpenseApprovals extends ApprovalRequests
             || ($managerNow ?? $this->isBranchUserManager((int) $t->created_by, (int) $t->branch_id));
     }
 
+    /**
+     * AG-066 R7b: the approver set up or changed the request's template since its last approved use (the request's
+     * stored `template_authors`). Never for a Super Admin, who may still decide (as the R4b exemption).
+     */
+    public function templateAuthor(Transaction $t, User $user, ?array $stored = null): bool
+    {
+        if ($user->is_super_admin) {
+            return false;
+        }
+        $stored ??= $this->requestAudits([$t->id])[$t->id] ?? [];
+
+        return in_array((int) $user->id, array_map('intval', (array) ($stored['template_authors'] ?? [])), true);
+    }
+
     /** @return array<int, array> the expense.approval_requested audit values by transaction id */
     private function requestAudits(array $ids): array
     {
@@ -307,6 +324,7 @@ class ExpenseApprovals extends ApprovalRequests
         abort_unless($this->isApprover($user, $ctx, (int) $t->branch_id), 403, self::MISSING_PERMISSION);
         abort_if((int) $t->created_by === (int) $user->id, 403, self::OWN_REQUEST);
         abort_if(! $user->is_super_admin && $this->superAdminOnly($t), 403, self::SUPER_ADMIN_ONLY);
+        abort_if($this->templateAuthor($t, $user), 403, self::TEMPLATE_AUTHOR);
         $this->assertPending($t);
 
         return $t;
@@ -323,7 +341,8 @@ class ExpenseApprovals extends ApprovalRequests
     public function canApprove(Transaction $t, User $user): bool
     {
         return $t->approval_status === self::PENDING && $t->type === Transaction::EXPENSE && (int) $t->created_by !== (int) $user->id
-            && $this->isApprover($user, null, (int) $t->branch_id) && ($user->is_super_admin || ! $this->superAdminOnly($t));
+            && $this->isApprover($user, null, (int) $t->branch_id) && ($user->is_super_admin || ! $this->superAdminOnly($t))
+            && ! $this->templateAuthor($t, $user);
     }
 
     public function canCancel(Transaction $t, User $user): bool
@@ -436,7 +455,9 @@ class ExpenseApprovals extends ApprovalRequests
         $mine = (int) $t->created_by === (int) $user->id;
         $superOnly = $this->superAdminOnly($t, $page['audits'][$t->id] ?? [], isset($page['managers'][(int) $t->branch_id][(int) $t->created_by]));
         $u = $t->creator;
-        $decides = $approver && ! $mine && ($user->is_super_admin || ! $superOnly);
+        // AG-066 R7b: the template's author since its last approved use sees the row but cannot decide it.
+        $templateAuthor = $approver && ! $mine && $this->templateAuthor($t, $user, $page['audits'][$t->id] ?? []);
+        $decides = $approver && ! $mine && ($user->is_super_admin || ! $superOnly) && ! $templateAuthor;
 
         return [
             'id' => $t->id,
@@ -461,8 +482,10 @@ class ExpenseApprovals extends ApprovalRequests
             'approver_onboarded_requester' => $decides && $this->onboardedIn($t, $page['onboardings']),
             'requested_period_locked' => $page['locked'][$t->branch_id.':'.$t->requested_date?->format('Y-m')] ?? false,
             'can_approve' => $decides,
+            'template_author' => $templateAuthor,
             'can_cancel' => $mine && $user->canDo('expense.create'),
-        ];
+            // AG-066 R7a (accounting review MUST 2): the template facts as recorded at request.
+        ] + ExpenseTemplates::facts($page['audits'][$t->id] ?? null);
     }
 
     /**

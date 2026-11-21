@@ -5,10 +5,12 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Models\Account;
 use App\Models\AuditLog;
+use App\Models\RecurringTemplate;
 use App\Models\Transaction;
 use App\Models\User;
 use App\Services\BackgroundExports;
 use App\Services\ExpenseApprovals;
+use App\Services\ExpenseTemplates;
 use App\Services\LedgerService;
 use App\Services\TransactionExporter;
 use App\Services\TransactionSearch;
@@ -126,6 +128,18 @@ class TransactionController extends Controller
             && $transaction->creator->status !== 'active');
         $transaction->setAttribute('expires_on', $transaction->approval_status === TransferApprovals::PENDING
             ? TransferApprovals::expiresOn($transaction->requested_on?->format('Y-m-d')) : null);
+        // AG-066 S3 / R11: the template link and what the use's audit row recorded (R7a facts). The template shares the
+        // expense's branch, which the access check above has allowed, so it is read without the scope.
+        $template = $transaction->expense_template_id
+            ? RecurringTemplate::withoutGlobalScopes()->find($transaction->expense_template_id, ['id', 'name', 'archived_at']) : null;
+        $transaction->setAttribute('expense_template', $template
+            ? ['id' => $template->id, 'name' => $template->name, 'archived' => $template->isArchived()] : null);
+        if ($template) {
+            // `template` = {id, name, version} as recorded at use; `expense_template` = the template as it is now.
+            foreach (ExpenseTemplates::facts(ExpenseTemplates::useAudits([$transaction->id])[$transaction->id] ?? null) as $k => $v) {
+                $transaction->setAttribute($k, $v);
+            }
+        }
         $transaction->loadCount(self::attachmentCounts());
         $this->tagAuthors(collect([$transaction]));
         $this->markLegacyVoids(collect([$transaction]));
@@ -180,13 +194,14 @@ class TransactionController extends Controller
 
     public function storeExpense(Request $request)
     {
-        $txn = $this->ledger->incomeOrExpense(Transaction::EXPENSE, $this->validated($request));
+        $txn = $this->ledger->incomeOrExpense(Transaction::EXPENSE, $this->validated($request, expense: true));
         // AG-064 section 5: status pending | posted decides the toast; R2b hold reason; R17 warning (never a block).
         $txn->setAttribute('hold_reason', $txn->holdReason);
         $txn->setAttribute('same_day_total', $txn->sameDayTotal);
         $txn->setAttribute('warning', $txn->requestWarning);
         // QA D3: every 201 carries the approval fields (null when the expense posted at once).
-        foreach (['approval_status', 'requested_date', 'requested_on'] as $key) {
+        // AG-066: expense_template_id too (null without a template).
+        foreach (['approval_status', 'requested_date', 'requested_on', 'expense_template_id'] as $key) {
             if (! array_key_exists($key, $txn->getAttributes())) {
                 $txn->setAttribute($key, null);
             }
@@ -290,9 +305,14 @@ class TransactionController extends Controller
             ->mapWithKeys(fn ($r) => [$r->user_id.':'.$r->branch_id => true])->all();
     }
 
-    private function validated(Request $request): array
+    private function validated(Request $request, bool $expense = false): array
     {
+        // AG-066 QA D2: an income or expense belongs to one branch; a Super Admin in All branches mode only reads
+        // (the shell hides "Record income/expense" there). Transfers keep their own rules (fund-return AC 4).
+        abort_unless(app(BranchContext::class)->isScoped(), 422, ExpenseTemplates::CHOOSE_BRANCH);
         $data = $request->validate([
+            // AG-066 (expense only): the template is a link, never a source of field values (R5).
+            ...($expense ? ['template_id' => 'nullable|integer', 'confirm_duplicate' => 'nullable|boolean'] : []),
             'account_id' => 'required|integer',
             'category_id' => 'required|exists:categories,id',
             'txn_date' => 'required|date_format:Y-m-d|before_or_equal:'.BusinessDate::today(),
@@ -305,6 +325,9 @@ class TransactionController extends Controller
         // account must belong to the active branch (branch scope -> 404 otherwise)
         Account::findOrFail($data['account_id']);
         $data['amount'] = (string) $data['amount'];
+        if ($expense) {
+            $data['confirm_duplicate'] = $request->boolean('confirm_duplicate');
+        }
 
         return $data;
     }

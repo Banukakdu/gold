@@ -22,6 +22,7 @@ import { NotificationBellComponent } from './notification-bell.component';
           @if (auth.can('transaction.view')) { <a routerLink="/transactions" routerLinkActive="on">Transactions</a> }
           @if (!auth.isAllBranches() && auth.can('income.create')) { <a routerLink="/transactions/new/income" routerLinkActive="on">Record income</a> }
           @if (!auth.isAllBranches() && auth.can('expense.create')) { <a routerLink="/transactions/new/expense" routerLinkActive="on">Record expense</a> }
+          @if (auth.can('expense.create') || auth.can('expense.edit')) { <a routerLink="/expense-templates" routerLinkActive="on" class="subnav">Expense templates</a> }
           @if (auth.can('transfer.create')) { <a routerLink="/transfers/new" routerLinkActive="on">Transfer money</a> }
           @if (auth.isSuperAdmin()) { <a routerLink="/allocations/new" routerLinkActive="on">Fund a branch</a> }
           @if (auth.can('account.view')) { <a routerLink="/accounts" routerLinkActive="on">Accounts</a> }
@@ -98,6 +99,9 @@ export class ShellComponent implements OnInit {
       this.router.navigateByUrl('/dashboard');
     } else if (this.router.url.startsWith('/audit-log') && !this.auth.can('audit.view')) {
       // audit.view is per branch: leave if the new branch does not grant it.
+      this.router.navigateByUrl('/dashboard');
+    } else if (this.router.url.startsWith('/expense-templates') && !this.auth.can('expense.create') && !this.auth.can('expense.edit')) {
+      // AG-066: the template keys are per branch; leave if the new branch grants neither.
       this.router.navigateByUrl('/dashboard');
     } else if (this.router.url.startsWith('/categories') && !this.auth.can('category.manage')) {
       // category.manage is per branch: leave if the new branch does not grant it.

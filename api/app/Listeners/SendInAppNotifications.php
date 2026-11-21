@@ -105,7 +105,9 @@ class SendInAppNotifications
             if (! $approvals->superAdminOnly($t)) {
                 $users = $users->concat($this->inApp->holders('expense.approve', (int) $t->branch_id));
             }
-            $users = $this->inApp->eligible($users, $event->userId)->except([(int) $t->created_by]);
+            $users = $this->inApp->eligible($users, $event->userId)->except([(int) $t->created_by])
+                // AG-066 R7b: not to whoever set up or changed the template since its last approved use.
+                ->reject(fn ($u) => $approvals->templateAuthor($t, $u));
             $data = $this->data($t, $t->branch, "{$t->ref_no} needs approval",
                 $this->expenseLine($t).', '.Money::format($t->amount).', requested by '.$this->name($t->created_by));
             foreach ($users as $u) {
