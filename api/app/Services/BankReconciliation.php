@@ -894,6 +894,26 @@ class BankReconciliation
     }
 
     /**
+     * SHOULD 10 (follow-up): sets `last_reconciled_date` (Y-m-d or null) on the bank accounts among $accounts whose
+     * reconciliation the user may see: a Super Admin every branch; anyone else only accounts of the active branch, and
+     * only with `account.view` there (the same accounts the Accounts list shows them). Other accounts get no key, so a
+     * picker or list never reveals another branch's reconciliation. Needs `id`, `type` and `branch_id` on each account.
+     *
+     * @param  iterable<Account|null>  $accounts
+     */
+    public static function attachLastReconciledDates(User $user, iterable $accounts): void
+    {
+        $branchId = app(BranchContext::class)->branchId;
+        $mayView = $user->is_super_admin || ($branchId !== null && $user->canDo('account.view'));
+        $visible = collect($accounts)->filter(fn ($a) => $a instanceof Account && $mayView && $a->type === 'bank'
+            && ($user->is_super_admin || (int) $a->branch_id === (int) $branchId));
+        $dates = self::lastReconciledDates($visible->pluck('id')->unique()->values()->all());
+        foreach ($visible as $a) {
+            $a->setAttribute('last_reconciled_date', $dates[$a->id] ?? null);
+        }
+    }
+
+    /**
      * Runs a read of the reconciliation tables, or returns $none while they do not exist yet: earlier migrations (the
      * double-entry back-fill) post, void and list accounts before AG-033 is migrated (as YearEnd::closedYearOf). Only a
      * missing table is absorbed; any other error is thrown.

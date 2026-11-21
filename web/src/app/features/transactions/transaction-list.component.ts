@@ -15,6 +15,8 @@ import { LockBannerComponent } from '../period-locks/lock-banner.component';
 import { BranchPickerComponent, queuedNotice } from '../reports/report-common';
 import { RECEIPT_TAGS, receiptLabel } from '../../core/receipts';
 import { approvalLabel } from '../../core/approvals';
+import { lateEntryWarnings } from '../../core/reconciliation';
+import { colomboToday } from '../../core/dates';
 
 interface Creator { id: number; name: string; tag: string | null }
 interface AccountOpt { id: number; name: string; status?: string; branch_id: number; branch?: { code: string } }
@@ -672,7 +674,9 @@ export class TransactionListComponent implements OnInit {
   void(t: Transaction) {
     if (this.busy()) return;
     // Controls review finding 10: void is for entries recorded in error only.
-    const reason = prompt(`Void ${t.ref_no}?\n\nUse Void only for an entry recorded in error. For a real refund or return, record a new entry on the day it happens.\n\nReason (required):`);
+    // AG-033 review finding 10: the contra is dated the entry's date, so it is a late entry for a statement on or after it.
+    const late = lateEntryWarnings([t.account], t.txn_date).map(w => `${w}\n\n`).join('');
+    const reason = prompt(`Void ${t.ref_no}?\n\nUse Void only for an entry recorded in error. For a real refund or return, record a new entry on the day it happens.\n\n${late}Reason (required):`);
     if (!reason || this.busy()) return;
     this.busy.set(true);
     this.http.post(`/api/v1/transactions/${t.id}/void`, { reason }).subscribe({
@@ -686,7 +690,9 @@ export class TransactionListComponent implements OnInit {
     const warn = t.receipt_status === 'received'
       ? `${t.to_account?.branch?.code ?? 'The receiving branch'} confirmed receipt on ${this.date(t.received_on ?? '')}. The reversal sends the money back; arrange the physical return.\n\n`
       : '';
-    const reason = prompt(`${warn}Reverse ${t.ref_no}? Enter a reason:`);
+    // AG-033 review finding 10: the reversal posts today on both accounts (not blocking).
+    const late = lateEntryWarnings([t.from_account, t.to_account, t.account], colomboToday()).map(w => `${w}\n\n`).join('');
+    const reason = prompt(`${warn}${late}Reverse ${t.ref_no}? Enter a reason:`);
     if (!reason || this.busy()) return;
     this.busy.set(true);
     this.http.post(`/api/v1/transactions/${t.id}/reverse`, { reason }).subscribe({
