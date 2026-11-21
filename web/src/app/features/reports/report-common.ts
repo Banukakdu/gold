@@ -6,6 +6,7 @@ import { firstValueFrom } from 'rxjs';
 import { AuthService } from '../../core/auth.service';
 import { errorText } from '../../core/api.interceptor';
 import { SettingsService } from '../../core/settings.service';
+import { colomboToday } from '../../core/dates';
 
 export interface ReportBranch { id: number; code: string; name: string; status: string }
 
@@ -29,9 +30,10 @@ export function isoDate(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-export function currentMonth(): { from: string; to: string } {
-  const now = new Date();
-  return { from: isoDate(new Date(now.getFullYear(), now.getMonth(), 1)), to: isoDate(new Date(now.getFullYear(), now.getMonth() + 1, 0)) };
+/** The current Asia/Colombo month (business date, like the API's BusinessDate), not the browser's month. */
+export function currentMonth(today = colomboToday()): { from: string; to: string } {
+  const [y, m] = today.split('-').map(Number);
+  return { from: today.slice(0, 8) + '01', to: isoDate(new Date(y, m, 0)) };
 }
 
 /** Array values become `key[]=a&key[]=b`, as Laravel expects. */

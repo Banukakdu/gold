@@ -5,6 +5,7 @@ import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
 import { errorText } from '../../core/api.interceptor';
+import { colomboToday } from '../../core/dates';
 
 interface Statement {
   account: { name: string; code?: string | null; type: string; branch: { code: string; name: string } };
@@ -52,7 +53,7 @@ export class StatementComponent implements OnInit {
   s = signal<Statement | null>(null);
   msg = signal('');
   private money = new MoneyPipe();
-  to = new Date().toISOString().slice(0, 10);
+  to = colomboToday(); // Asia/Colombo business day, not the UTC date
   from = this.to.slice(0, 8) + '01';
   showVoided = false;
 

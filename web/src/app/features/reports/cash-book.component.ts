@@ -3,12 +3,13 @@ import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
+import { colomboToday } from '../../core/dates';
 import { AppDatePipe } from '../../core/app-date.pipe';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
 import { Account } from '../../core/models';
 import {
   BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, ReportMeta, ReportParams, SignaturesComponent,
-  fieldErrors, isoDate, toHttpParams,
+  fieldErrors, toHttpParams,
   branchDenied, readQuery, reportError, writeQuery,
 } from './report-common';
 
@@ -93,7 +94,7 @@ export class CashBookComponent implements OnInit {
   private http = inject(HttpClient);
   private router = inject(Router);
   private route = inject(ActivatedRoute);
-  f = { from: isoDate(new Date()), to: isoDate(new Date()) };
+  f = { from: colomboToday(), to: colomboToday() }; // Asia/Colombo business day
   branches = signal<number[]>([]);
   accounts = signal<Account[]>([]);
   chosen = signal<number[]>([]);

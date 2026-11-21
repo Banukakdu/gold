@@ -8,6 +8,7 @@ use App\Models\Branch;
 use App\Models\Transaction;
 use App\Services\ReportService;
 use App\Support\BranchContext;
+use App\Support\BusinessDate;
 use App\Support\Money;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -18,8 +19,9 @@ class DashboardController extends Controller
     public function __invoke(Request $request)
     {
         $d = $request->validate(['from' => 'nullable|date', 'to' => 'nullable|date']);
-        $from = $d['from'] ?? now()->startOfMonth()->toDateString();
-        $to = $d['to'] ?? now()->toDateString();
+        // Defaults are Asia/Colombo business days, not the server's UTC date (after 18:30 UTC "today" is tomorrow).
+        $from = $d['from'] ?? BusinessDate::now()->startOfMonth()->toDateString();
+        $to = $d['to'] ?? BusinessDate::today();
         $ctx = app(BranchContext::class);
 
         // Accounting review finding 3: same basis as the reports (R3). Originals (posted or reversed) count on their
@@ -45,7 +47,7 @@ class DashboardController extends Controller
             ->orderByDesc('cents')->limit(5)->get()
             ->map(fn ($r) => ['category' => $r->category, 'total' => Money::fromCents((int) $r->cents)]);
 
-        $months = collect(range(11, 0))->map(fn ($i) => now()->startOfMonth()->subMonths($i));
+        $months = collect(range(11, 0))->map(fn ($i) => BusinessDate::now()->startOfMonth()->subMonths($i));
         $trendRows = $counted()->whereDate('t.txn_date', '>=', $months->first()->toDateString())
             ->selectRaw("COALESCE(o.type, t.type) as etype, t.txn_date, $signed as cents")->get()
             ->groupBy(fn ($t) => substr($t->txn_date, 0, 7));

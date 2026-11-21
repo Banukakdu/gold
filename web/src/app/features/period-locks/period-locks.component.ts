@@ -3,6 +3,7 @@ import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { firstValueFrom } from 'rxjs';
 import { errorText } from '../../core/api.interceptor';
+import { colomboToday } from '../../core/dates';
 import { SettingsService } from '../../core/settings.service';
 import { MoneyPipe } from '../../core/money.pipe';
 import { InTransitInfo, inTransitLine } from '../../core/receipts';
@@ -124,8 +125,8 @@ export function bankReconciliationLines(rows: NonNullable<Review['bank_reconcili
 export class PeriodLocksComponent implements OnInit {
   private http = inject(HttpClient);
   private settings = inject(SettingsService);
-  year = new Date().getFullYear();
-  years = Array.from({ length: 8 }, (_, i) => new Date().getFullYear() - 6 + i);
+  year = Number(colomboToday().slice(0, 4)); // Asia/Colombo business year
+  years = Array.from({ length: 8 }, (_, i) => this.year - 6 + i);
   grid = signal<Grid | null>(null);
   msg = signal('');
   ok = signal('');
