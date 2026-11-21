@@ -2,7 +2,7 @@ import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { Account } from '../../core/models';
-import { lateEntryWarning } from '../../core/reconciliation';
+import { lateEntryWarnings } from '../../core/reconciliation';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe } from '../../core/money.pipe';
 import { errorText } from '../../core/api.interceptor';
@@ -130,9 +130,14 @@ export class TransferFormComponent implements OnInit {
     this.http.get<Account[]>('/api/v1/accounts/destinations').subscribe(a => { this.destinations.set(a); this.dropHiddenTo(); });
   }
 
-  /** AG-033 review finding 10: late-entry warnings for reconciled bank accounts of this branch (never blocking). */
+  /**
+   * AG-033 review finding 10: late-entry warnings for both sides (never blocking). The To account comes from the
+   * destinations list, which carries the date only for accounts the user may see (another branch's: Super Admin only).
+   */
   lateWarnings() {
-    return [this.fromId(), this.toId()].map(id => lateEntryWarning(this.mine().find(a => a.id === id), this.m.txn_date)).filter(Boolean);
+    const from = this.mine().find(a => a.id === this.fromId());
+    const to = this.mine().find(a => a.id === this.toId()) ?? this.destinations().find(a => a.id === this.toId());
+    return lateEntryWarnings([from, to], this.m.txn_date);
   }
 
   /** AG-052 F2: the transfer awaits receipt; toCode names the receiving branch when it is known. */

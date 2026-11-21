@@ -27,21 +27,22 @@ class AccountController extends Controller
 
         $accounts = $q->get();
         // AG-033 SHOULD 10: the last completed reconciliation of each bank account (late-entry warning on the forms).
-        $dates = BankReconciliation::lastReconciledDates($accounts->where('type', 'bank')->pluck('id')->all());
-        foreach ($accounts as $a) {
-            if ($a->type === 'bank') {
-                $a->setAttribute('last_reconciled_date', $dates[$a->id] ?? null);
-            }
-        }
+        BankReconciliation::attachLastReconciledDates($request->user(), $accounts);
 
         return $accounts;
     }
 
-    /** Accounts of every branch, for picking a transfer destination (no balances exposed). */
-    public function destinations()
+    /**
+     * Accounts of every branch, for picking a transfer destination (no balances exposed). AG-033 SHOULD 10: bank
+     * accounts the user may see the reconciliation of carry `last_reconciled_date` (other branches: Super Admin only).
+     */
+    public function destinations(Request $request)
     {
-        return Account::withoutGlobalScopes()->money()->with('branch:id,code,name,is_main')
+        $accounts = Account::withoutGlobalScopes()->money()->with('branch:id,code,name,is_main')
             ->where('status', 'active')->orderBy('branch_id')->get(['id', 'branch_id', 'name', 'type']);
+        BankReconciliation::attachLastReconciledDates($request->user(), $accounts);
+
+        return $accounts;
     }
 
     public function store(Request $request)
