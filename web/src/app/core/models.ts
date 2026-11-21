@@ -63,6 +63,12 @@ export interface Transaction {
   reversal_of_ref?: string | null;
   reversed_by_ref?: string | null;
   reversed_by?: { id: number; ref_no: string } | null;
+  /** AG-052: null = no receipt needed. */
+  receipt_status?: string | null;
+  received_on?: string | null;
+  receipt_note?: string | null;
+  receipt_by?: { id: number; name: string } | null;
+  receipt_at?: string | null;
 }
 
 export interface Page<T> {

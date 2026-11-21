@@ -16,6 +16,7 @@ use App\Http\Controllers\Api\V1\RoleController;
 use App\Http\Controllers\Api\V1\SettingsController;
 use App\Http\Controllers\Api\V1\TransactionController;
 use App\Http\Controllers\Api\V1\TransferController;
+use App\Http\Controllers\Api\V1\TransferReceiptController;
 use App\Http\Controllers\Api\V1\UserController;
 use Illuminate\Support\Facades\Route;
 
@@ -83,6 +84,10 @@ Route::prefix('v1')->group(function () {
             Route::put('transactions/{transaction}', [TransactionController::class, 'update']);
             Route::post('transactions/{transaction}/void', [TransactionController::class, 'void']);
             Route::post('transactions/{transaction}/reverse', [TransferController::class, 'reverse'])->middleware('perm:transfer.reverse');
+            // AG-052 transfer receipt: resolved without the branch scope; the service checks the receiving branch (R4).
+            Route::get('transfer-receipts', [TransferReceiptController::class, 'index'])->middleware('perm:transaction.view');
+            Route::post('transactions/{transactionId}/receipt', [TransferReceiptController::class, 'store'])->whereNumber('transactionId')
+                ->middleware('perm:transfer.acknowledge');
             // AG-062 attachments (docs/specs/attachments.md): evidence on income/expense entries. Remove is a POST
             // action; there is deliberately no DELETE route. {attachment} must belong to {transaction} (404 otherwise).
             Route::scopeBindings()->middleware('perm:transaction.view')->group(function () {

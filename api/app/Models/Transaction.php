@@ -37,7 +37,8 @@ class Transaction extends Model
 
     protected $guarded = ['id'];
 
-    protected $casts = ['txn_date' => 'date:Y-m-d', 'amount' => 'decimal:2', 'approved_at' => 'datetime'];
+    protected $casts = ['txn_date' => 'date:Y-m-d', 'amount' => 'decimal:2', 'approved_at' => 'datetime',
+        'received_on' => 'date:Y-m-d', 'receipt_at' => 'datetime'];
 
     public function entries(): HasMany
     {
@@ -87,6 +88,15 @@ class Transaction extends Model
     public function reversedBy(): HasOne
     {
         return $this->hasOne(self::class, 'reversal_of_id')->withoutGlobalScopes();
+    }
+
+    /**
+     * AG-052: who confirmed receipt or reported the discrepancy. Loaded, it serialises as `receipt_by: {id, name}` in
+     * place of the id (section 5); `$t->receipt_by` still reads the id.
+     */
+    public function receiptBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'receipt_by');
     }
 
     public function creator(): BelongsTo

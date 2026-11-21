@@ -232,3 +232,20 @@ button.att-danger { color: var(--neg); border-color: var(--neg); }
   .bk-l4 button.link { min-height: 44px; min-width: 44px; }
   .filters select { min-height: 44px; }
 }
+
+/* AG-052 S2: Transfers to confirm (ageing: amber 4-7 days, red over 7, with a text tag too). */
+.tr-widget { margin-bottom: 12px; }
+.tr-buckets .kpi small { display: block; color: var(--muted); }
+.tr-buckets .kpi.tr-late { border-color: var(--neg); b { color: var(--neg); } }
+.tr-scroll { overflow-x: auto; }
+tr.tr-amber td { background: #fdf6e6; }
+tr.tr-red td { background: #fbeceb; }
+.tr-note { font-size: 12px; summary { cursor: pointer; color: var(--gold); } }
+.tr-actions { white-space: nowrap; }
+.tr-panel dl { margin: 0; }
+.tr-tag { margin-left: 6px; }
+.tr-check { flex-direction: row !important; gap: 8px; align-items: center; color: var(--ink); }
+@media (max-width: 760px) {
+  .tr-actions { white-space: normal; }
+  .tr-actions button.link { min-height: 44px; display: block; }
+}

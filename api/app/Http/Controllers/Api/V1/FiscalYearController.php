@@ -7,6 +7,7 @@ use App\Models\LedgerEntry;
 use App\Models\Transaction;
 use App\Services\Backups\BackupStatus;
 use App\Services\LedgerService;
+use App\Services\TransferReceipts;
 use App\Services\YearEnd;
 use App\Support\Money;
 use Illuminate\Http\Request;
@@ -29,7 +30,11 @@ class FiscalYearController extends Controller
         abort_unless($this->yearEnd->inList($startYear), 404, 'Unknown fiscal year.');
 
         // AG-093 R15 (backups review F9): information only, it never blocks the close.
-        return $this->yearEnd->preview($this->yearEnd->year($startYear)) + ['backup_warning' => BackupStatus::warning()];
+        $fy = $this->yearEnd->year($startYear);
+
+        // AG-052 R8 / R14: transfers in transit at the year end, every branch. Information only, not a check.
+        return $this->yearEnd->preview($fy) + ['backup_warning' => BackupStatus::warning()]
+            + app(TransferReceipts::class)->inTransitSummary($fy->end());
     }
 
     public function close(Request $request, int $startYear)

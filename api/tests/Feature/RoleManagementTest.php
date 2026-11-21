@@ -115,8 +115,9 @@ class RoleManagementTest extends UsersAndRolesTestCase
         $this->assertEqualsCanonicalizing(PermissionSeeder::PERMISSIONS, $tpl['Branch Admin']->permissionKeys());
         $this->assertEqualsCanonicalizing(['branch.view', 'account.view', 'account.manage', 'transfer.create', 'transfer.reverse', 'transaction.view',
             'income.create', 'income.edit', 'income.void', 'expense.create', 'expense.edit', 'expense.void',
-            'report.dashboard', 'report.view', 'report.export', 'audit.view', 'category.manage'], $tpl['Accountant']->permissionKeys());
-        $this->assertEqualsCanonicalizing(['branch.view', 'account.view', 'transaction.view', 'income.create', 'expense.create', 'report.dashboard'], $tpl['Cashier']->permissionKeys());
+            'report.dashboard', 'report.view', 'report.export', 'audit.view', 'category.manage', 'transfer.acknowledge'], $tpl['Accountant']->permissionKeys());
+        $this->assertEqualsCanonicalizing(['branch.view', 'account.view', 'transaction.view', 'income.create', 'expense.create', 'report.dashboard',
+            'transfer.acknowledge'], $tpl['Cashier']->permissionKeys());
         $this->assertEqualsCanonicalizing(['branch.view', 'account.view', 'transaction.view', 'report.dashboard', 'report.view', 'audit.view'], $tpl['Viewer']->permissionKeys());
         foreach (['Accountant', 'Cashier', 'Viewer'] as $n) {
             $this->assertEmpty(array_filter($tpl[$n]->permissionKeys(), fn ($k) => str_starts_with($k, 'user.') || str_starts_with($k, 'role.')));

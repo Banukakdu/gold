@@ -10,6 +10,7 @@ use App\Models\User;
 use App\Services\LedgerService;
 use App\Services\TransactionExporter;
 use App\Services\TransactionSearch;
+use App\Services\TransferReceipts;
 use App\Services\YearEnd;
 use App\Support\BranchContext;
 use App\Support\BusinessDate;
@@ -24,7 +25,9 @@ class TransactionController extends Controller
     /** Eager loads of the list and the export (R13: no N+1). */
     public const LIST_RELATIONS = ['branch:id,code,name', 'category:id,name,parent_id,is_active', 'category.parent:id,name,is_active',
         'account:id,name,branch_id', 'fromAccount:id,name,branch_id', 'fromAccount.branch:id,code', 'toAccount:id,name,branch_id',
-        'toAccount.branch:id,code', 'creator:id,name,status,is_super_admin', 'reversalOf:id,ref_no', 'reversedBy:id,ref_no,reversal_of_id'];
+        'toAccount.branch:id,code', 'creator:id,name,status,is_super_admin', 'reversalOf:id,ref_no', 'reversedBy:id,ref_no,reversal_of_id',
+        // AG-052: serialises as receipt_by: {id, name}.
+        'receiptBy:id,name'];
 
     public function __construct(private LedgerService $ledger, private TransactionSearch $search) {}
 
@@ -69,7 +72,8 @@ class TransactionController extends Controller
         abort_unless($allowed, 404);
 
         $transaction->load(['entries' => fn ($q) => $q->orderBy('id'), 'entries.account:id,code,name,class,type', 'entries.branch:id,code',
-            'branch', 'category.parent', 'account', 'fromAccount.branch', 'toAccount.branch', 'creator:id,name,status,is_super_admin']);
+            'branch', 'category.parent', 'account', 'fromAccount.branch', 'toAccount.branch', 'creator:id,name,status,is_super_admin',
+            'receiptBy:id,name,is_super_admin']);
         $dr = $cr = 0;
         foreach ($transaction->entries as $e) {
             $dr += Money::toCents($e->debit);
@@ -81,6 +85,11 @@ class TransactionController extends Controller
         $transaction->setAttribute('in_active_branch', ! $ctx->isScoped() || (int) $transaction->branch_id === $ctx->branchId);
         $transaction->setAttribute('backfilled_at', $transaction->entries->firstWhere('origin', 'backfill')?->created_at?->setTimezone('Asia/Colombo')->format('Y-m-d'));
         $transaction->setAttribute('entries_count', $transaction->entries->count());
+        // AG-052 S3: the Receipt panel's buttons and whether its confirm dialog needs a note.
+        $receipts = app(TransferReceipts::class);
+        $transaction->setAttribute('can_acknowledge', $receipts->canAcknowledge($transaction, request()->user()));
+        $transaction->setAttribute('receipt_note_required', $receipts->noteRequired($transaction));
+        $transaction->setAttribute('receipt_discrepancy', $receipts->lastDiscrepancy($transaction));
         $transaction->loadCount(self::attachmentCounts());
         $this->tagAuthors(collect([$transaction]));
         $this->markLegacyVoids(collect([$transaction]));
