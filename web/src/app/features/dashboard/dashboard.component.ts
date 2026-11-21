@@ -5,6 +5,7 @@ import { AuthService } from '../../core/auth.service';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
 import { TransferReceiptsComponent } from './transfer-receipts.component';
 import { TransferApprovalsComponent } from './transfer-approvals.component';
+import { ExpenseApprovalsComponent } from './expense-approvals.component';
 
 interface Dash {
   scope: 'all' | 'branch';
@@ -18,7 +19,7 @@ interface Dash {
 
 @Component({
   standalone: true,
-  imports: [MoneyPipe, AppDatePipe, TransferReceiptsComponent, TransferApprovalsComponent],
+  imports: [MoneyPipe, AppDatePipe, TransferReceiptsComponent, TransferApprovalsComponent, ExpenseApprovalsComponent],
   template: `
     <h1>{{ auth.isAllBranches() ? 'All branches' : auth.activeBranch()?.name }} <small class="muted">this month</small></h1>
     @if (d(); as d) {
@@ -30,7 +31,8 @@ interface Dash {
       </section>
 
       <!-- AG-052 S2: needs transaction.view as well as report.dashboard. -->
-      @if (auth.can('transaction.view')) { <ag-transfer-approvals /> <ag-transfer-receipts /> }
+      <!-- AG-064 S3 / S4: expense approvals next to them. -->
+      @if (auth.can('transaction.view')) { <ag-transfer-approvals /> <ag-expense-approvals /> <ag-transfer-receipts /> }
 
       <section class="grid2">
         <div class="card">

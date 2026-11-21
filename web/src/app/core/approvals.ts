@@ -37,10 +37,22 @@ export interface ApprovalTarget {
   from: string;
   to: string;
   requester_inactive?: boolean;
+  /** AG-064: an expense request (the dialog posts to /expense-approvals and shows the S3 expense lines). */
+  kind?: 'transfer' | 'expense';
+  /** AG-064 MUST 4: with no file the comment is required (10-500) and asks why. */
+  files_count?: number;
+  /** AG-064 S3: the account would go below zero (warn mode only; block mode refuses at approval). */
+  below_zero_line?: string | null;
+  /** AG-064 R4b: the approver brought the requester into the branch. */
+  approver_onboarded_requester?: boolean;
+  /** AG-064 SHOULD 7: the requested month is locked or its year closed now. */
+  requested_period_locked?: boolean;
 }
 
 /**
- * S3 dialogs. Approve: fixed posting date (today, R6), optional comment. Reject: reason 10-500, sent to the requester.
+ * S3 dialogs (AG-051, reused by AG-064 expense approvals with `kind: 'expense'`). Approve: fixed posting date (today,
+ * R6), optional comment (an expense with no file: required, "Why is there no receipt?"). Reject: reason 10-500, sent to
+ * the requester.
  * Errors show the API message; a 422 that is not a field error also tells the host, which reloads. Esc closes it.
  */
 @Component({
@@ -49,13 +61,24 @@ export interface ApprovalTarget {
   imports: [FormsModule, MoneyPipe, AppDatePipe],
   template: `
     <div class="att-backdrop" (click)="cancelled.emit()"></div>
-    <div class="card att-dialog" role="dialog" aria-modal="true" aria-labelledby="ap-title">
+    <div class="card att-dialog ap-dialog" role="dialog" aria-modal="true" aria-labelledby="ap-title">
       @if (mode === 'approve') {
         <h2 id="ap-title">Approve {{ target.ref_no }}</h2>
         <p>Posts {{ target.ref_no }} ({{ target.amount | money }}) from {{ target.from }} to {{ target.to }}. Funds and period locks are checked now.</p>
-        <p class="muted">Posting date: today ({{ today | appDate }}). Requested for {{ target.requested_date | appDate }}.</p>
+        @if (target.requested_period_locked) {
+          <p class="muted">Posting date: today ({{ today | appDate }}). Requested for {{ target.requested_date | appDate }} ({{ monthName(target.requested_date) }} is locked): this posts on today's date.</p>
+        } @else {
+          <p class="muted">Posting date: today ({{ today | appDate }}). Requested for {{ target.requested_date | appDate }}.</p>
+        }
         @if (target.requester_inactive) { <p class="neg">Requester is inactive.</p> }
-        <label>Comment (optional)
+        @if (target.below_zero_line) { <p class="neg">{{ target.below_zero_line }}</p> }
+        @if (target.approver_onboarded_requester) {
+          <p class="alert">You added this requester to the branch. Super Admins will be told of this approval.</p>
+        }
+        @if (isExpense()) {
+          <label class="tr-check"><input type="checkbox" name="paid" [(ngModel)]="paid" style="width:auto" /> The bill was already paid before approval</label>
+        }
+        <label>{{ needsReason() ? 'Why is there no receipt? (10-500 characters)' : 'Comment (optional)' }}
           <textarea rows="3" name="comment" [(ngModel)]="comment" maxlength="500"></textarea>
         </label>
       } @else {
@@ -85,6 +108,8 @@ export class ApprovalDialogComponent implements OnInit {
   private notifications = inject(NotificationsService);
   today = '';
   comment = '';
+  /** AG-064 SHOULD 8 (expense only). */
+  paid = false;
   busy = signal(false);
   error = signal('');
 
@@ -95,18 +120,31 @@ export class ApprovalDialogComponent implements OnInit {
     if (!this.busy()) this.cancelled.emit();
   }
 
+  isExpense(): boolean { return this.target.kind === 'expense'; }
+
+  /** AG-064 MUST 4: approving an expense request with no file needs the reason. */
+  needsReason(): boolean { return this.mode === 'approve' && this.isExpense() && (this.target.files_count ?? 0) === 0; }
+
   valid(): boolean {
     const n = this.comment.trim().length;
-    return this.mode === 'reject' ? n >= 10 && n <= 500 : n <= 500;
+    return this.mode === 'reject' || this.needsReason() ? n >= 10 && n <= 500 : n <= 500;
+  }
+
+  monthName(d: string | null): string {
+    if (!d) return '';
+    const [y, m] = d.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, 1)).toLocaleString('en-GB', { month: 'long', timeZone: 'UTC' });
   }
 
   send() {
     if (this.busy()) return;
     this.busy.set(true);
     this.error.set('');
-    const body: Record<string, string> = {};
+    const body: Record<string, string | boolean> = {};
     if (this.comment.trim()) body['comment'] = this.comment.trim();
-    this.http.post<{ ref_no: string }>(`/api/v1/transfer-approvals/${this.target.id}/${this.mode}`, body).subscribe({
+    if (this.isExpense() && this.mode === 'approve') body['paid_before_approval'] = this.paid;
+    const base = this.isExpense() ? 'expense-approvals' : 'transfer-approvals';
+    this.http.post<{ ref_no: string }>(`/api/v1/${base}/${this.target.id}/${this.mode}`, body).subscribe({
       // AG-094 R9: the user's own action may close or create notifications; refresh the bell's count now.
       next: r => { this.busy.set(false); this.notifications.refreshCount(); this.done.emit(r); },
       error: e => {
@@ -118,18 +156,28 @@ export class ApprovalDialogComponent implements OnInit {
   }
 }
 
-/** AG-051 S8: the pending-approval fields of the Period locks review and the Year-end preview. */
+/** AG-051 / AG-064 S8: the pending-approval fields of the Period locks review and the Year-end preview. */
 export interface PendingApprovalInfo {
   transfers_pending_approval?: number;
   transfers_pending_approval_amount?: string;
+  expenses_pending_approval?: number;
+  expenses_pending_approval_amount?: string;
+  /** Year-end preview only (SHOULD 7): the pending expense requests, oldest first. */
+  expenses_pending_approval_list?: { id: number; ref_no: string; branch: { id: number; code: string }; requested_date: string; amount: string }[];
 }
 
 /** S8 information line ('' when nothing is pending). Never blocking: requests post on their approval date. */
 export function pendingApprovalLine(i: PendingApprovalInfo | null | undefined, period: string, money: (v: string) => string): string {
-  const n = i?.transfers_pending_approval ?? 0;
+  return [
+    pendingLine('transfer', i?.transfers_pending_approval ?? 0, i?.transfers_pending_approval_amount ?? '0', period, money),
+    pendingLine('expense', i?.expenses_pending_approval ?? 0, i?.expenses_pending_approval_amount ?? '0', period, money),
+  ].filter(Boolean).join(' ');
+}
+
+function pendingLine(what: string, n: number, amount: string, period: string, money: (v: string) => string): string {
   if (!n) return '';
   const one = n === 1;
-  return `${n} transfer request${one ? '' : 's'} (${money(i?.transfers_pending_approval_amount ?? '0')}) dated in ${period} `
+  return `${n} ${what} request${one ? '' : 's'} (${money(amount)}) dated in ${period} `
     + `${one ? 'is' : 'are'} still pending approval. ${one ? 'It is' : 'They are'} not in ${period}'s figures and will post on `
     + `${one ? 'its' : 'their'} approval date.`;
 }

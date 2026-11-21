@@ -473,7 +473,17 @@ class ReportExporter
                     }
 
                     return ['title' => $label, 'columns' => [['Code', 'text'], ['Category', 'text'], ['Sub-category', 'text'], ['Amount', 'amount'], ['% of type total', 'percent']], 'rows' => $rows];
-                })->values()->all(),
+                })->values()->concat(($d['pending_approval']['count'] ?? 0) > 0 ? [[
+                    // AG-064 S7: only when something is pending.
+                    'title' => 'Pending approval',
+                    // AG-064 SHOULD 10: the bill date ("Requested for") next to the day it was sent.
+                    'columns' => [['Requested on', 'date'], ['Requested for', 'date'], ['Ref no', 'text'], ['Branch', 'text'], ['Category > Sub-category', 'text'], ['Amount', 'amount']],
+                    'rows' => array_merge(
+                        array_map(fn ($m) => $row([$m['requested_on'], $m['requested_date'], $m['ref_no'], $m['branch']['code'], $m['category_path'], $m['amount']]), $d['pending_approval']['data']),
+                        [$row(["{$d['pending_approval']['count']} pending", '', '', '', '', $d['pending_approval']['amount']], true)],
+                    ),
+                    'notes' => ['Expenses pending approval now (not included above).'],
+                ]] : [])->all(),
 
             'branch-comparison' => [[
                 'title' => 'Branch Comparison',

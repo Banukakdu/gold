@@ -21,6 +21,8 @@ class PermissionSeeder extends Seeder
         'transaction.view',
         'income.create', 'income.edit', 'income.void',
         'expense.create', 'expense.edit', 'expense.void',
+        // AG-064: approve or reject held expenses of the role's own branch (R3). "*" templates only by default (Q11).
+        'expense.approve',
         'category.manage',
         'report.dashboard', 'report.view', 'report.export',
         'audit.view',

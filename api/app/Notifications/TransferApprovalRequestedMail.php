@@ -48,7 +48,7 @@ class TransferApprovalRequestedMail extends Notification implements ShouldQueue
         }
         $state = Transaction::withoutGlobalScopes()->whereKey($this->transactionId)->value('approval_status');
 
-        return $state === TransferApprovals::PENDING && app(InAppNotifications::class)->isApprover($user);
+        return $state === TransferApprovals::PENDING && app(InAppNotifications::class)->isTransferApprover($user);
     }
 
     public function toMail(object $notifiable): MailMessage

@@ -16,6 +16,13 @@ class InAppNotification extends Notification
 
     public const APPROVAL_DECIDED = 'transfer.approval_decided';
 
+    /** AG-064 R11: an expense waits for approval; the requester learns the outcome; an R4b approval is flagged. */
+    public const EXPENSE_APPROVAL_REQUESTED = 'expense.approval_requested';
+
+    public const EXPENSE_APPROVAL_DECIDED = 'expense.approval_decided';
+
+    public const EXPENSE_APPROVAL_FLAGGED = 'expense.approval_flagged';
+
     public const RECEIPT_REQUESTED = 'transfer.receipt_requested';
 
     public const RECEIPT_DISPUTED = 'transfer.receipt_disputed';

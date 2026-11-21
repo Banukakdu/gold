@@ -13,7 +13,7 @@ import {
 } from '../../core/attachments';
 import { LockBannerComponent } from '../period-locks/lock-banner.component';
 import { ReceiptDialogComponent, ReceiptResult, receiptLabel } from '../../core/receipts';
-import { ApprovalDialogComponent, approvalLabel } from '../../core/approvals';
+import { ApprovalDialogComponent, ApprovalTarget, approvalLabel } from '../../core/approvals';
 
 interface Detail {
   id: number; ref_no: string; type: string; status: string; txn_date: string; amount: string;
@@ -54,6 +54,12 @@ interface Detail {
   can_approve?: boolean;
   can_cancel?: boolean;
   requester_inactive?: boolean;
+  /** AG-064 S5 (expense requests). */
+  super_admin_only?: boolean;
+  approver_onboarded_requester?: boolean;
+  requested_period_locked?: boolean;
+  changed_after_approval?: boolean;
+  attachments_count?: number;
 }
 
 interface LedgerLine {
@@ -105,10 +111,12 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
           <h2>Approval</h2>
           @if (approvalOk()) { <div class="ok">{{ approvalOk() }}</div> }
           <dl class="entry-detail">
-            <dt>Status</dt><dd><span class="tag" [attr.data-s]="t.approval_status === 'approved' ? null : 'reversed'">{{ approvalText(t.approval_status) }}</span></dd>
+            <dt>Status</dt><dd><span class="tag" [attr.data-s]="t.approval_status === 'approved' ? null : 'reversed'">{{ approvalText(t.approval_status) }}</span>
+              @if (t.super_admin_only) { <span class="tag" data-s="pending">Super Admin approval</span> }
+              @if (t.changed_after_approval) { <a class="tag" data-s="pending" [routerLink]="['/audit-log']" [queryParams]="{ approval: 'after_approval', ref_no: t.ref_no }">Changed after approval</a> }</dd>
             <dt>Requested on / by</dt><dd>{{ t.requested_on | appDate }} · {{ t.creator?.name }}</dd>
             <dt>Requested for</dt><dd>{{ t.requested_date | appDate }}</dd>
-            <dt>Threshold at request</dt><dd>{{ t.approval_threshold | money }}</dd>
+            <dt>{{ t.type === 'expense' ? 'Limit at request' : 'Threshold at request' }}</dt><dd>{{ t.approval_threshold | money }}</dd>
             @if (t.approval_status === 'pending' && t.expires_on) { <dt>Expires on</dt><dd>{{ t.expires_on | appDate }}</dd> }
             @if (t.decided_at) { <dt>Decided by / at</dt><dd>{{ t.decided_by?.name ?? 'System (expired)' }} · {{ settings.dateTime(t.decided_at) }}</dd> }
             @if (t.approval_status === 'approved') { <dt>Posting date</dt><dd>{{ t.txn_date | appDate }}</dd> }
@@ -126,8 +134,7 @@ const VIEWABLE = ['image/jpeg', 'image/png', 'application/pdf'];
         </div>
         @if (approvalMode(); as mode) {
           <ag-approval-dialog [mode]="mode" (cancelled)="approvalMode.set(null)" (done)="approvalDone($event, mode)" (refused)="reload()"
-            [target]="{ id: t.id, ref_no: t.ref_no, amount: t.amount, requested_date: t.requested_date ?? null, requester_inactive: !!t.requester_inactive,
-              from: (t.from_account?.branch?.code ?? '') + ' · ' + (t.from_account?.name ?? ''), to: (t.to_account?.branch?.code ?? '') + ' · ' + (t.to_account?.name ?? '') }" />
+            [target]="approvalTarget(t)" />
         }
       }
 
@@ -319,10 +326,22 @@ export class TransactionDetailComponent implements OnInit {
     this.reload();
   }
 
+  /** AG-051 / AG-064: the dialog target by kind (expense: account -> category path). */
+  approvalTarget(t: Detail): ApprovalTarget {
+    const base = { id: t.id, ref_no: t.ref_no, amount: t.amount, requested_date: t.requested_date ?? null, requester_inactive: !!t.requester_inactive };
+    if (t.type === 'expense') {
+      const c = t.category;
+      return { ...base, kind: 'expense', from: `${t.branch?.code ?? ''} ${t.account?.name ?? ''}`.trim(),
+        to: c ? (c.parent ? c.parent.name + ' > ' : '') + c.name : '', files_count: t.attachments_count ?? 0,
+        approver_onboarded_requester: !!t.approver_onboarded_requester, requested_period_locked: !!t.requested_period_locked };
+    }
+    return { ...base, from: (t.from_account?.branch?.code ?? '') + ' · ' + (t.from_account?.name ?? ''), to: (t.to_account?.branch?.code ?? '') + ' · ' + (t.to_account?.name ?? '') };
+  }
+
   cancelRequest(t: Detail) {
     const reason = prompt(`Cancel request ${t.ref_no}? Reason (optional):`);
     if (reason === null) return;
-    this.http.post(`/api/v1/transfer-approvals/${t.id}/cancel`, reason.trim() ? { comment: reason.trim() } : {}).subscribe({
+    this.http.post(`/api/v1/${t.type === 'expense' ? 'expense' : 'transfer'}-approvals/${t.id}/cancel`, reason.trim() ? { comment: reason.trim() } : {}).subscribe({
       next: () => { this.approvalOk.set('Request cancelled.'); this.reload(); },
       error: e => { this.msg.set(errorText(e)); this.reload(); },
     });

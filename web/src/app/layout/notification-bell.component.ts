@@ -9,6 +9,9 @@ import { FetchMark, NotificationRow, NotificationsService, badgeText, relativeTi
 export const KIND_ICON: Record<string, string> = {
   'transfer.approval_requested': '?',
   'transfer.approval_decided': '✓',
+  'expense.approval_requested': '?',
+  'expense.approval_decided': '✓',
+  'expense.approval_flagged': '!',
   'transfer.receipt_requested': '⇄',
   'transfer.receipt_disputed': '!',
   'transfer.receipt_settled': '✓',

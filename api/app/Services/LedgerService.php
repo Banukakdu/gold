@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Events\ExpenseApprovalRequested;
 use App\Events\TransferApprovalRequested;
 use App\Events\TransferReceiptRequested;
 use App\Exceptions\LedgerException;
@@ -202,12 +203,16 @@ class LedgerService
      * approval_status = pending (R10). The ref_no is kept. Audit: transfer.approved, then transaction.<type>.
      * The caller (TransferApprovals::approve) has checked who may approve (R3, R4, R9).
      */
-    public function postApproved(Transaction $pending, ?string $comment = null): Transaction
+    public function postApproved(Transaction $pending, ?string $comment = null, array $auditExtra = []): Transaction
     {
-        return DB::transaction(function () use ($pending, $comment) {
+        return DB::transaction(function () use ($pending, $comment, $auditExtra) {
             $t = Transaction::withoutGlobalScopes()->lockForUpdate()->findOrFail($pending->id);
-            if ($t->status !== 'pending' || $t->approval_status !== TransferApprovals::PENDING || ! in_array($t->type, TransferApprovals::TYPES, true)) {
+            $types = [...TransferApprovals::TYPES, ...ExpenseApprovals::TYPES];
+            if ($t->status !== 'pending' || $t->approval_status !== TransferApprovals::PENDING || ! in_array($t->type, $types, true)) {
                 throw new LedgerException(TransferApprovals::CHANGED);
+            }
+            if ($t->type === Transaction::EXPENSE) {
+                return $this->postApprovedExpense($t, $comment, $auditExtra);
             }
             $date = BusinessDate::today();
             $from = $this->moneyAccount((int) $t->from_account_id);
@@ -271,13 +276,7 @@ class LedgerService
         return DB::transaction(function () use ($type, $data) {
             $acc = $this->moneyAccount((int) $data['account_id']);
             $cat = Category::findOrFail($data['category_id']);
-            // Categories spec R6: the category and its parent must be active (new money only, finding 4).
-            if ($cat->type !== $type || ! $cat->isEffectivelyActive()) {
-                throw new LedgerException("Category must be an active {$type} category.");
-            }
-            if ($cat->branch_id && $cat->branch_id !== $acc->branch_id) {
-                throw new LedgerException('Category belongs to another branch.');
-            }
+            $this->assertEntryCategory($type, $cat, $acc);
             [$lines, $locked] = $this->prepare($this->rules->incomeExpense($type, $acc->id, $acc->branch_id, $cat->id, Money::toCents($data['amount'])), $data['txn_date']);
             $acc = $locked[$acc->id];
             if ($acc->status !== 'active') {
@@ -287,6 +286,16 @@ class LedgerService
             // R10: expense_negative_balance applies to the money account only.
             if ($type === Transaction::EXPENSE && app(Settings::class)->expenseNegativeBalance() === 'block') {
                 $this->assertFunds($acc, $data['amount']);
+            }
+
+            // AG-064 R2 / R2b / R5: above the branch's limit a non-Super-Admin's expense waits for approval. Every check
+            // above has run; the request posts nothing.
+            $rule = null;
+            if ($type === Transaction::EXPENSE) {
+                $rule = app(ExpenseApprovals::class)->rule(auth()->user(), $acc, $cat->id, $data['txn_date'], Money::toCents($data['amount']));
+                if ($rule['decision'] === ExpenseApprovals::HOLD) {
+                    return $this->expenseRequest($acc, $cat, $data, $rule);
+                }
             }
 
             $txn = $this->newTxn($type, $acc->branch_id, $data['txn_date'], $data['amount'], [
@@ -299,8 +308,119 @@ class LedgerService
             ]);
             $this->post($txn, $lines);
 
-            return $this->finish($txn);
+            // AG-064 R2b compensating control: a Super Admin's expense above a set limit is flagged in the audit.
+            return $this->finish($txn, ($rule['decision'] ?? null) === ExpenseApprovals::NOT_REQUIRED_SUPER_ADMIN ? ['approval' => $rule['decision']] : []);
         }, self::ATTEMPTS);
+    }
+
+    /** Categories spec R6 (the category and its parent active, of the entry's type) and the branch rule. */
+    private function assertEntryCategory(string $type, Category $cat, Account $acc): void
+    {
+        // Categories spec R6: the category and its parent must be active (new money only, finding 4).
+        if ($cat->type !== $type || ! $cat->isEffectivelyActive()) {
+            throw new LedgerException("Category must be an active {$type} category.");
+        }
+        if ($cat->branch_id && $cat->branch_id !== $acc->branch_id) {
+            throw new LedgerException('Category belongs to another branch.');
+        }
+    }
+
+    /**
+     * AG-064 R5: the pending expense request. A `transactions` row with status pending and no ledger lines, every entry
+     * field kept, the ref_no of the requested date's year. The account is locked by the caller, so the pending total read
+     * here (R17 warning) is consistent with the balance.
+     *
+     * @param  array{decision: ?string, reason: ?string, threshold: ?int, same_day: int}  $rule
+     */
+    private function expenseRequest(Account $acc, Category $cat, array $data, array $rule): Transaction
+    {
+        $approvals = app(ExpenseApprovals::class);
+        $other = $approvals->pendingOnAccount($acc->id, current: true);
+        $superAdminOnly = $approvals->isBranchUserManager((int) auth()->id(), (int) $acc->branch_id);
+        $txn = $this->newTxn(Transaction::EXPENSE, $acc->branch_id, $data['txn_date'], $data['amount'], [
+            'account_id' => $acc->id,
+            'category_id' => $cat->id,
+            'payee_payer' => $data['payee_payer'] ?? null,
+            'payment_method' => $data['payment_method'] ?? null,
+            'reference' => $data['reference'] ?? null,
+            'description' => $data['description'] ?? null,
+            'status' => 'pending',
+            'approval_status' => ExpenseApprovals::PENDING,
+            'requested_date' => $data['txn_date'],
+            'requested_on' => BusinessDate::today(),
+            'approval_threshold' => Money::fromCents((int) $rule['threshold']),
+        ]);
+        $txn->ref_no = $this->refNo($txn);
+        $txn->save();
+        AuditLog::record('expense.approval_requested', $txn, null, [
+            'ref_no' => $txn->ref_no, 'amount' => Money::add($data['amount']), 'requested_date' => $data['txn_date'],
+            'requested_on' => BusinessDate::today(), 'account_id' => $acc->id, 'category_id' => $cat->id,
+            'threshold' => Money::fromCents((int) $rule['threshold']), 'hold_reason' => $rule['reason'],
+            'same_day_total' => Money::fromCents($rule['same_day']), 'super_admin_only' => $superAdminOnly,
+            'other_pending_from_account' => Money::fromCents($other), 'files_count' => 0, 'status' => 'pending',
+        ]);
+        $id = $txn->id;
+        $userId = auth()->id();
+        DB::afterCommit(fn () => ExpenseApprovalRequested::dispatch($id, $userId));
+
+        $txn = $txn->fresh();
+        $txn->requestWarning = ExpenseApprovals::overCommitWarning((string) $acc->current_balance, (string) $data['amount'], $other);
+        $txn->holdReason = $rule['reason'];
+        $txn->sameDayTotal = $rule['reason'] === ExpenseApprovals::SAME_DAY_TOTAL ? Money::fromCents($rule['same_day']) : null;
+
+        return $txn;
+    }
+
+    /**
+     * AG-064 R5 / R6: post an approved expense request on the approval date against the current balance and the current
+     * category, account and branch state, with every check of incomeOrExpense repeated. Lines Dr the category's expense
+     * account, Cr the money account; the ref_no is kept. Audit: expense.approved, then transaction.expense. The row is
+     * already locked by postApproved; the caller (ExpenseApprovals::approve) has checked who may approve (R3, R4, R4a, R9).
+     */
+    private function postApprovedExpense(Transaction $t, ?string $comment, array $auditExtra): Transaction
+    {
+        $date = BusinessDate::today();
+        $acc = $this->moneyAccount((int) $t->account_id);
+        $cat = Category::find($t->category_id);
+        if (! $cat) {
+            throw new LedgerException('Category must be an active expense category.');
+        }
+        $this->assertEntryCategory(Transaction::EXPENSE, $cat, $acc);
+        $amount = Money::add($t->amount);
+        [$lines, $locked] = $this->prepare($this->rules->incomeExpense(Transaction::EXPENSE, $acc->id, $acc->branch_id, $cat->id, Money::toCents($amount)), $date);
+        $acc = $locked[$acc->id];
+        // R15: an account or branch deactivated while the request waited.
+        if ($acc->status !== 'active') {
+            throw new LedgerException('Account is inactive.');
+        }
+        if ($acc->branch->status !== 'active') {
+            throw new LedgerException("Branch {$acc->branch->code} is inactive.");
+        }
+        $this->assertOpenFor($lines);
+        $availableBefore = Money::add($acc->current_balance);
+        if (app(Settings::class)->expenseNegativeBalance() === 'block') {
+            $this->assertFunds($acc, $amount);
+        }
+
+        $now = now();
+        $done = Transaction::withoutGlobalScopes()->whereKey($t->id)->where('approval_status', ExpenseApprovals::PENDING)->update([
+            'status' => 'posted', 'approval_status' => ExpenseApprovals::APPROVED, 'txn_date' => $date, 'approval_note' => $comment,
+            'decided_by' => auth()->id(), 'decided_at' => $now, 'approved_by' => auth()->id(), 'approved_at' => $now, 'updated_at' => $now,
+        ]);
+        if ($done !== 1) {
+            throw new LedgerException(ExpenseApprovals::CHANGED);
+        }
+        $t->refresh();
+        $ctx = app(BranchContext::class);
+        AuditLog::record('expense.approved', $t, ['approval_status' => ExpenseApprovals::PENDING], [
+            'approval_status' => ExpenseApprovals::APPROVED, 'posting_date' => $date, 'requested_date' => $t->requested_date?->format('Y-m-d'),
+            'comment' => $comment, 'all_branches' => ! $ctx->isScoped(),
+            'approver_branch' => $ctx->isScoped() ? Branch::whereKey($ctx->branchId)->value('code') : 'all',
+            'available_before' => $availableBefore, 'ref_no' => $t->ref_no,
+        ] + $auditExtra);
+        $this->post($t, $lines);
+
+        return $this->finish($t, keepRef: true);
     }
 
     /**
@@ -344,7 +464,7 @@ class LedgerService
             AuditLog::record('transaction.reclassified', $txn, ['category_id' => $old], [
                 'old_category_id' => $old, 'new_category_id' => $new->id, 'amount' => $amount, 'line_ids' => $ids,
                 'ref_no' => $txn->ref_no, 'self' => (int) $txn->created_by === (int) auth()->id(),
-            ]);
+            ] + ($txn->approval_status === ExpenseApprovals::APPROVED ? ['after_approval' => true] : []));
 
             return $ids;
         }, self::ATTEMPTS);

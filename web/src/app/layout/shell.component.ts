@@ -64,7 +64,7 @@ import { NotificationBellComponent } from './notification-bell.component';
           <!-- Re-create the page whenever the active branch changes so it refetches its data -->
           @for (k of [auth.activeBranchId()]; track k) { <router-outlet /> }
         </main>
-        <div class="toast" role="status" aria-live="polite">@if (toast.text()) { <span>{{ toast.text() }}</span> }</div>
+        <div class="toast" role="status" aria-live="polite">@if (toast.text()) { <span [class.toast-warn]="toast.kind() === 'warning'">{{ toast.text() }}</span> }</div>
       </div>
     </div>
   `,

@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\LedgerEntry;
 use App\Models\Transaction;
 use App\Services\Backups\BackupStatus;
+use App\Services\ExpenseApprovals;
 use App\Services\LedgerService;
 use App\Services\TransferApprovals;
 use App\Services\TransferReceipts;
@@ -37,7 +38,11 @@ class FiscalYearController extends Controller
         return $this->yearEnd->preview($fy) + ['backup_warning' => BackupStatus::warning()]
             + app(TransferReceipts::class)->inTransitSummary($fy->end())
             // AG-051 finding 15: requests dated in the year and still pending; information only.
-            + app(TransferApprovals::class)->pendingSummary($fy->start(), $fy->end());
+            + app(TransferApprovals::class)->pendingSummary($fy->start(), $fy->end())
+            // AG-064 S8 / SHOULD 7: expense requests dated in the year, with the list so they can be decided before
+            // closing. Information only; the close is not refused because of them.
+            + app(ExpenseApprovals::class)->pendingSummary($fy->start(), $fy->end())
+            + ['expenses_pending_approval_list' => app(ExpenseApprovals::class)->pendingRows($fy->start(), $fy->end())['data']];
     }
 
     public function close(Request $request, int $startYear)

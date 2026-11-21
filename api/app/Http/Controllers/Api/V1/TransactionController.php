@@ -8,6 +8,7 @@ use App\Models\AuditLog;
 use App\Models\Transaction;
 use App\Models\User;
 use App\Services\BackgroundExports;
+use App\Services\ExpenseApprovals;
 use App\Services\LedgerService;
 use App\Services\TransactionExporter;
 use App\Services\TransactionSearch;
@@ -79,6 +80,7 @@ class TransactionController extends Controller
         $allowed = $transaction && (! $ctx->isScoped() || (int) $transaction->branch_id === $ctx->branchId
             || $transaction->entries()->where('branch_id', $ctx->branchId)->exists()
             || ($transaction->approval_status !== null && in_array($transaction->status, ['pending', 'rejected'], true)
+                && in_array($transaction->type, TransferApprovals::TYPES, true)
                 && ((int) $transaction->related_branch_id === $ctx->branchId || $approvals->isApprover(request()->user(), $ctx))));
         abort_unless($allowed, 404);
 
@@ -101,9 +103,24 @@ class TransactionController extends Controller
         $transaction->setAttribute('can_acknowledge', $receipts->canAcknowledge($transaction, request()->user()));
         $transaction->setAttribute('receipt_note_required', $receipts->noteRequired($transaction));
         $transaction->setAttribute('receipt_discrepancy', $receipts->lastDiscrepancy($transaction));
-        // AG-051 S5: the Approval panel's buttons.
-        $transaction->setAttribute('can_approve', $approvals->canApprove($transaction, request()->user()));
-        $transaction->setAttribute('can_cancel', $approvals->canCancel($transaction, request()->user()));
+        // AG-051 / AG-064 S5: the Approval panel's buttons, by the kind of request.
+        $user = request()->user();
+        $expenses = app(ExpenseApprovals::class);
+        $isExpense = $transaction->type === Transaction::EXPENSE;
+        $transaction->setAttribute('can_approve', $isExpense ? $expenses->canApprove($transaction, $user) : $approvals->canApprove($transaction, $user));
+        $transaction->setAttribute('can_cancel', $isExpense ? $expenses->canCancel($transaction, $user) : $approvals->canCancel($transaction, $user));
+        if ($isExpense && $transaction->approval_status !== null) {
+            // AG-064 S3 / S5: what the approve dialog needs (R4a, R4b, MUST 4, SHOULD 7) and R21 "Changed after approval".
+            $pending = $transaction->approval_status === ExpenseApprovals::PENDING;
+            $superOnly = $pending && $expenses->superAdminOnly($transaction);
+            $transaction->setAttribute('super_admin_only', $superOnly);
+            $transaction->setAttribute('approver_onboarded_requester', $pending && $transaction->getAttribute('can_approve')
+                && $expenses->onboardedRequester($transaction, $user));
+            $transaction->setAttribute('requested_period_locked', $pending && $expenses->requestedPeriodLocked($transaction));
+            $transaction->setAttribute('changed_after_approval', AuditLog::where('auditable_type', Transaction::class)
+                ->where('auditable_id', $transaction->id)->whereIn('event', ['transaction.updated', 'transaction.reclassified'])
+                ->where('new_values->after_approval', true)->exists());
+        }
         // QA B2: the approve dialog says "Requester is inactive" here too (S5 "buttons as S3").
         $transaction->setAttribute('requester_inactive', $transaction->approval_status !== null && $transaction->creator !== null
             && $transaction->creator->status !== 'active');
@@ -163,7 +180,19 @@ class TransactionController extends Controller
 
     public function storeExpense(Request $request)
     {
-        return response()->json($this->ledger->incomeOrExpense(Transaction::EXPENSE, $this->validated($request)), 201);
+        $txn = $this->ledger->incomeOrExpense(Transaction::EXPENSE, $this->validated($request));
+        // AG-064 section 5: status pending | posted decides the toast; R2b hold reason; R17 warning (never a block).
+        $txn->setAttribute('hold_reason', $txn->holdReason);
+        $txn->setAttribute('same_day_total', $txn->sameDayTotal);
+        $txn->setAttribute('warning', $txn->requestWarning);
+        // QA D3: every 201 carries the approval fields (null when the expense posted at once).
+        foreach (['approval_status', 'requested_date', 'requested_on'] as $key) {
+            if (! array_key_exists($key, $txn->getAttributes())) {
+                $txn->setAttribute($key, null);
+            }
+        }
+
+        return response()->json($txn, 201);
     }
 
     /** AG-063: edit descriptive fields (amount/account changes = void and re-enter, keeps the ledger simple and auditable). */
@@ -198,7 +227,9 @@ class TransactionController extends Controller
             if ($fields) {
                 $old = $transaction->only(array_keys($fields));
                 $transaction->update($fields);
-                AuditLog::record('transaction.updated', $transaction, $old, $fields);
+                // AG-064 R21 (SHOULD 9): a change to an approved expense is flagged for the Audit log `approval` filter.
+                AuditLog::record('transaction.updated', $transaction, $old,
+                    $fields + ($transaction->approval_status === ExpenseApprovals::APPROVED ? ['after_approval' => true] : []));
             }
             // Double-entry R3 / finding 4: a category change is a reclassification posted by LedgerService
             // (audit transaction.reclassified); the same category posts nothing.

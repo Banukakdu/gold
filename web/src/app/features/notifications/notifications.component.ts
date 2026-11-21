@@ -61,7 +61,7 @@ import { kindIcon } from '../../layout/notification-bell.component';
       <div class="card">
         <label class="nt-check">
           <input type="checkbox" [checked]="prefs()!.approval_request_email" [disabled]="saving()" (change)="savePref($any($event.target))" />
-          Email me when a transfer needs my approval
+          Email me when a transfer or expense needs my approval
         </label>
         <p class="muted small">Emails about your own requests and exports are sent as before.</p>
         @if (prefError()) { <div class="alert">{{ prefError() }}</div> }

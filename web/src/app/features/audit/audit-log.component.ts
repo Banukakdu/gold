@@ -1,6 +1,7 @@
 import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
+import { ActivatedRoute } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 import { AuthService } from '../../core/auth.service';
 import { errorText } from '../../core/api.interceptor';
@@ -48,8 +49,10 @@ function show(v: unknown): string {
       </select>
       <label><input type="checkbox" name="self" [(ngModel)]="f.self" style="width:auto" /> Self only</label>
       <!-- AG-051 accounting review finding 6 -->
-      <label title="Super Admin branch transfers and fund returns above the approval threshold, posted without approval">
-        <input type="checkbox" name="unapproved" [(ngModel)]="f.unapproved" style="width:auto" /> Super Admin, not held for approval</label>
+      <!-- AG-051 / AG-064 R12: approval flags. -->
+      <select name="approval" [(ngModel)]="f.approval" aria-label="Approval">
+        @for (a of approvals; track a[0]) { <option [value]="a[0]">{{ a[1] }}</option> }
+      </select>
       <input name="ref_no" placeholder="Ref no (exact)" [(ngModel)]="f.ref_no" />
       @if (auth.isAllBranches()) {
         <span class="picker-inline">
@@ -120,10 +123,13 @@ function show(v: unknown): string {
 export class AuditLogComponent implements OnInit {
   auth = inject(AuthService);
   private http = inject(HttpClient);
+  private route = inject(ActivatedRoute);
   groups: [string, string][] = [['', 'All events'], ['transactions', 'Transactions'], ['voids', 'Voids and reversals'], ['users', 'Users'],
     ['roles', 'Roles'], ['accounts', 'Accounts'], ['branches', 'Branches'], ['periods', 'Period locks'], ['reports', 'Reports'], ['logins', 'Logins'],
     ['attachments', 'Attachments'], ['settings', 'Settings'], ['year_end', 'Year-end'], ['categories', 'Categories'], ['backups', 'Backups']];
-  f = { from: colomboToday().slice(0, 8) + '01', to: colomboToday(), event_group: '', user_id: '', self: false, ref_no: '', unapproved: false };
+  f = { from: colomboToday().slice(0, 8) + '01', to: colomboToday(), event_group: '', user_id: '', self: false, ref_no: '', approval: '' };
+  approvals: [string, string][] = [['', 'Any approval'], ['not_required_super_admin', 'Super Admin, not held for approval'],
+    ['approver_onboarded_requester', 'Approved by the person who added the requester'], ['after_approval', 'Changed after approval']];
   branches: string[] = [];
   page = signal<AuditPage | null>(null);
   actors = signal<Actor[]>([]);
@@ -153,6 +159,10 @@ export class AuditLogComponent implements OnInit {
   });
 
   ngOnInit() {
+    // AG-064 S5: "Changed after approval" links here with ?approval=after_approval&ref_no=...
+    const q = this.route.snapshot.queryParamMap;
+    if (this.approvals.some(a => a[0] === q.get('approval'))) this.f.approval = q.get('approval')!;
+    if (q.get('ref_no')) this.f.ref_no = q.get('ref_no')!;
     this.load(1);
     this.http.get<Actor[]>('/api/v1/audit-logs/actors').subscribe({ next: a => this.actors.set(a), error: () => this.actors.set([]) });
     if (this.auth.isAllBranches()) {
@@ -164,7 +174,7 @@ export class AuditLogComponent implements OnInit {
   private params(): ReportParams {
     return { from: this.f.from, to: this.f.to, event_group: this.f.event_group, user_id: this.f.user_id, self: this.f.self ? 1 : '',
       ref_no: this.f.ref_no.trim(), branches: this.auth.isAllBranches() ? this.branches : [],
-      approval: this.f.unapproved ? 'not_required_super_admin' : '' };
+      approval: this.f.approval };
   }
 
   toggleBranch(id: string) {

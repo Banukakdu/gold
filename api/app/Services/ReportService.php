@@ -267,6 +267,10 @@ class ReportService
         $out['net'] = $p->extra['type'] === 'all'
             ? Money::fromCents(Money::toCents($out['income']['total']) - Money::toCents($out['expense']['total']))
             : null;
+        // AG-064 S7: expense requests pending NOW, dated <= To, in the branch scope; not in the figures above.
+        $out['pending_approval'] = in_array(Transaction::EXPENSE, $types, true) && Schema::hasColumn('transactions', 'approval_status')
+            ? app(ExpenseApprovals::class)->pendingRows(null, $p->to, $p->branchIds())
+            : ['data' => [], 'count' => 0, 'amount' => '0.00'];
 
         return $out;
     }

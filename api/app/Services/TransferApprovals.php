@@ -3,7 +3,6 @@
 namespace App\Services;
 
 use App\Events\TransferApprovalDecided;
-use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\Transaction;
 use App\Models\User;
@@ -23,63 +22,28 @@ use Illuminate\Support\Facades\DB;
  * columns and audit rows of reject, cancel and expiry; approval posts through LedgerService::postApproved (the only
  * writer of ledger lines and balances), which LedgerService::transfer also consults (rule()) when a request is made.
  */
-class TransferApprovals
+class TransferApprovals extends ApprovalRequests
 {
     /** R2: only these types are ever held. */
     public const TYPES = [Transaction::BRANCH_TRANSFER, Transaction::FUND_RETURN];
-
-    public const PENDING = 'pending';
-
-    public const APPROVED = 'approved';
-
-    public const REJECTED = 'rejected';
-
-    public const CANCELLED = 'cancelled';
-
-    public const EXPIRED = 'expired';
-
-    /** R1 labels. A null approval_status is "Not required". */
-    public const LABELS = [
-        self::PENDING => 'Pending approval',
-        self::APPROVED => 'Approved',
-        self::REJECTED => 'Rejected',
-        self::CANCELLED => 'Cancelled by requester',
-        self::EXPIRED => 'Expired',
-    ];
-
-    public const NOT_REQUIRED = 'Not required';
-
-    /** R1: final states that never posted (transactions.status = rejected). */
-    public const CLOSED = [self::REJECTED, self::CANCELLED, self::EXPIRED];
-
-    /** R8 */
-    public const EXPIRY_DAYS = 30;
-
-    public const WIDGET_ROWS = 50;
-
-    /** R16: the window of the "posted below threshold" line, today included. */
-    public const BELOW_DAYS = 7;
-
-    /** R2 results. */
-    public const HOLD = 'hold';
-
-    public const NOT_REQUIRED_SUPER_ADMIN = 'not_required_super_admin';
-
-    public const NOT_WAITING = 'This entry is not waiting for approval.';
 
     public const BY_MAIN = 'Transfers are approved by Main.';
 
     public const OWN_REQUEST = 'You requested this transfer. Someone else in Main must approve it.';
 
-    public const CANCEL_OTHER = 'Only the requester can cancel this request.';
-
-    public const REJECT_COMMENT = 'Give the reason, sent to the requester (10 to 500 characters).';
-
-    public const CHANGED = 'This request was changed by someone else. Reload and try again.';
-
-    public static function label(?string $state): string
+    public function types(): array
     {
-        return self::LABELS[$state] ?? self::NOT_REQUIRED;
+        return self::TYPES;
+    }
+
+    protected function auditPrefix(): string
+    {
+        return 'transfer';
+    }
+
+    protected function dispatchDecided(int $transactionId, string $state, ?int $userId): void
+    {
+        TransferApprovalDecided::dispatch($transactionId, $state, $userId);
     }
 
     // ------------------------------------------------------------------ R2 / R17 (called by LedgerService::transfer)
@@ -104,7 +68,7 @@ class TransferApprovals
      */
     public function pendingFromAccount(int $accountId, ?int $exceptId = null, bool $current = false): int
     {
-        return (int) DB::table('transactions')->where('approval_status', self::PENDING)->where('from_account_id', $accountId)
+        return (int) DB::table('transactions')->where('approval_status', self::PENDING)->whereIn('type', self::TYPES)->where('from_account_id', $accountId)
             ->when($exceptId, fn ($q, $id) => $q->where('id', '!=', $id))
             ->when($current, fn ($q) => $q->sharedLock())
             ->selectRaw('COALESCE(SUM('.Money::sqlCents('amount').'), 0) as c')->value('c');
@@ -117,7 +81,7 @@ class TransferApprovals
      */
     private function pendingByAccount(array $accountIds): array
     {
-        return DB::table('transactions')->where('approval_status', self::PENDING)->whereIn('from_account_id', $accountIds ?: [0])
+        return DB::table('transactions')->where('approval_status', self::PENDING)->whereIn('type', self::TYPES)->whereIn('from_account_id', $accountIds ?: [0])
             ->groupBy('from_account_id')->selectRaw('from_account_id, COALESCE(SUM('.Money::sqlCents('amount').'), 0) as c')
             ->pluck('c', 'from_account_id')->map(fn ($v) => (int) $v)->all();
     }
@@ -170,50 +134,18 @@ class TransferApprovals
         }, LedgerService::ATTEMPTS);
     }
 
-    /** POST /transfer-approvals/{id}/cancel (R7): only the requester. */
-    public function cancel(int $id, array $input, User $user): Transaction
-    {
-        return DB::transaction(function () use ($id, $input, $user) {
-            $ctx = app(BranchContext::class);
-            $t = Transaction::withoutGlobalScopes()->lockForUpdate()->find($id);
-            abort_unless($t && $this->visible($t, $user, $ctx), 404);
-            abort_if($t->approval_status === null, 422, self::NOT_WAITING);
-            abort_if((int) $t->created_by !== (int) $user->id, 403, self::CANCEL_OTHER);
-            $this->assertPending($t);
-            $comment = $this->comment($input, required: false);
-
-            return $this->close($t, self::CANCELLED, $comment, $user->id, 'transfer.approval_cancelled');
-        }, LedgerService::ATTEMPTS);
-    }
-
     /** R9 items 1-4 for approve / reject, with the row locked FOR UPDATE (R10). */
     private function lockedForDecision(int $id, User $user): Transaction
     {
         $ctx = app(BranchContext::class);
         $t = Transaction::withoutGlobalScopes()->lockForUpdate()->find($id);
         abort_unless($t && $this->visible($t, $user, $ctx), 404);
-        abort_if($t->approval_status === null, 422, self::NOT_WAITING);
+        abort_unless($this->isRequest($t), 422, self::NOT_WAITING);
         abort_unless($this->isApprover($user, $ctx), 403, self::BY_MAIN);
         abort_if((int) $t->created_by === (int) $user->id, 403, self::OWN_REQUEST);
         $this->assertPending($t);
 
         return $t;
-    }
-
-    /** R9 item 4: "This request was already ...". */
-    private function assertPending(Transaction $t): void
-    {
-        if ($t->approval_status === self::PENDING) {
-            return;
-        }
-        $on = $t->decided_at?->copy()->setTimezone(BusinessDate::timezone())->format('Y-m-d') ?? '';
-        $by = $t->decided_by ? (User::find($t->decided_by)?->name ?? 'another user') : 'another user';
-        abort(422, 'This request was already '.match ($t->approval_status) {
-            self::APPROVED => "approved by {$by} on {$on}",
-            self::REJECTED => "rejected by {$by} on {$on}",
-            self::CANCELLED => "cancelled by the requester on {$on}",
-            default => "expired on {$on}",
-        }.'.');
     }
 
     /** 404 unless the row is one this user may see in this mode: own branch (either side), or Main's approver (R3). */
@@ -224,75 +156,10 @@ class TransferApprovals
             return $ctx->allBranches;
         }
 
+        // Main's approver sees other branches' transfer requests only; another kind of row of another branch is a 404
+        // (AG-064 review 7: no existence leak through the transfer routes).
         return (int) $t->branch_id === $ctx->branchId || (int) $t->related_branch_id === $ctx->branchId
-            || $this->isApprover($user, $ctx);
-    }
-
-    private function comment(array $input, bool $required): ?string
-    {
-        $v = $input['comment'] ?? null;
-        $input['comment'] = is_string($v) ? (trim($v) === '' ? null : trim($v)) : $v;
-        $rules = ['comment' => $required ? ['required', 'string', 'min:10', 'max:500'] : ['nullable', 'string', 'max:500']];
-        $d = validator($input, $rules, $required
-            ? ['comment.required' => self::REJECT_COMMENT, 'comment.min' => self::REJECT_COMMENT, 'comment.max' => self::REJECT_COMMENT, 'comment.string' => self::REJECT_COMMENT]
-            : ['comment.max' => 'The comment may not be longer than 500 characters.'])->validate();
-
-        return $d['comment'] ?? null;
-    }
-
-    /**
-     * Reject, cancel or expire (R7, R8): one conditional update on approval_status = pending (R10), one audit row, and
-     * the event after commit. $userId null = the expiry job.
-     */
-    private function close(Transaction $t, string $state, ?string $comment, ?int $userId, string $event): Transaction
-    {
-        $now = now();
-        $done = Transaction::withoutGlobalScopes()->whereKey($t->id)->where('approval_status', self::PENDING)->update([
-            'status' => 'rejected', 'approval_status' => $state, 'approval_note' => $comment,
-            'decided_by' => $userId, 'decided_at' => $now, 'updated_at' => $now,
-        ]);
-        abort_unless($done === 1, 422, self::CHANGED);
-        $t->refresh();
-        $new = ['approval_status' => $state, 'comment' => $comment, 'ref_no' => $t->ref_no];
-        if ($state === self::EXPIRED) {
-            $new = ['approval_status' => $state, 'expired_on' => BusinessDate::today(), 'ref_no' => $t->ref_no];
-        } else {
-            $new['all_branches'] = ! app(BranchContext::class)->isScoped();
-        }
-        AuditLog::record($event, $t, ['approval_status' => self::PENDING], $new, null,
-            $userId === null ? ['user_id' => null, 'ip' => null, 'user_agent' => 'console'] : null);
-        DB::afterCommit(fn () => TransferApprovalDecided::dispatch($t->id, $state, $userId));
-
-        return $t;
-    }
-
-    // ------------------------------------------------------------------ R8 expiry
-
-    /** R8: every request pending since requested_on <= today - 30 becomes expired, row by row. Returns the count. */
-    public function expire(): int
-    {
-        $cutoff = (new DateTimeImmutable(BusinessDate::today()))->modify('-'.self::EXPIRY_DAYS.' days')->format('Y-m-d');
-        $ids = Transaction::withoutGlobalScopes()->where('approval_status', self::PENDING)->whereDate('requested_on', '<=', $cutoff)
-            ->orderBy('id')->pluck('id');
-        $n = 0;
-        foreach ($ids as $id) {
-            $n += DB::transaction(function () use ($id) {
-                $t = Transaction::withoutGlobalScopes()->lockForUpdate()->find($id);
-                if (! $t || $t->approval_status !== self::PENDING) {
-                    return 0; // decided meanwhile (R10)
-                }
-                $this->close($t, self::EXPIRED, null, null, 'transfer.approval_expired');
-
-                return 1;
-            }, LedgerService::ATTEMPTS);
-        }
-
-        return $n;
-    }
-
-    public static function expiresOn(?string $requestedOn): ?string
-    {
-        return $requestedOn ? (new DateTimeImmutable($requestedOn))->modify('+'.self::EXPIRY_DAYS.' days')->format('Y-m-d') : null;
+            || (in_array($t->type, $this->types(), true) && $this->isApprover($user, $ctx));
     }
 
     // ------------------------------------------------------------------ R18 settings warning
@@ -322,7 +189,7 @@ class TransferApprovals
         $threshold = app(Settings::class)->transferApprovalThresholdCents();
         $approver = $this->isApprover($user, $ctx);
 
-        $pending = fn () => Transaction::withoutGlobalScopes()->where('approval_status', self::PENDING)
+        $pending = fn () => Transaction::withoutGlobalScopes()->where('approval_status', self::PENDING)->whereIn('type', self::TYPES)
             ->with(['fromAccount:id,name,branch_id,current_balance', 'fromAccount.branch:id,code', 'toAccount:id,name,branch_id', 'toAccount.branch:id,code',
                 'creator:id,name,status'])
             ->orderBy('requested_on')->orderBy('id');
@@ -412,12 +279,14 @@ class TransferApprovals
     /** S5 / API: the detail's buttons. */
     public function canApprove(Transaction $t, User $user): bool
     {
-        return $t->approval_status === self::PENDING && (int) $t->created_by !== (int) $user->id && $this->isApprover($user);
+        return $t->approval_status === self::PENDING && in_array($t->type, self::TYPES, true) && (int) $t->created_by !== (int) $user->id
+            && $this->isApprover($user);
     }
 
     public function canCancel(Transaction $t, User $user): bool
     {
-        return $t->approval_status === self::PENDING && (int) $t->created_by === (int) $user->id && $user->canDo('transfer.create');
+        return $t->approval_status === self::PENDING && in_array($t->type, self::TYPES, true) && (int) $t->created_by === (int) $user->id
+            && $user->canDo('transfer.create');
     }
 
     // ------------------------------------------------------------------ S7 / S8 summaries
@@ -430,7 +299,7 @@ class TransferApprovals
      */
     public function pendingQuery(?string $from, string $to, ?array $branchIds = null): Builder
     {
-        return Transaction::withoutGlobalScopes()->where('approval_status', self::PENDING)
+        return Transaction::withoutGlobalScopes()->where('approval_status', self::PENDING)->whereIn('type', self::TYPES)
             ->when($from, fn ($q, $v) => $q->whereDate('requested_date', '>=', $v))
             ->whereDate('requested_date', '<=', $to)
             ->when($branchIds !== null, fn ($q) => $q->where(fn ($w) => $w->whereIn('branch_id', $branchIds)->orWhereIn('related_branch_id', $branchIds)));

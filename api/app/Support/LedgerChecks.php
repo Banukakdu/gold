@@ -16,6 +16,9 @@ use Illuminate\Support\Facades\DB;
  */
 final class LedgerChecks
 {
+    /** V9: the only types that can carry an approval_status (AG-051 transfers, AG-064 expenses). */
+    public const APPROVAL_TYPES = [Transaction::BRANCH_TRANSFER, Transaction::FUND_RETURN, Transaction::EXPENSE];
+
     /**
      * V1: (transaction, branch) pairs whose debits differ from credits, with the difference (debit - credit, cents).
      * A transaction that does not balance in total has at least one such branch.
@@ -50,16 +53,17 @@ final class LedgerChecks
     }
 
     /**
-     * V9 (AG-051, accounting review MUST 2): a transfer request that never posted has zero ledger lines, and status
+     * V9 (AG-051, accounting review MUST 2; AG-064 R13): a request that never posted has zero ledger lines, approval_status
+     * appears only on a type that can be held, and status
      * agrees with approval_status (pending <-> pending; rejected / cancelled / expired <-> rejected; approved <->
-     * posted | reversed; status pending / rejected only with an approval_status). Offenders as [ref, date, branch, problem].
+     * posted | reversed, or void for an expense; status pending / rejected only with an approval_status). Offenders as [ref, date, branch, problem].
      */
     public static function approvalRequests(): Collection
     {
         $closed = ['rejected', 'cancelled', 'expired'];
         $lines = fn ($q) => $q->select(DB::raw(1))->from('ledger_entries as le')->whereColumn('le.transaction_id', 't.id');
         $base = fn () => DB::table('transactions as t')->join('branches as b', 'b.id', '=', 't.branch_id')
-            ->select('t.id as transaction_id', 't.ref_no', 't.txn_date', 'b.code as branch', 't.status', 't.approval_status')->orderBy('t.id');
+            ->select('t.id as transaction_id', 't.ref_no', 't.txn_date', 'b.code as branch', 't.status', 't.approval_status', 't.type')->orderBy('t.id');
 
         $withLines = $base()->where(fn ($w) => $w->whereIn('t.status', ['pending', 'rejected'])->orWhereIn('t.approval_status', ['pending', ...$closed]))
             ->whereExists($lines)->get()
@@ -67,10 +71,16 @@ final class LedgerChecks
         $disagree = $base()->where(fn ($w) => $w
             ->where(fn ($x) => $x->where('t.approval_status', 'pending')->where('t.status', '!=', 'pending'))
             ->orWhere(fn ($x) => $x->whereIn('t.approval_status', $closed)->where('t.status', '!=', 'rejected'))
-            ->orWhere(fn ($x) => $x->where('t.approval_status', 'approved')->whereNotIn('t.status', ['posted', 'reversed']))
+            // An approved expense may later be voided through the normal void (AG-064 R1); transfers are reversed instead.
+            ->orWhere(fn ($x) => $x->where('t.approval_status', 'approved')->whereNotIn('t.status', ['posted', 'reversed'])
+                ->where(fn ($y) => $y->where('t.type', '!=', 'expense')->orWhere('t.status', '!=', 'void')))
             ->orWhere(fn ($x) => $x->whereIn('t.status', ['pending', 'rejected'])->whereNull('t.approval_status'))
-            ->orWhere(fn ($x) => $x->whereNotNull('t.approval_status')->whereNotIn('t.approval_status', ['pending', 'approved', ...$closed])))
-            ->get()->each(fn ($r) => $r->problem = "status {$r->status} disagrees with approval_status ".($r->approval_status ?? 'null'));
+            ->orWhere(fn ($x) => $x->whereNotNull('t.approval_status')->whereNotIn('t.approval_status', ['pending', 'approved', ...$closed]))
+            // AG-064 R13: only branch transfers, fund returns and expenses are ever held.
+            ->orWhere(fn ($x) => $x->whereNotNull('t.approval_status')->whereNotIn('t.type', self::APPROVAL_TYPES)))
+            ->get()->each(fn ($r) => $r->problem = in_array($r->type, self::APPROVAL_TYPES, true)
+                ? "status {$r->status} disagrees with approval_status ".($r->approval_status ?? 'null')
+                : "approval_status {$r->approval_status} on a {$r->type} entry (never held)");
 
         return $withLines->merge($disagree)->values();
     }

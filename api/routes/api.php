@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\V1\BranchController;
 use App\Http\Controllers\Api\V1\CategoryController;
 use App\Http\Controllers\Api\V1\ChartOfAccountsController;
 use App\Http\Controllers\Api\V1\DashboardController;
+use App\Http\Controllers\Api\V1\ExpenseApprovalController;
 use App\Http\Controllers\Api\V1\ExportController;
 use App\Http\Controllers\Api\V1\FiscalYearController;
 use App\Http\Controllers\Api\V1\NotificationController;
@@ -134,6 +135,15 @@ Route::prefix('v1')->group(function () {
                 ->middleware('perm:transfer.approve');
             Route::post('transfer-approvals/{transactionId}/cancel', [TransferApprovalController::class, 'cancel'])->whereNumber('transactionId')
                 ->middleware('perm:transfer.create');
+            // AG-064 expense approvals: rows are read without the branch scope; the service checks the expense's branch (R3),
+            // the requester (R4) and branch user managers (R4a) itself.
+            Route::get('expense-approvals', [ExpenseApprovalController::class, 'index'])->middleware('perm:transaction.view');
+            Route::post('expense-approvals/{transactionId}/approve', [ExpenseApprovalController::class, 'approve'])->whereNumber('transactionId')
+                ->middleware('perm:expense.approve');
+            Route::post('expense-approvals/{transactionId}/reject', [ExpenseApprovalController::class, 'reject'])->whereNumber('transactionId')
+                ->middleware('perm:expense.approve');
+            Route::post('expense-approvals/{transactionId}/cancel', [ExpenseApprovalController::class, 'cancel'])->whereNumber('transactionId')
+                ->middleware('perm:expense.create');
 
             Route::get('permissions', [RoleController::class, 'permissions'])->middleware('perm:role.view');
             Route::get('roles', [RoleController::class, 'index'])->middleware('perm:role.view');

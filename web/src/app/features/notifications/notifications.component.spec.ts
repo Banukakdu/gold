@@ -63,7 +63,7 @@ describe('NotificationsComponent', () => {
     list('unread').flush(page());
     prefs().flush({ approval_request_email: true, can_approve: false });
     fixture.detectChanges();
-    expect(el.textContent).not.toContain('Email me when a transfer needs my approval');
+    expect(el.textContent).not.toContain('Email me when a transfer or expense needs my approval');
   });
 
   it('AC 29: the approver sees the box ticked; unticking saves and says "Preference saved."; an error reverts it', () => {
