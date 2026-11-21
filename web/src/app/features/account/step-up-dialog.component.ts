@@ -19,13 +19,13 @@ export interface StepUpAnswer { password: string; code?: string; recovery_code?:
       @if (text()) { <p>{{ text() }}</p> }
       @if (alert()) { <div class="alert">{{ alert() }}</div> }
       <label>Password
-        <input type="password" name="password" autocomplete="current-password" required [(ngModel)]="password" />
+        <input class="tf-input" type="password" name="password" autocomplete="current-password" required [(ngModel)]="password" />
       </label>
       @if (errors()['password']) { <div class="field-error">{{ errors()['password'] }}</div> }
       @if (second() !== 'none') {
         @if (useRecovery()) {
           <label>Recovery code
-            <input type="text" name="recovery_code" autocomplete="off" autocapitalize="off" required [(ngModel)]="recovery" />
+            <input class="tf-input" type="text" name="recovery_code" autocomplete="off" autocapitalize="off" required [(ngModel)]="recovery" />
           </label>
           @if (errors()['recovery_code']) { <div class="field-error">{{ errors()['recovery_code'] }}</div> }
         } @else {

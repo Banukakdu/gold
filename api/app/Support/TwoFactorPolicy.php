@@ -31,6 +31,24 @@ final class TwoFactorPolicy
         return $user->is_super_admin || self::adminRoleHolders()->where('mr.model_id', $user->id)->exists();
     }
 
+    /**
+     * isAdmin for many users with one query (review N4).
+     *
+     * @param  iterable<User>  $users
+     * @return array<int, true> the ids of the admins among them
+     */
+    public static function adminIds(iterable $users): array
+    {
+        $active = collect($users)->filter(fn (User $u) => $u->status === 'active');
+        $ids = $active->filter(fn (User $u) => $u->is_super_admin)->pluck('id')->all();
+        $others = $active->reject(fn (User $u) => $u->is_super_admin)->pluck('id')->all();
+        if ($others !== []) {
+            $ids = array_merge($ids, self::adminRoleHolders()->whereIn('mr.model_id', $others)->distinct()->pluck('mr.model_id')->all());
+        }
+
+        return array_fill_keys(array_map('intval', $ids), true);
+    }
+
     /** Setting on and isAdmin (R8). */
     public static function requiredFor(User $user): bool
     {

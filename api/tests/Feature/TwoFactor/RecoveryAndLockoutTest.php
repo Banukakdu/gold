@@ -160,8 +160,9 @@ class RecoveryAndLockoutTest extends TwoFactorTestCase
         $this->assertSame(10, $row->new_values['failures']);
         $this->assertSame(now()->addMinutes(15)->toIso8601String(), $row->new_values['until']);
         $this->assertCount(10, $row->new_values['ips']);
+        $this->assertSame(['sign_in', true], [$row->new_values['source'], $row->new_values['password_known']]); // review S2
         Notification::assertSentTo($u, TwoFactorChangedNotification::class, fn ($n) => $n->kind === 'locked'
-            && str_contains($n->text(), 'Someone entered your password but not the code. If this was not you, reset your password now.'));
+            && str_contains($n->text(), 'A wrong password or code was entered too many times for your account (when signing in or confirming a change). If this was not you, reset your password now.'));
         Notification::assertSentTo([$sa2, $this->admin], TwoFactorAlertNotification::class, fn ($n) => $n->kind === 'locked');
         Notification::assertNotSentTo($u, TwoFactorAlertNotification::class);
 
@@ -245,7 +246,7 @@ class RecoveryAndLockoutTest extends TwoFactorTestCase
         $start = now();
 
         $r = $this->login('cash@x.com', self::PASSWORD, $this->ip())->assertStatus(429);
-        $this->assertSame('Too many wrong codes. Try again in 1440 minutes.', $r->json('message'));
+        $this->assertSame('Too many wrong codes. Try again in 24 hours.', $r->json('message'));
         $extended = AuditLog::where('event', 'auth.two_factor_locked')->get()->filter(fn ($a) => $a->new_values['level'] === 'extended');
         $this->assertCount(1, $extended);
         $this->assertSame(30, $extended->first()->new_values['failures']);

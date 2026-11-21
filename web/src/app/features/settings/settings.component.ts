@@ -173,7 +173,8 @@ const SAMPLE = '2026-10-05';
       </form>
     } @else if (!msg()) { <p class="muted">Loading...</p> }
     @if (stepUp()) {
-      <app-step-up-dialog title="Confirm the change" text="Changing two-factor sign-in for admins needs your password and current code."
+      <app-step-up-dialog title="Confirm the change"
+        [text]="auth.me()?.two_factor?.enabled ? 'Changing two-factor sign-in for admins needs your password and current code.' : 'Changing two-factor sign-in for admins needs your password.'"
         confirmLabel="Save" [second]="auth.me()?.two_factor?.enabled ? 'code' : 'none'" [busy]="busy()" [errors]="stepUpErrors()"
         [alert]="stepUpAlert()" (submitted)="save($event)" (cancel)="stepUp.set(false)" />
     }

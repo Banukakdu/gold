@@ -36,11 +36,10 @@ class TwoFactorController extends Controller
         [$code, $recovery] = TwoFactor::secondFactor($request, true);
         $challenge = TwoFactor::openChallenge($request->input('challenge_token'), 'verify');
         $user = $challenge->user;
-        TwoFactor::assertNotLocked($user);
-        $this->reserve($challenge);
         $ip = (string) $request->ip();
+        $reservation = $this->reserve($challenge, $user, $ip);
 
-        $result = $this->attempt(function () use ($user, $code, $recovery, $challenge, $ip) {
+        $result = $this->attempt($user, $reservation, function () use ($user, $code, $recovery, $challenge, $ip) {
             $remaining = null;
             if ($code !== null) {
                 if (! TwoFactor::useTotp($user, $code)) {
@@ -53,9 +52,9 @@ class TwoFactorController extends Controller
             return $this->signIn($user, $challenge, $code !== null ? 'totp' : 'recovery') + ['remaining' => $remaining];
         });
         if ($result === null) {
-            $this->wrong($challenge, $user, $ip, $code !== null ? 'code' : 'recovery_code');
+            $this->wrong($challenge, $user, $reservation, $code !== null ? 'code' : 'recovery_code');
         }
-        TwoFactor::succeeded($user);
+        TwoFactor::succeeded($user, $reservation);
 
         return [
             'token' => $result['token'],
@@ -86,40 +85,51 @@ class TwoFactorController extends Controller
         [$code] = TwoFactor::secondFactor($request, false);
         $challenge = TwoFactor::openChallenge($request->input('challenge_token'), 'enrol');
         $user = $challenge->user;
-        TwoFactor::assertNotLocked($user);
-        $this->reserve($challenge);
         $ip = (string) $request->ip();
+        $reservation = $this->reserve($challenge, $user, $ip);
 
-        $result = $this->attempt(fn () => TwoFactor::confirmSetup($user, $code, true, null, $ip,
+        $result = $this->attempt($user, $reservation, fn () => TwoFactor::confirmSetup($user, $code, true, null, $ip,
             fn (User $fresh) => $this->signIn($fresh, $challenge, 'enrolled')));
         if ($result['error'] === 'setup') {
             TwoFactor::releaseAttempt($challenge);
+            TwoFactor::refund($user, $reservation);
             throw ValidationException::withMessages(['setup' => TwoFactor::SETUP_MESSAGE]);
         }
         if ($result['error'] === 'code') {
-            $this->wrong($challenge, $user, $ip, 'code');
+            $this->wrong($challenge, $user, $reservation, 'code');
         }
+        TwoFactor::succeeded($user, $reservation);
 
         return ['token' => $result['inside']['token'], 'user' => AuthController::profile($user->fresh()),
             'recovery_codes' => $result['recovery_codes']];
     }
 
-    private function reserve(TwoFactorChallenge $challenge): void
+    /**
+     * Review M1: the user's R6 attempt is reserved first (429 when locked or the window is full), then the challenge
+     * attempt (R4). Both before the code is checked. Returns the R6 reservation.
+     */
+    private function reserve(TwoFactorChallenge $challenge, User $user, string $ip): string
     {
+        $reservation = TwoFactor::reserve($user, $ip, 'sign_in');
         if (! TwoFactor::reserveAttempt($challenge)) {
+            TwoFactor::refund($user, $reservation);
             throw ValidationException::withMessages(['challenge_token' => TwoFactor::CHALLENGE_MESSAGE]);
         }
+
+        return $reservation;
     }
 
     /**
      * The code check and the sign-in in one transaction. When a parallel request consumed the challenge first, the
-     * code use (TOTP step or recovery code) is rolled back with it and the answer is the challenge error.
+     * code use (TOTP step or recovery code) is rolled back with it, the attempt is not counted and the answer is the
+     * challenge error.
      */
-    private function attempt(\Closure $work): ?array
+    private function attempt(User $user, string $reservation, \Closure $work): ?array
     {
         try {
             return DB::transaction($work);
         } catch (TwoFactorChallengeTaken) {
+            TwoFactor::refund($user, $reservation);
             throw ValidationException::withMessages(['challenge_token' => TwoFactor::CHALLENGE_MESSAGE]);
         }
     }
@@ -139,11 +149,20 @@ class TwoFactorController extends Controller
         });
     }
 
-    /** A wrong code: counted on the challenge (5 consume it) and on the user (R6), then 422. */
-    private function wrong(TwoFactorChallenge $challenge, User $user, string $ip, string $field): never
+    /**
+     * A wrong code: counted on the challenge (5 consume it) and on the user (R6), then 422. Review N1: when the
+     * challenge was consumed meanwhile (a double submit of the right code that the other request used), nothing is
+     * counted and the answer is the challenge error.
+     */
+    private function wrong(TwoFactorChallenge $challenge, User $user, string $reservation, string $field): never
     {
+        if (TwoFactorChallenge::whereKey($challenge->id)->whereNotNull('consumed_at')->exists()) {
+            TwoFactor::releaseAttempt($challenge);
+            TwoFactor::refund($user, $reservation);
+            throw ValidationException::withMessages(['challenge_token' => TwoFactor::CHALLENGE_MESSAGE]);
+        }
         TwoFactor::wrongAttempt($challenge);
-        TwoFactor::failed($user, $ip);
+        TwoFactor::failed($user, $reservation);
         throw ValidationException::withMessages([$field => $field === 'code' ? TwoFactor::CODE_MESSAGE : TwoFactor::RECOVERY_MESSAGE]);
     }
 
@@ -179,14 +198,17 @@ class TwoFactorController extends Controller
         TwoFactor::assertNotLocked($user);
         [$code] = TwoFactor::secondFactor($request, false);
         $forced = ! $user->hasTwoFactor() && TwoFactorPolicy::requiredFor($user);
+        $reservation = TwoFactor::reserve($user, $request->ip(), 'step_up');
         $result = TwoFactor::confirmSetup($user, $code, $forced, TwoFactor::currentTokenId($user), (string) $request->ip());
         if ($result['error'] === 'setup') {
+            TwoFactor::refund($user, $reservation);
             throw ValidationException::withMessages(['setup' => TwoFactor::SETUP_MESSAGE]);
         }
         if ($result['error'] === 'code') {
-            TwoFactor::failed($user, $request->ip());
+            TwoFactor::failed($user, $reservation);
             throw ValidationException::withMessages(['code' => TwoFactor::CODE_MESSAGE]);
         }
+        TwoFactor::succeeded($user, $reservation);
 
         return ['recovery_codes' => $result['recovery_codes'], 'tokens_revoked' => $result['tokens_revoked']];
     }
@@ -222,9 +244,10 @@ class TwoFactorController extends Controller
     // ------------------------------------------------------------------ A1
 
     /** A1: a Super Admin resets another user's 2FA (R16). */
-    public function reset(Request $request, User $user)
+    public function reset(Request $request, int $id)
     {
         $actor = $request->user();
+        $user = User::findOrFail($id);
         $request->merge(['reason' => is_string($request->input('reason')) ? trim($request->input('reason')) : $request->input('reason')]);
         $data = $request->validate([
             'reason' => 'required|string|min:10|max:500',

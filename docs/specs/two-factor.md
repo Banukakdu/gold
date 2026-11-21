@@ -6,7 +6,7 @@ Backlog **AG-005** (E1, Could, R3, 3 points): "As a Super Admin, I want optional
 - Super Admin can enforce 2FA for all admins.
 
 In scope:
-- TOTP (RFC 6238) written in our own code, no PHP package (R1). The setup screen always shows the setup key. It shows a QR code only if a QR library is approved, and the QR is drawn in one web component (S7, Q1).
+- TOTP (RFC 6238) written in our own code, no PHP package (R1). The setup screen always shows the setup key. It also shows a QR code, drawn in the browser by one web component with the approved QR library (S7, Q1).
 - Enrolment that is switched on only after a correct code is entered.
 - The secret is stored encrypted. Recovery codes are hashed, can be used once, and can be regenerated.
 - A second sign-in step. No Sanctum token is issued until the code has been checked (R4).
@@ -76,7 +76,7 @@ Users list and user detail: the 2FA status column, row and reset button are retu
 **F3 Forced enrolment (admin, setting on, 2FA off).**
 1. A KDY Branch Admin signs in with the right password. The API returns an **enrol** challenge (no token).
 2. The card reads: "Your organisation requires two-factor sign-in for administrators. Set it up now to continue." The setup panel (S3) follows, without asking for the password again.
-3. The admin enters a valid code. The API turns 2FA on, issues the token, and returns the recovery codes (S4). After "Done", the app opens the dashboard.
+3. The admin enters a valid code. The API turns 2FA on, issues the token, and returns the recovery codes (S4). The app stores the session at once, so a reload or a closed tab never leaves a token no client holds (review N5); after "Done", it opens the dashboard.
 4. If the admin leaves or the enrol challenge expires (15 minutes), nothing is turned on and the next sign-in starts again.
 
 **F4 Admin already signed in when enforcement starts (or who becomes an admin mid-session).**
@@ -110,7 +110,7 @@ Users list and user detail: the 2FA status column, row and reset button are retu
 1. Settings, section "Sign-in security".
 2. Tick "Require two-factor sign-in for admins".
 3. A note shows "6 admins have not set it up yet" with their names. They will be asked to set it up at their next request or sign-in.
-4. Save. Changing this setting (on or off) asks for the Super Admin's password and current code. Turning it on is refused if the Super Admin has no 2FA themselves (R8).
+4. Save. Changing this setting (on or off) asks for the Super Admin's password and current code (password only, and the dialog says so, when the Super Admin has no 2FA; QA D4). Turning it on is refused if the Super Admin has no 2FA themselves (R8).
 5. The other Super Admins are alerted.
 
 **F10 The only Super Admin loses phone and codes.** Someone with server access runs `php artisan auth:two-factor-reset admin@x.com --reason="Lost phone, verified in person"` (section 5, C1).
@@ -208,8 +208,8 @@ New section "Sign-in security":
 
 ### S7 QR component `web/src/app/features/account/two-factor-qr.component.ts`
 - Input: `uri` (the `otpauth://` URI).
-- If a QR library is approved, it draws an SVG QR **in the browser** with error-correction level M, at least 180×180 px, white quiet zone, and `alt` "QR code for the setup key".
-- If not approved, it renders nothing, and S3 still works with the key.
+- It draws the QR **in the browser** on a `<canvas>` with the approved library (`qrcode`, Q1): error-correction level M, 200×200 px, a white quiet zone of 4 modules, `role="img"` and `aria-label` "QR code for the setup key". No network request is made and nothing is logged.
+- If drawing fails it renders nothing (the error is not shown or logged, it could quote the URI), and S3 still works with the key.
 - No other file imports a QR library. The URI is never sent to any external service (no online QR APIs). The server never makes QR images.
 
 ### S8 User detail `/users/:id` and Users list `/users` (Super Admin only, change)
@@ -358,23 +358,28 @@ No column or row is deleted:
   - A challenge is used once (`consumed_at` is set in the same transaction that creates the token, `UPDATE … WHERE consumed_at IS NULL`, and only one request wins).
   - P1 and P3 check `status = active` and the B12 branch rule again.
   - A reset (A1, C1) or deactivation consumes all open challenges of the user.
+  - **Open challenges per user (review S1).** A user has at most 5 open challenges (unexpired and not consumed, both purposes together). Creating a 6th voids the oldest ones by setting `consumed_at`; no row is deleted (R11 / accounting review 6). So repeated correct-password logins cannot pile up challenges, and each one brings at most 5 attempts that the per-user reservation (R6) still limits.
 - **R5 Replay protection.**
   - A TOTP code is accepted only if its step is greater than `two_factor_last_step`.
   - The update is atomic: `UPDATE users SET two_factor_last_step = :s WHERE id = :id AND (two_factor_last_step IS NULL OR two_factor_last_step < :s)`, and the code counts only when it affects 1 row.
   - So the same code cannot be used twice (two parallel sign-ins, or sign-in then disable), and an older code cannot be used after a newer one.
   - The rule applies to P1, P3, M2–M5 and the actor's code on A1.
+  - **A new secret starts its own replay state (review N2, QA D2).** P3 and M3 check the code against the **pending** secret only: `two_factor_last_step` belongs to the old secret when moving phone (and is null on a first set-up), so it is not compared. The confirmed step becomes the new `two_factor_last_step`, and the pending secret is cleared in the same locked transaction, so its code works once. Moving phone with an old-app code at step s and confirming with the new app's code in the same step therefore works.
   - A recovery code is used with `UPDATE … SET used_at WHERE id = ? AND used_at IS NULL AND superseded_at IS NULL`.
 - **R6 Rate limits and lockout.**
   - Per IP: 10 per minute on P1–P3 (`two-factor`), and the existing login limits on `/auth/login`.
   - Per challenge: 5 wrong codes consume it, and the user must enter the password again.
   - Per user: 10 wrong codes or step-up passwords in 15 minutes, across P1–P3, M2–M5 and A1 (as actor), start a 2FA lock for 15 minutes from that moment (`Cache::add`, as `LoginThrottle`).
+  - **Reserved before the check (review M1).** Each attempt of the user (P1, P3, M3 and every step-up) is reserved in one critical section under the per-user cache lock, **before** the code or password is checked: it is refused with 429 when the user is locked, or when the failures plus the attempts still in flight already fill the 15-minute (10) or 24-hour (30) window. A wrong answer turns the reservation into a failure (and may start the lock); a right one, or a request that turned out not to be a check (a missing field, an expired setup, a challenge used by a parallel request), drops it. A reservation that is never settled counts as a wrong code after 60 seconds. If the cache lock cannot be taken within 5 seconds the request is refused with 429 (fail closed), never a 500 with the attempt uncounted. So parallel requests, on many challenges and from many IPs, cannot pass 10 / 30.
+  - A double submit of the right code on one challenge (review N1): when the losing request finds the challenge already consumed by the winner, it gets the 422 `challenge_token` error and nothing is counted.
   - While locked:
     - login with the correct password and every code endpoint for that user return 429 "Too many wrong codes. Try again in N minutes.";
     - a wrong password still gives the normal 422, so the lock says nothing before the password is known.
   - When a lock starts:
     - write one `auth.two_factor_locked` row;
-    - email the user "Someone entered your password but not the code. If this was not you, reset your password now.";
-    - alert the other Super Admins if the user is an admin (R12).
+    - email the user "A wrong password or code was entered too many times for your account (when signing in or confirming a change). If this was not you, reset your password now." (review S2: a lock can also come from wrong step-up passwords, so the text does not claim the password was known);
+    - alert the other Super Admins if the user is an admin (R12): "A wrong password or code was entered for {user} 10 times in 15 minutes …" (or "30 times in 24 hours").
+  - The 429 text gives whole hours for waits over an hour ("Try again in 24 hours."), minutes otherwise (QA D5).
   - **Extended lock (accounting review 3).** The short lock alone allows about 960 guesses a day, roughly a 0.3% chance a day (8% a month) of guessing a code for someone who has the password. So per user: 30 wrong codes or step-up passwords in 24 hours (rolling, counted separately from the 15-minute counter) start a **24-hour** lock from that moment. It behaves like the short lock (same 429 text with the time left, same "says nothing before the password" rule). It writes `auth.two_factor_locked` with `level: "extended"`, emails the user, and alerts the other Super Admins for **every** user, not only admins.
   - A successful code clears the 15-minute counter only. The 24-hour counter runs out on its own.
   - A password reset (AG-002) does **not** clear the 2FA lock. Only time, or a Super Admin reset (A1/C1) after the password has been reset (R16), clears it.
@@ -418,9 +423,12 @@ No column or row is deleted:
 | `auth.two_factor_recovery_used` | Recovery code used | — | `{remaining, context: "sign_in"\|"move"\|"disable"}` |
 | `auth.two_factor_disabled` | 2FA turned off | `{confirmed_at}` | `{superseded_codes: n}` |
 | `auth.two_factor_reset` | 2FA reset | `{confirmed_at, recovery_codes_left, last_locked_at}` | `{reason, via: "app"\|"console", tokens_revoked, superseded_codes, challenges_consumed, lock_cleared: bool, os_user, host}` (`os_user`, `host` on console only) |
-| `auth.two_factor_locked` | 2FA locked | — | `{level: "short"\|"extended", failures: 10\|30, until, ips: [distinct IPs of the failures, max 20]}` |
+| `auth.two_factor_locked` | 2FA locked | — | `{level: "short"\|"extended", failures: 10\|30, until, ips: [distinct IPs of the failures, max 20], source: "sign_in"\|"step_up"\|"mixed", password_known: bool}` |
 | `auth.login` (changed) | Login | — | `{two_factor: "totp"\|"recovery"\|"enrolled"\|null}` |
 | `settings.updated` (existing) | — | `{two_factor_required_for_admins: false}` | `{… true}` |
+
+  - `source` (review S2): where the failures of the lock came from: `sign_in` (P1, P3), `step_up` (M2–M5, A1 as actor, the settings change) or `mixed`. `password_known` is false only when every failure was a wrong step-up password (for example a stolen token without the password); a wrong code anywhere means the password was known.
+  - `lock_cleared` on `auth.two_factor_reset` (QA deviation 4) is true when a lock was active at the reset **or** the latest `auth.two_factor_locked` row of the user is within the last 7 days; otherwise false.
 
   Wrong codes are not written one by one. They are counted, and the lock row is the record. The `attempts` column of each kept challenge row (section 5) holds the count per sign-in.
   - Lock rows and P1/P3 rows are written with the actor = the user (`auth()->setUser`), like `auth.login`. A1 refusals for wrong password or code are counted (R6), not written.
@@ -455,6 +463,9 @@ No column or row is deleted:
   - The actor proves presence with their password, and their code when their 2FA is on.
   - A reason is required. The help text asks how the person's identity was checked.
   - **Recent lock (accounting review 2).** If the target has an `auth.two_factor_locked` row in the last 7 days and no `auth.password_reset` row after the latest lock started, A1 and C1 refuse (422 / exit 1). A lock means someone else had the password. Resetting 2FA first would let that person sign in with the password only (or, for an admin, enrol their own phone through F3). The user resets the password first (Forgot password, or `auth:reset-password` for a Super Admin), then the reset is allowed and clears the lock.
+  - **Step-up-only locks (review S2).** A lock whose row has `password_known: false` (it came only from wrong step-up passwords by someone holding a token) does not block A1 / C1: it gives no sign that anyone else has the password, and blocking would let a token thief keep the real user locked out and unresettable. It is still written, emailed and alerted as any lock. Rows written before this field existed count as `password_known: true`.
+  - The date in the A1 / C1 refusal is shown in the date-format setting, with the time and "(Asia/Colombo)", as on S8 (QA D5).
+  - A1 takes a plain numeric `{id}`; the user is looked up after the `super` check, so a non-Super Admin gets 403 for every id and cannot probe which ids exist (review N3).
   - A reset clears both 2FA locks (short and extended) for the target.
 - **R17 Email change** (E4, existing). 2FA is unchanged. The label in the user's app keeps the old email (cosmetic). They can "Move to a new phone" to refresh it.
 - **R18 Branch isolation.**
@@ -553,7 +564,7 @@ Tests use `Notification::fake()`, a sync queue and `Carbon::setTestNow`. "Code a
 
 53. Given `/login` for a 2FA user, after the password the code step shows. Typing 6 digits submits without a click. A wrong code clears the field and shows the S2 message. A reload returns to the email and password step, and localStorage holds no challenge token.
 54. Given the code step, when "Use a recovery code instead" is tapped, then the recovery field shows. A successful recovery-code sign-in shows the toast "Recovery code used. 9 left."
-55. Given S3, then the setup key shows in groups of 4 and "Copy key" copies it without spaces. With no QR library approved, no QR element is rendered and enrolment still completes using the key. Only `two-factor-qr.component.ts` imports a QR library (checked by grep).
+55. Given S3, then the setup key shows in groups of 4 and "Copy key" copies it without spaces. The QR is drawn locally on a canvas with no request and nothing logged, the key stays visible, and enrolment also completes using the key. Only `two-factor-qr.component.ts` imports a QR library (checked by grep).
 56. Given S4, then "Done" is disabled until "I have saved these codes" is ticked. "Download .txt" saves a file with the 10 codes and no secret. After "Done", the codes are not shown anywhere again.
 57. Given a 403 `two_factor_enrolment_required`, then the app shows `/account/security?required=1` with the banner, without the shell menu or branch switcher, and with "Log out" visible.
 58. Given the Super Admin user detail of a user with 2FA on, then "Reset two-factor" is shown. It is hidden on the Super Admin's own detail and for Branch Admins.
@@ -561,8 +572,7 @@ Tests use `Notification::fake()`, a sync queue and `Carbon::setTestNow`. "Code a
 
 ## 8. Open questions (assumption used)
 1. **QR library (product owner).** May we add a JS QR library to `web/package.json`?
-   - **Assume** the decision is pending. The key is always shown, and the QR lives only in S7.
-   - If approved: one small MIT, dependency-free, client-side library, with the lock file committed.
+   - **Approved by the product owner (2026-11-21).** `qrcode` 1.5.4 (MIT, widely used, published 2024-08) with `@types/qrcode` 1.5.5 as a dev dependency, both pinned to exact versions and installed with npm, so `web/package-lock.json` is committed (CI uses `npm ci`). Its browser build bundles only `dijkstrajs`; its Node-only dependencies (`pngjs`, `yargs`) are not in the web bundle. It is imported only in S7 and lands in the lazy account chunk. The key is always shown as well.
    - Never an online QR service (the secret would leave the system).
 2. **Who counts as "admin".** **Decided (accounting review 1):** Super Admins plus anyone with an active role holding any of `user.create`, `user.edit`, `role.manage`, `transfer.approve` or `expense.approve` (section 2). The narrower `BranchAdmins` definition (both `user.edit` and `role.manage`) would leave users who can only create users unprotected, and leaving approvers out would let one stolen password defeat a maker-checker control. With the shipped templates only Branch Admin (`*`) holds these keys, so the default set of people asked for 2FA is unchanged.
 3. **AG-002 Super Admin email reset switch (product owner).** The password-reset review said to revisit the default when 2FA ships. **Assume** no change in this item: `AUTH_SUPER_ADMIN_EMAIL_RESET` stays `false` by default. 2FA does not turn off with a password reset (R13), so turning the switch on later is lower risk.
@@ -589,7 +599,7 @@ Reviewer: accountant, 2026-11-20. Focus: who must use 2FA, ways one person could
 10. **SHOULD - Audit detail.** The reset row records the earlier state (`recovery_codes_left`, `last_locked_at`), `challenges_consumed` and `lock_cleared`; the lock row records its level, end time and the IPs used (R11). The pending secret is nulled on confirm, replace, disable and reset (section 5).
 11. **SHOULD - Go-live note.** Every independent alert in this item goes to "other active Super Admins". With only one Super Admin, those alerts reach nobody else, and the only reader of a reset or a switch-off is the person who did it. Recommend at least two active Super Admins (for example the owner and the external accountant), as `password-reset.md` already does for the email-reset switch. A queue worker and a real mailer must run (users-and-roles sign-off).
 
-**Product-owner questions left as the BA wrote them:** Q1 (QR library) and Q3 (AG-002 Super Admin email-reset switch). From the controls side, Q3 should stay `false` until finding 2 is delivered.
+**Product-owner questions left as the BA wrote them:** Q1 (QR library, since approved, see Q1) and Q3 (AG-002 Super Admin email-reset switch). From the controls side, Q3 should stay `false` until finding 2 is delivered.
 
 **Acceptance criteria (added)**
 60. Given the setting is on and a user whose only role in KDY is a custom role with `expense.approve` and no other admin key, when they log in with the right password and 2FA off, then `{two_factor:"enrol"}`, and their existing token gets 403 `two_factor_enrolment_required`. A user whose role has `income.void`, `expense.void` and `transfer.reverse` but no admin key gets `{token}`.

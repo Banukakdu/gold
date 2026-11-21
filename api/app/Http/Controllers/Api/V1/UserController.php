@@ -281,12 +281,12 @@ class UserController extends Controller
     {
         $left = DB::table('two_factor_recovery_codes')->whereIn('user_id', $users->pluck('id'))->whereNull('used_at')->whereNull('superseded_at')
             ->groupBy('user_id')->select('user_id', DB::raw('count(*) as codes_left'))->pluck('codes_left', 'user_id');
-        $required = app(Settings::class)->twoFactorRequiredForAdmins();
+        $admins = app(Settings::class)->twoFactorRequiredForAdmins() ? TwoFactorPolicy::adminIds($users) : [];
 
         return $users->mapWithKeys(fn (User $u) => [$u->id => [
             'enabled' => $u->hasTwoFactor(),
             'confirmed_at' => $u->two_factor_confirmed_at?->toIso8601String(),
-            'required' => $required && TwoFactorPolicy::isAdmin($u),
+            'required' => isset($admins[$u->id]),
             'recovery_codes_left' => $u->hasTwoFactor() ? (int) ($left[$u->id] ?? 0) : 0,
         ]])->all();
     }

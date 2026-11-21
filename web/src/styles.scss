@@ -507,6 +507,10 @@ tr.rc-frozen td, .rc-line.rc-frozen { color: var(--muted); }
   box-shadow: 0 4px 12px rgba(0, 0, 0, .12); display: flex; flex-direction: column; min-width: 140px;
   a, button { display: flex; align-items: center; min-height: 40px; padding: 0 12px; text-align: left; text-decoration: none; } }
 .tf-2fa-off { color: #8a5a00; }
+/* S7: the QR of the setup key (white quiet zone drawn by the library). */
+.tf-qr { width: 200px; height: 200px; align-self: flex-start; }
+/* S9 / QA D3: text inputs of S2 and the step-up dialog are 40px tap targets. */
+.tf-input { min-height: 40px; box-sizing: border-box; }
 @media (max-width: 760px) {
   .tf-card { max-width: none; }
   .tf-card input, .tf-dialog input, .tf-code { width: 100%; max-width: none; }

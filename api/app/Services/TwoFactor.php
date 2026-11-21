@@ -15,6 +15,7 @@ use App\Support\Totp;
 use App\Support\TwoFactorPolicy;
 use Carbon\CarbonInterface;
 use Closure;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -33,8 +34,9 @@ use Laravel\Sanctum\PersonalAccessToken;
  *  - R4 challenges: the attempt is counted with a conditional UPDATE BEFORE the code is checked, so parallel guesses
  *    on one challenge cannot pass the limit of 5; a challenge is consumed with UPDATE ... WHERE consumed_at IS NULL in
  *    the transaction that creates the token.
- *  - R6 per-user locks: failures are kept in the cache per user (a short 15-minute list and a rolling 24-hour list,
- *    updated under a cache lock); a lock starts with Cache::add, so exactly one request writes its audit row.
+ *  - R6 per-user locks: attempts are reserved in the cache per user BEFORE the check (a short 15-minute list and a
+ *    rolling 24-hour list, updated under a cache lock; review M1), then settled as a failure or dropped; a lock starts
+ *    with Cache::add, so exactly one request writes its audit row.
  * No audit row, log line or email holds a secret, a code, a recovery code, a challenge token or a hash of them (R11).
  */
 final class TwoFactor
@@ -64,6 +66,14 @@ final class TwoFactor
     public const RECENT_LOCK_DAYS = 7;
 
     public const MAX_LOCK_IPS = 20;
+
+    /** Review M1: an attempt reserved this long ago and never settled counts as a failure. */
+    public const PENDING_SECONDS = 60;
+
+    public const MUTEX_WAIT_SECONDS = 5;
+
+    /** Review S1: at most this many open sign-in challenges per user; a new one voids the oldest. */
+    public const MAX_OPEN_CHALLENGES = 5;
 
     public const CODE_MESSAGE = "That code didn't work. Check that the time on your phone is set automatically.";
 
@@ -113,6 +123,12 @@ final class TwoFactor
             'expires_at' => $expires, 'ip' => $request->ip(), 'user_agent' => substr((string) $request->userAgent(), 0, 255),
             'created_at' => now(),
         ]);
+        // Review S1: at most MAX_OPEN_CHALLENGES open challenges per user; older ones are voided (consumed), never deleted.
+        $older = TwoFactorChallenge::where('user_id', $user->id)->whereNull('consumed_at')->where('expires_at', '>', now())
+            ->orderByDesc('id')->skip(self::MAX_OPEN_CHALLENGES)->take(1000)->pluck('id');
+        if ($older->isNotEmpty()) {
+            DB::table('two_factor_challenges')->whereIn('id', $older)->whereNull('consumed_at')->update(['consumed_at' => now()]);
+        }
 
         return [$token, $expires];
     }
@@ -295,7 +311,18 @@ final class TwoFactor
 
     public static function lockedResponse(int $seconds): JsonResponse
     {
-        return response()->json(['message' => 'Too many wrong codes. Try again in '.Minutes::text($seconds).'.'], 429);
+        return response()->json(['message' => 'Too many wrong codes. Try again in '.self::waitText($seconds).'.'], 429);
+    }
+
+    /** QA D5: "15 minutes", and whole hours for long waits ("24 hours"). */
+    public static function waitText(int $seconds): string
+    {
+        if ($seconds <= 3600) {
+            return Minutes::text($seconds);
+        }
+        $h = (int) ceil($seconds / 3600);
+
+        return "{$h} hours";
     }
 
     /** 429 when the user is locked (R6). */
@@ -307,40 +334,203 @@ final class TwoFactor
     }
 
     /**
-     * R6: one wrong code or step-up password. 10 in 15 minutes start the short lock, 30 in a rolling 24 hours the
-     * extended one, each for its period from that moment. The lock row, the email and the alerts are sent once per lock.
+     * R6 (review M1): reserve one attempt of the user BEFORE the code or step-up password is checked, in one critical
+     * section: refused with 429 when the user is locked or when the failures plus the attempts still in flight already
+     * fill the 15-minute or 24-hour window. So parallel requests cannot pass 10 / 30. The reservation is then settled
+     * with failed() (it counts), succeeded() or refund(). A reservation that is never settled counts as a failure after
+     * PENDING_SECONDS. When the cache lock cannot be taken, the request is refused (fail closed, not a 500).
+     *
+     * @param  string  $source  sign_in (P1, P3) or step_up (M2-M5, A1, settings)
+     * @return string the reservation id
      */
-    public static function failed(User $user, ?string $ip): void
+    public static function reserve(User $user, ?string $ip, string $source): string
     {
-        $started = Cache::lock(self::key($user, 'fail-mutex'), 10)->block(5, function () use ($user, $ip) {
-            $now = now()->getTimestamp();
-            $short = array_values(array_filter((array) Cache::get(self::key($user, 'fail-short'), []), fn ($f) => $f[0] > $now - self::SHORT_SECONDS));
-            $long = array_values(array_filter((array) Cache::get(self::key($user, 'fail-long'), []), fn ($f) => $f[0] > $now - self::LONG_SECONDS));
-            $short[] = [$now, $ip];
-            $long[] = [$now, $ip];
-            $level = null;
-            $failures = [];
-            if (count($long) >= self::LONG_FAILURES && Cache::add(self::key($user, 'lock-long'), $now + self::LONG_SECONDS, self::LONG_SECONDS)) {
-                [$level, $failures, $long, $short] = ['extended', $long, [], []];
-            } elseif (count($short) >= self::SHORT_FAILURES && Cache::add(self::key($user, 'lock-short'), $now + self::SHORT_SECONDS, self::SHORT_SECONDS)) {
-                [$level, $failures, $short] = ['short', $short, []];
+        $id = Str::random(20);
+        $out = self::underMutex($user, function () use ($user, $ip, $source, $id) {
+            if ($seconds = self::lockedFor($user)) {
+                return ['locked', $seconds];
             }
-            Cache::put(self::key($user, 'fail-short'), $short, self::SHORT_SECONDS);
-            Cache::put(self::key($user, 'fail-long'), $long, self::LONG_SECONDS);
+            $now = now()->getTimestamp();
+            [$short, $long] = self::lists($user, $now);
+            if ($started = self::startLockIfDue($user, $short, $long, $now)) {
+                return ['started', $started];
+            }
+            if (count($short) >= self::SHORT_FAILURES || count($long) >= self::LONG_FAILURES) {
+                self::saveLists($user, $short, $long);
 
-            return $level ? [$level, $failures, $now] : null;
+                return ['locked', self::PENDING_SECONDS];
+            }
+            $entry = [$now, $ip, $id, 'pending', $source, null];
+            $short[] = $entry;
+            $long[] = $entry;
+            self::saveLists($user, $short, $long);
+
+            return null;
         });
-        if ($started) {
+        if ($out === false) {
+            throw new HttpResponseException(self::lockedResponse(self::PENDING_SECONDS));
+        }
+        if ($out !== null && $out[0] === 'started') {
+            self::lockStarted($user, ...$out[1]);
+            throw new HttpResponseException(self::lockedResponse(self::lockedFor($user) ?? self::SHORT_SECONDS));
+        }
+        if ($out !== null) {
+            throw new HttpResponseException(self::lockedResponse($out[1]));
+        }
+
+        return $id;
+    }
+
+    /**
+     * R6: the reserved attempt was a wrong code ($cause 'code', the password was known) or a wrong step-up password
+     * ($cause 'password'). 10 in 15 minutes start the short lock, 30 in a rolling 24 hours the extended one, each for
+     * its period from that moment. The lock row, the email and the alerts are sent once per lock. When the cache lock
+     * cannot be taken the reservation stays and counts after PENDING_SECONDS (fail closed).
+     */
+    public static function failed(User $user, string $reservation, string $cause = 'code'): void
+    {
+        $started = self::underMutex($user, function () use ($user, $reservation, $cause) {
+            $now = now()->getTimestamp();
+            [$short, $long] = self::lists($user, $now);
+            $found = false;
+            $mark = function (array $list) use ($reservation, $cause, &$found) {
+                foreach ($list as $i => $f) {
+                    if ($f[2] === $reservation) {
+                        [$list[$i][3], $list[$i][5], $found] = ['failed', $cause, true];
+                    }
+                }
+
+                return $list;
+            };
+            [$short, $long] = [$mark($short), $mark($long)];
+            if (! $found) {
+                // Cleared meanwhile (a success or a reset): the failure still counts from now.
+                $short[] = $long[] = [$now, request()?->ip(), $reservation, 'failed', 'sign_in', $cause];
+            }
+            $started = self::startLockIfDue($user, $short, $long, $now);
+            if (! $started) {
+                self::saveLists($user, $short, $long);
+            }
+
+            return $started;
+        });
+        if (is_array($started)) {
             self::lockStarted($user, ...$started);
         }
     }
 
+    /** A correct code: the reservation is dropped and the 15-minute failures are cleared (the 24-hour ones run out). */
+    public static function succeeded(User $user, ?string $reservation = null): void
+    {
+        self::underMutex($user, function () use ($user, $reservation) {
+            [$short, $long] = self::lists($user, now()->getTimestamp());
+            $short = array_values(array_filter($short, fn ($f) => $f[3] === 'pending' && $f[2] !== $reservation));
+            $long = array_values(array_filter($long, fn ($f) => $f[2] !== $reservation));
+            self::saveLists($user, $short, $long);
+
+            return true;
+        });
+    }
+
+    /** The reserved attempt was not a check (a missing field, an expired setup, a challenge used by a parallel request). */
+    public static function refund(User $user, string $reservation): void
+    {
+        self::underMutex($user, function () use ($user, $reservation) {
+            [$short, $long] = self::lists($user, now()->getTimestamp());
+            $drop = fn ($list) => array_values(array_filter($list, fn ($f) => $f[2] !== $reservation));
+            self::saveLists($user, $drop($short), $drop($long));
+
+            return true;
+        });
+    }
+
+    /** The result of $work under the per-user cache lock, or false when it could not be taken in time. */
+    private static function underMutex(User $user, Closure $work): mixed
+    {
+        try {
+            return Cache::lock(self::key($user, 'fail-mutex'), 10)->block(self::MUTEX_WAIT_SECONDS, $work);
+        } catch (LockTimeoutException) {
+            return false;
+        }
+    }
+
+    /**
+     * Both lists inside their windows. Entry: [time, ip, reservation, pending|failed, sign_in|step_up, code|password].
+     * A reservation older than PENDING_SECONDS was never settled and counts as a wrong code.
+     *
+     * @return array{0: list<array>, 1: list<array>}
+     */
+    private static function lists(User $user, int $now): array
+    {
+        $norm = function (array $list, int $window) use ($now) {
+            $out = [];
+            foreach ($list as $f) {
+                if (! is_array($f) || ($f[0] ?? 0) <= $now - $window) {
+                    continue;
+                }
+                $f += [1 => null, 2 => '', 3 => 'failed', 4 => 'sign_in', 5 => 'code'];
+                if ($f[3] === 'pending' && $f[0] <= $now - self::PENDING_SECONDS) {
+                    [$f[3], $f[5]] = ['failed', 'code'];
+                }
+                $out[] = $f;
+            }
+
+            return $out;
+        };
+
+        return [
+            $norm((array) Cache::get(self::key($user, 'fail-short'), []), self::SHORT_SECONDS),
+            $norm((array) Cache::get(self::key($user, 'fail-long'), []), self::LONG_SECONDS),
+        ];
+    }
+
+    private static function saveLists(User $user, array $short, array $long): void
+    {
+        Cache::put(self::key($user, 'fail-short'), array_values($short), self::SHORT_SECONDS);
+        Cache::put(self::key($user, 'fail-long'), array_values($long), self::LONG_SECONDS);
+    }
+
+    /**
+     * Starts the extended or the short lock when the settled failures reach 30 / 10 (Cache::add: exactly once). The
+     * failures of that lock leave the list(s); attempts still in flight stay. Saves the lists when a lock starts.
+     *
+     * @return ?array{0: string, 1: list<array>, 2: int} [level, failures, at]
+     */
+    private static function startLockIfDue(User $user, array $short, array $long, int $now): ?array
+    {
+        $isFailed = fn ($f) => $f[3] === 'failed';
+        $pending = fn ($list) => array_values(array_filter($list, fn ($f) => ! $isFailed($f)));
+        $failedLong = array_values(array_filter($long, $isFailed));
+        $failedShort = array_values(array_filter($short, $isFailed));
+        if (count($failedLong) >= self::LONG_FAILURES && Cache::add(self::key($user, 'lock-long'), $now + self::LONG_SECONDS, self::LONG_SECONDS)) {
+            self::saveLists($user, $pending($short), $pending($long));
+
+            return ['extended', $failedLong, $now];
+        }
+        if (count($failedShort) >= self::SHORT_FAILURES && Cache::add(self::key($user, 'lock-short'), $now + self::SHORT_SECONDS, self::SHORT_SECONDS)) {
+            self::saveLists($user, $pending($short), $long);
+
+            return ['short', $failedShort, $now];
+        }
+
+        return null;
+    }
+
+    /**
+     * The lock row (R11): level, failures, until, ips, and (review S2) `source` (sign_in, step_up or mixed) and
+     * `password_known` (false when every failure was a wrong step-up password, for example a stolen token without the
+     * password). Only a lock with the password known blocks A1 / C1 (R16).
+     */
     private static function lockStarted(User $user, string $level, array $failures, int $at): void
     {
         $until = now()->setTimestamp($at + ($level === 'extended' ? self::LONG_SECONDS : self::SHORT_SECONDS));
         $ips = array_slice(array_values(array_unique(array_filter(array_column($failures, 1), fn ($ip) => $ip !== null))), 0, self::MAX_LOCK_IPS);
+        $sources = array_values(array_unique(array_column($failures, 4)));
+        $source = count($sources) === 1 ? $sources[0] : 'mixed';
+        $passwordKnown = in_array('code', array_column($failures, 5), true);
         AuditLog::record('auth.two_factor_locked', $user, null, [
             'level' => $level, 'failures' => count($failures), 'until' => $until->toIso8601String(), 'ips' => $ips,
+            'source' => $source, 'password_known' => $passwordKnown,
         ], null, ['user_id' => $user->id]);
         $ip = request()?->ip();
         self::tellUser($user, 'locked', $ip, ['level' => $level]);
@@ -350,12 +540,6 @@ final class TwoFactor
                 'level' => $level, 'until' => $until->copy()->setTimezone(BusinessDate::timezone())->format('Y-m-d H:i'), 'ip' => $ip,
             ]), $user->id);
         }
-    }
-
-    /** A successful code clears the 15-minute counter only (the 24-hour one runs out on its own). */
-    public static function succeeded(User $user): void
-    {
-        Cache::forget(self::key($user, 'fail-short'));
     }
 
     /** R16: a reset clears both locks and both counters. True when a lock was active. */
@@ -383,12 +567,16 @@ final class TwoFactor
 
     /**
      * R16 (accounting review 2): a lock in the last 7 days with no password reset after it started. Someone else may
-     * know the password, so 2FA must not be reset until the password is. Returns that lock row, or null.
+     * know the password, so 2FA must not be reset until the password is. A lock that came only from wrong step-up
+     * passwords (`password_known` false, review S2: a token holder without the password) does not block; it was still
+     * emailed and alerted. Returns the blocking lock row, or null.
      */
     public static function resetBlockedBy(User $user): ?AuditLog
     {
-        $lock = self::latestLock($user);
-        if (! $lock || $lock->created_at->lt(now()->subDays(self::RECENT_LOCK_DAYS))) {
+        $lock = AuditLog::where('event', 'auth.two_factor_locked')->where('auditable_type', User::class)
+            ->where('auditable_id', $user->id)->where('created_at', '>=', now()->subDays(self::RECENT_LOCK_DAYS))
+            ->orderByDesc('id')->get()->first(fn (AuditLog $l) => ($l->new_values['password_known'] ?? true) !== false);
+        if (! $lock) {
             return null;
         }
         $passwordReset = AuditLog::where('event', 'auth.password_reset')->where('auditable_type', User::class)
@@ -397,9 +585,13 @@ final class TwoFactor
         return $passwordReset ? null : $lock;
     }
 
+    /** QA D5: the date in the date-format setting, as on S8. */
     public static function resetBlockedMessage(AuditLog $lock): string
     {
-        return "Someone entered this user's password without the code on ".self::local($lock->created_at)
+        $at = $lock->created_at->copy()->setTimezone(BusinessDate::timezone());
+
+        return "Someone entered this user's password without the code on "
+            .app(Settings::class)->formatDate($at->format('Y-m-d')).' '.$at->format('H:i').' ('.BusinessDate::timezone().')'
             .'. Ask them to reset their password first, then reset two-factor.';
     }
 
@@ -416,24 +608,32 @@ final class TwoFactor
         if (! is_string($password) || $password === '') {
             throw ValidationException::withMessages(['password' => 'Enter your password.']);
         }
+        $reservation = self::reserve($user, $request->ip(), 'step_up');
         if (! Hash::check($password, $user->password)) {
-            self::failed($user, $request->ip());
+            self::failed($user, $reservation, 'password');
             throw ValidationException::withMessages(['password' => self::PASSWORD_MESSAGE]);
         }
         if ($second === 'none') {
+            self::refund($user, $reservation);
+
             return false;
         }
-        [$code, $recovery] = self::secondFactor($request, $second === 'either');
+        try {
+            [$code, $recovery] = self::secondFactor($request, $second === 'either');
+        } catch (ValidationException $e) {
+            self::refund($user, $reservation);
+            throw $e;
+        }
         if ($code !== null) {
             if (! self::useTotp($user, $code)) {
-                self::failed($user, $request->ip());
+                self::failed($user, $reservation);
                 throw ValidationException::withMessages(['code' => self::CODE_MESSAGE]);
             }
         } elseif (self::useRecoveryCode($user, $recovery, $request->ip(), $context) === null) {
-            self::failed($user, $request->ip());
+            self::failed($user, $reservation);
             throw ValidationException::withMessages(['recovery_code' => self::RECOVERY_MESSAGE]);
         }
-        self::succeeded($user);
+        self::succeeded($user, $reservation);
 
         return $code === null;
     }
@@ -483,7 +683,7 @@ final class TwoFactor
     }
 
     /**
-     * P3 / M3: a correct code from the pending secret, within 15 minutes and newer than the last used step (R5), turns
+     * P3 / M3: a correct code from the pending secret, within 15 minutes (the caller settles its R6 reservation), turns
      * 2FA on (with 10 recovery codes) or moves it to the new phone. Every other token of the user is revoked (R10).
      * $inside runs in the same transaction (P3 consumes its challenge and creates the token there).
      *
@@ -497,8 +697,10 @@ final class TwoFactor
             if ($pending === null || ! $fresh->two_factor_pending_at || $fresh->two_factor_pending_at->lte(now()->subMinutes(self::SETUP_MINUTES))) {
                 return ['error' => 'setup'];
             }
+            // R5 (review N2): the new secret starts its own replay state. two_factor_last_step belongs to the old secret
+            // when moving (and is null otherwise); the pending secret is cleared below, so its code works only once.
             $step = Totp::match($pending, $code, now()->getTimestamp());
-            if ($step === null || ($fresh->two_factor_last_step !== null && $step <= $fresh->two_factor_last_step)) {
+            if ($step === null) {
                 return ['error' => 'code'];
             }
             $moving = $fresh->hasTwoFactor();
@@ -527,7 +729,6 @@ final class TwoFactor
             return $result;
         }
         $user->refresh();
-        self::succeeded($user);
         self::tellUser($user, $result['moved'] ? 'moved' : 'enabled', $ip);
         if ($result['after_reset']) {
             // R12 / accounting review 9: closes the loop on every reset.

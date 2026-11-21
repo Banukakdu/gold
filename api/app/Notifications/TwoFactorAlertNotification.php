@@ -51,8 +51,8 @@ class TwoFactorAlertNotification extends Notification implements ShouldQueue
             'reset' => "The two-factor sign-in of {$this->target} was reset "
                 .($this->actor === null ? 'with the server console command' : "by {$this->actor}")
                 .'. Reason: '.($this->details['reason'] ?? '').'. All of their sessions were signed out.',
-            'locked' => "Someone entered the password of {$this->target} but not the code"
-                .(($this->details['level'] ?? 'short') === 'extended' ? ' 30 times in 24 hours. Two-factor sign-in is locked for 24 hours' : '. Two-factor sign-in is locked for 15 minutes')
+            'locked' => "A wrong password or code was entered for {$this->target}"
+                .(($this->details['level'] ?? 'short') === 'extended' ? ' 30 times in 24 hours. Two-factor sign-in is locked for 24 hours' : ' 10 times in 15 minutes. Two-factor sign-in is locked for 15 minutes')
                 .(isset($this->details['until']) ? ' (until '.$this->details['until'].')' : '').'.',
             'setting' => "{$this->actor} turned ".(($this->details['enabled'] ?? false) ? 'on' : 'off')
                 .' "Require two-factor sign-in for admins".',

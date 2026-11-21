@@ -118,7 +118,7 @@ export class AccountSecurityComponent implements OnInit {
 
   async stepUp(answer: StepUpAnswer) {
     const action = this.action();
-    if (!action) return;
+    if (!action || this.busy()) return; // QA D1: one request per submit
     if (action === 'disable' && !confirm('Turn off two-factor sign-in?')) return;
     this.busy.set(true);
     this.errors.set({}); this.dialogAlert.set('');
@@ -143,6 +143,7 @@ export class AccountSecurityComponent implements OnInit {
   }
 
   async confirm(code: string) {
+    if (this.busy()) return;
     this.busy.set(true);
     this.codeError.set(''); this.alert.set('');
     try {

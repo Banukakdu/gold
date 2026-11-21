@@ -63,8 +63,9 @@ Route::prefix('v1')->group(function () {
             Route::put('settings', [SettingsController::class, 'update']);
             Route::post('settings/logo', [SettingsController::class, 'uploadLogo'])->middleware('throttle:attachments-upload');
             Route::post('settings/logo/remove', [SettingsController::class, 'removeLogo']);
-            // AG-005 A1: reset another user's two-factor sign-in (R16). Outside `branch`: 2FA is per user (R18).
-            Route::post('users/{user}/two-factor/reset', [TwoFactorController::class, 'reset'])->whereNumber('user');
+            // AG-005 A1: reset another user's two-factor sign-in (R16). Outside `branch`: 2FA is per user (R18). A plain {id}
+            // (no model binding), so `super` runs before the user lookup and ids cannot be probed (review N3).
+            Route::post('users/{id}/two-factor/reset', [TwoFactorController::class, 'reset'])->whereNumber('id');
             // AG-093 S1 backups (docs/specs/backups.md section 5): read-only. There is deliberately no POST, PUT or
             // DELETE route: backups are started, restored and pruned on the server only.
             Route::get('backups', [BackupController::class, 'index']);

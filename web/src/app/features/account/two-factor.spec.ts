@@ -165,8 +165,11 @@ describe('Two-factor sign-in (AG-005)', () => {
     fixture.destroy();
   });
 
-  it('AC 55: the setup key in groups of 4, "Copy key" copies it without spaces, no QR element', async () => {
-    setup();
+  it('AC 55: the setup key in groups of 4, "Copy key" copies it without spaces, the QR is drawn locally', async () => {
+    const { http } = setup();
+    const fetchSpy = spyOn(window, 'fetch').and.callThrough();
+    const xhrSpy = spyOn(XMLHttpRequest.prototype, 'open').and.callThrough();
+    const logSpies = (['log', 'info', 'warn', 'error', 'debug'] as const).map(k => spyOn(console, k).and.callThrough());
     const copy = spyOn(navigator.clipboard, 'writeText').and.resolveTo();
     const { fixture, el } = mount(TwoFactorSetupComponent);
     fixture.componentRef.setInput('setup', SETUP);
@@ -176,9 +179,23 @@ describe('Two-factor sign-in (AG-005)', () => {
     expect(groupKey(SECRET)).toBe('JBSW Y3DP EHPK 3PXP JBSW Y3DP EHPK 3PXP');
     button(el, 'Copy key').click();
     expect(copy).toHaveBeenCalledWith(SECRET);
-    const qr = el.querySelector('app-two-factor-qr')!;
-    expect(qr.children.length).toBe(0);
-    expect(el.querySelector('svg, canvas, img')).toBeNull();
+    // Q1 (approved library): a canvas drawn in the browser, no request of any kind, nothing logged, the key still shown.
+    await new Promise(r => setTimeout(r, 50));
+    const canvas = el.querySelector<HTMLCanvasElement>('app-two-factor-qr canvas')!;
+    expect(canvas).not.toBeNull();
+    expect(canvas.getAttribute('aria-label')).toBe('QR code for the setup key');
+    expect(canvas.width).toBe(200);
+    const px = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
+    let dark = 0;
+    for (let i = 0; i < px.length; i += 4) if (px[i] < 128) dark++;
+    expect(dark).toBeGreaterThan(1000); // modules were drawn
+    expect(px[0]).toBe(255); // white quiet zone
+    expect(el.querySelector('img')).toBeNull();
+    http.verify();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(xhrSpy).not.toHaveBeenCalled();
+    logSpies.forEach(sp => expect(sp).not.toHaveBeenCalled());
+    expect(el.querySelector('.tf-key')).not.toBeNull();
     expect(text(el)).toContain('Account: u@x.lk · Type: time-based');
     expect(text(el)).toMatch(/This setup expires at \d\d:\d\d\./);
     fixture.destroy();
@@ -196,7 +213,8 @@ describe('Two-factor sign-in (AG-005)', () => {
     req.flush({ token: 'T2', user: user(), recovery_codes: CODES });
     await settle(fixture);
     expect(el.querySelectorAll('.tf-codes li').length).toBe(10);
-    expect(auth.token()).toBeNull(); // the session starts after "Done"
+    expect(auth.token()).toBe('T2'); // review N5: stored at once, so a reload does not orphan the token
+    expect(router.url).not.toBe('/dashboard'); // "Done" moves on
     el.querySelector<HTMLInputElement>('input[name=saved]')!.click();
     await settle(fixture);
     button(el, 'Done').click();
@@ -274,6 +292,25 @@ describe('Two-factor sign-in (AG-005)', () => {
     expect(text(el)).toContain('Two-factor sign-in is on. Other devices have been signed out.');
     expect(text(el)).not.toContain(CODES[0]);
     expect(el.querySelector('.tf-codes')).toBeNull();
+    fixture.destroy();
+  });
+
+  it('QA D1: a double click on the step-up dialog sends one request', async () => {
+    const { http } = setup();
+    const { fixture, el } = mount(AccountSecurityComponent);
+    await settle(fixture);
+    http.expectOne('/api/v1/me/two-factor').flush({ enabled: false, confirmed_at: null, required: false, recovery_codes_left: 0, setup_pending_until: null });
+    await settle(fixture);
+    button(el, 'Turn on').click();
+    await settle(fixture);
+    type(el.querySelector<HTMLInputElement>('input[name=password]')!, 'secret-pass1');
+    await settle(fixture);
+    const submit = button(el, 'Continue');
+    submit.click();
+    submit.click(); // before change detection disables the button
+    http.expectOne('/api/v1/me/two-factor/setup').flush(SETUP);
+    await settle(fixture);
+    http.expectNone('/api/v1/me/two-factor/setup');
     fixture.destroy();
   });
 
@@ -423,6 +460,8 @@ describe('Two-factor sign-in (AG-005)', () => {
     });
     button(page.el, 'Turn off').click();
     await settle(page.fixture);
+    // QA D3: the password field of the dialog is a 40px tap target too.
+    expect(page.el.querySelector<HTMLElement>('.tf-dialog input[name=password]')!.getBoundingClientRect().height).toBeGreaterThanOrEqual(40);
     const actions = page.el.querySelectorAll<HTMLElement>('.tf-dialog-actions button');
     expect(text(actions[0])).toBe('Turn off');
     expect(actions[0].getBoundingClientRect().bottom).toBeLessThanOrEqual(actions[1].getBoundingClientRect().top); // stacked, primary on top

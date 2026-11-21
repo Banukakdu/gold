@@ -47,7 +47,7 @@ type Step = 'password' | 'code' | 'enrol' | 'codes';
             @if (useRecovery()) {
               <p>Enter one of your recovery codes.</p>
               <label>Recovery code
-                <input type="text" name="recovery_code" autocomplete="off" autocapitalize="off" [(ngModel)]="recovery"
+                <input class="tf-input" type="text" name="recovery_code" autocomplete="off" autocapitalize="off" [(ngModel)]="recovery"
                   [disabled]="locked()" required />
               </label>
               @if (fieldError()) { <div class="field-error">{{ fieldError() }}</div> }
@@ -185,7 +185,7 @@ export class LoginComponent {
   }
 
   async confirmEnrol(code: string) {
-    if (!this.challenge) return;
+    if (!this.challenge || this.busy()) return;
     this.busy.set(true);
     this.error.set('');
     this.fieldError.set('');
@@ -193,7 +193,8 @@ export class LoginComponent {
       const r = await firstValueFrom(this.http.post<{ token: string; user: Me; recovery_codes: string[] }>('/api/v1/auth/two-factor/enrol/confirm',
         { challenge_token: this.challenge.challenge_token, code }));
       this.challenge = null;
-      // The session starts after "Done", once the codes are saved (S4).
+      // Review N5: the session is stored at once (a reload must not orphan the new token); "Done" only moves on (S4).
+      this.auth.startSession(r.token, r.user);
       this.pending = { token: r.token, user: r.user };
       this.recoveryCodes.set(r.recovery_codes);
       this.setup.set(null);
@@ -211,7 +212,6 @@ export class LoginComponent {
     this.recoveryCodes.set([]);
     this.pending = null;
     if (!pending) { this.back(); return; }
-    this.auth.startSession(pending.token, pending.user);
     this.router.navigateByUrl('/dashboard');
   }
 

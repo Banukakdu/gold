@@ -41,7 +41,7 @@ class TwoFactorChangedNotification extends Notification implements ShouldQueue
             'recovery_used' => 'A recovery code was used',
             'disabled' => 'Two-factor sign-in turned off',
             'reset' => 'Your two-factor sign-in was reset',
-            'locked' => 'Someone entered your password but not the code',
+            'locked' => 'Two-factor sign-in locked after a wrong password or code',
         };
     }
 
@@ -60,7 +60,7 @@ class TwoFactorChangedNotification extends Notification implements ShouldQueue
             'disabled' => 'Two-factor sign-in was turned off for your account. Your recovery codes no longer work.',
             'reset' => 'Your two-factor sign-in was reset '.(($this->details['by'] ?? null) === null ? 'by the server console' : 'by '.$this->details['by'])
                 .'. You have been signed out on all devices. Your recovery codes no longer work.',
-            'locked' => 'Someone entered your password but not the code. If this was not you, reset your password now.'
+            'locked' => 'A wrong password or code was entered too many times for your account (when signing in or confirming a change). If this was not you, reset your password now.'
                 .(($this->details['level'] ?? 'short') === 'extended' ? ' Two-factor sign-in is locked for 24 hours.' : ' Two-factor sign-in is locked for 15 minutes.'),
         };
         $from = $this->ip === null ? 'from the server console' : "from IP {$this->ip}";
