@@ -49,10 +49,10 @@ export interface Transaction {
   payee_payer?: string;
   branch?: { code: string; name: string };
   category?: { name: string; is_active?: boolean; parent?: { name: string; is_active?: boolean } | null };
-  /** AG-033 SHOULD 10: `type`, and `last_reconciled_date` on bank accounts the user may see (void / reverse warning). */
-  account?: { name: string; type?: string; last_reconciled_date?: string | null };
-  from_account?: { name: string; type?: string; last_reconciled_date?: string | null; branch?: { code: string } };
-  to_account?: { name: string; type?: string; last_reconciled_date?: string | null; branch?: { code: string } };
+  /** AG-033 SHOULD 10: `last_reconciled_date` only on bank accounts the user may see (void / reverse warning). */
+  account?: { id?: number; name: string; last_reconciled_date?: string | null };
+  from_account?: { id?: number; name: string; last_reconciled_date?: string | null; branch?: { code: string } };
+  to_account?: { id?: number; name: string; last_reconciled_date?: string | null; branch?: { code: string } };
   creator?: { id: number; name: string };
   creator_tag?: string | null;
   entries_count?: number;

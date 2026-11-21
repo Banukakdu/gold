@@ -690,7 +690,8 @@ export class TransactionListComponent implements OnInit {
     const warn = t.receipt_status === 'received'
       ? `${t.to_account?.branch?.code ?? 'The receiving branch'} confirmed receipt on ${this.date(t.received_on ?? '')}. The reversal sends the money back; arrange the physical return.\n\n`
       : '';
-    // AG-033 review finding 10: the reversal posts today on both accounts (not blocking).
+    // AG-033 review finding 10: the reversal posts today on both accounts (not blocking). from/to cover a transfer;
+    // `account` covers reversing an income or expense (the API allows it), which also posts today, unlike a void.
     const late = lateEntryWarnings([t.from_account, t.to_account, t.account], colomboToday()).map(w => `${w}\n\n`).join('');
     const reason = prompt(`${warn}${late}Reverse ${t.ref_no}? Enter a reason:`);
     if (!reason || this.busy()) return;

@@ -51,7 +51,10 @@ class TransactionController extends Controller
         $this->tagAuthors($rows);
         $this->markLegacyVoids($rows);
         // AG-033 SHOULD 10: the void / reverse dialogs warn when the contra lands on or before a reconciled bank date.
-        BankReconciliation::attachLastReconciledDates($request->user(), $rows->flatMap(fn ($t) => [$t->account, $t->fromAccount, $t->toAccount]));
+        // `type` is loaded for that check only and hidden again, so rows never show another branch's account type.
+        $accounts = $rows->flatMap(fn ($t) => [$t->account, $t->fromAccount, $t->toAccount])->filter();
+        BankReconciliation::attachLastReconciledDates($request->user(), $accounts);
+        $accounts->each(fn ($a) => $a->makeHidden('type'));
         foreach ($rows as $t) {
             // R10 / accounting review finding 5: incoming rows are read-only (actions follow transactions.branch_id).
             $t->setAttribute('in_active_branch', $p->inActiveBranch($t));

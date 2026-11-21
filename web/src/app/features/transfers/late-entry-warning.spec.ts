@@ -60,6 +60,36 @@ describe('AG-033 late-entry warning at posting time', () => {
     expect(lateEntryWarnings([{ ...KDY_BANK, last_reconciled_date: undefined }], '2026-10-01')).toEqual([]);
   });
 
+  it('review nit 2: the same account counts once by id; two accounts with one name are told apart by branch code', () => {
+    // Same id twice (one object from each list): one warning.
+    expect(lateEntryWarnings([KDY_BANK, { ...KDY_BANK }], '2026-10-01')).toEqual([WARN_KDY]);
+    // Main "BOC Current" -> KDY "BOC Current", both reconciled to the same date: two warnings.
+    const mainBoc = { ...MAIN_BANK, id: 1, name: 'BOC Current', last_reconciled_date: '2026-10-31' };
+    const kdyBoc = { ...KDY_BANK, id: 5, name: 'BOC Current' };
+    expect(lateEntryWarnings([mainBoc, kdyBoc], '2026-10-01')).toEqual([
+      'MAIN BOC Current is reconciled to 31 Oct 2026. This entry will be a late entry for that statement.',
+      'KDY BOC Current is reconciled to 31 Oct 2026. This entry will be a late entry for that statement.',
+    ]);
+    // Transaction rows: no type, and no id on old payloads: still one warning per side.
+    expect(lateEntryWarnings([{ name: 'BOC Current', last_reconciled_date: '2026-10-31', branch: { code: 'MAIN' } },
+      { name: 'BOC Current', last_reconciled_date: '2026-10-31', branch: { code: 'KDY' } }], '2026-10-01').length).toBe(2);
+  });
+
+  it('shows the warning on the allocation form for two same-named accounts, once each', async () => {
+    setup(true);
+    http = TestBed.inject(HttpTestingController);
+    const { fixture, el } = mount(AllocationFormComponent);
+    fixture.detectChanges();
+    http.expectOne('/api/v1/branches').flush([{ id: 1, is_main: true }, { id: 2, is_main: false }]);
+    http.expectOne('/api/v1/accounts').flush([{ ...MAIN_BANK, name: 'BOC Current', last_reconciled_date: '2026-10-31' }, { ...KDY_BANK, name: 'BOC Current' }]);
+    Object.assign(fixture.componentInstance.m, { from_account_id: 1, to_account_id: 5, txn_date: '2026-10-31' });
+    fixture.detectChanges();
+    expect(warnings(el)).toEqual([
+      'MAIN BOC Current is reconciled to 31 Oct 2026. This entry will be a late entry for that statement.',
+      'KDY BOC Current is reconciled to 31 Oct 2026. This entry will be a late entry for that statement.',
+    ]);
+  });
+
   describe('Fund a branch (Super Admin)', () => {
     async function form() {
       setup(true);
@@ -161,7 +191,7 @@ describe('AG-033 late-entry warning at posting time', () => {
     it('void: warns when the entry date is on or before the bank account statement, and still voids', () => {
       const c = list();
       const prompt = spyOn(window, 'prompt').and.returnValue('Recorded twice by mistake');
-      c.void(row({ account: { name: 'KDY Bank', type: 'bank', last_reconciled_date: '2026-10-31' } }));
+      c.void(row({ account: { name: 'KDY Bank', last_reconciled_date: '2026-10-31' } }));
       expect(prompt.calls.mostRecent().args[0]).toContain(WARN_KDY);
       expect(http.expectOne('/api/v1/transactions/41/void').request.body).toEqual({ reason: 'Recorded twice by mistake' });
     });
@@ -170,9 +200,9 @@ describe('AG-033 late-entry warning at posting time', () => {
       const c = list();
       const prompt = spyOn(window, 'prompt').and.returnValue(null);
       for (const t of [
-        row({ txn_date: '2026-11-01', account: { name: 'KDY Bank', type: 'bank', last_reconciled_date: '2026-10-31' } }),
-        row({ account: { name: 'KDY Cash', type: 'cash' } }),
-        row({ account: { name: 'KDY Bank', type: 'bank' } }),
+        row({ txn_date: '2026-11-01', account: { name: 'KDY Bank', last_reconciled_date: '2026-10-31' } }),
+        row({ account: { name: 'KDY Cash' } }),
+        row({ account: { name: 'KDY Bank', last_reconciled_date: null } }),
       ]) {
         c.void(t);
         expect(prompt.calls.mostRecent().args[0]).not.toContain('late entry');
@@ -185,8 +215,8 @@ describe('AG-033 late-entry warning at posting time', () => {
       const today = colomboToday();
       const prompt = spyOn(window, 'prompt').and.returnValue('Sent to the wrong branch');
       c.reverse(row({ type: 'fund_allocation', ref_no: 'MAIN-TRF-2026-000007', txn_date: '2026-10-01',
-        from_account: { name: 'Main Bank', type: 'bank', last_reconciled_date: today },
-        to_account: { name: 'KDY Bank', type: 'bank', last_reconciled_date: today } }));
+        from_account: { name: 'Main Bank', last_reconciled_date: today },
+        to_account: { name: 'KDY Bank', last_reconciled_date: today } }));
       const text = prompt.calls.mostRecent().args[0]!;
       expect(text).toContain(`Main Bank is reconciled to `);
       expect(text).toContain(`KDY Bank is reconciled to `);
@@ -196,8 +226,8 @@ describe('AG-033 late-entry warning at posting time', () => {
     it('reverse: no warning when the last statement is before today', () => {
       const c = list();
       const prompt = spyOn(window, 'prompt').and.returnValue(null);
-      c.reverse(row({ type: 'internal_transfer', from_account: { name: 'KDY Bank', type: 'bank', last_reconciled_date: '2026-01-31' },
-        to_account: { name: 'KDY Cash', type: 'cash' } }));
+      c.reverse(row({ type: 'internal_transfer', from_account: { name: 'KDY Bank', last_reconciled_date: '2026-01-31' },
+        to_account: { name: 'KDY Cash' } }));
       expect(prompt.calls.mostRecent().args[0]).not.toContain('late entry');
     });
   });
