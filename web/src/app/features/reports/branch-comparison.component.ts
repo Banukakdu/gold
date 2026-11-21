@@ -3,10 +3,11 @@ import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
+import { colomboToday } from '../../core/dates';
 import { MoneyPipe } from '../../core/money.pipe';
 import {
   BranchPickerComponent, ExportButtonsComponent, FiscalPresetsComponent, ReportBranch, ReportHeadComponent, ReportMeta, ReportParams, SignaturesComponent,
-  fieldErrors, isoDate, periodRange, toHttpParams,
+  fieldErrors, periodRange, toHttpParams,
   branchDenied, readQuery, reportError, writeQuery,
 } from './report-common';
 
@@ -76,9 +77,9 @@ export class BranchComparisonComponent implements OnInit {
   ];
   ptype: 'month' | 'quarter' | 'year' | 'custom' = 'month';
   p = (() => {
-    const now = new Date();
-    const today = isoDate(now);
-    return { month: today.slice(0, 7), quarter: Math.floor(now.getMonth() / 3) + 1, year: now.getFullYear(), from: today.slice(0, 8) + '01', to: today };
+    const today = colomboToday(); // Asia/Colombo business day, like the API's BusinessDate
+    const [y, m] = today.split('-').map(Number);
+    return { month: today.slice(0, 7), quarter: Math.floor((m - 1) / 3) + 1, year: y, from: today.slice(0, 8) + '01', to: today };
   })();
   branches = signal<number[]>([]);
   r = signal<Comparison | null>(null);
