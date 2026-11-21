@@ -449,11 +449,11 @@ class BackgroundExports
 
     // ------------------------------------------------------------------ prune (R10)
 
-    /** @return array{expired: int, stale: int, orphans: int} */
+    /** @return array{expired: int, stale: int, orphans: int, scheduled: int} */
     public function prune(): array
     {
         $disk = Storage::disk(Export::DISK);
-        $out = ['expired' => 0, 'stale' => 0, 'orphans' => 0];
+        $out = ['expired' => 0, 'stale' => 0, 'orphans' => 0, 'scheduled' => 0];
 
         // 1. Ready past expiry: the file goes, the row stays.
         Export::where('status', Export::READY)->where('expires_at', '<=', now())->orderBy('requested_at')->get()
@@ -494,8 +494,13 @@ class BackgroundExports
                 }
             });
 
+        // AG-088 R12: scheduled report PDFs go keep_file_days after their run finished (one audit row per pass).
+        $out['scheduled'] = app(ScheduledReportRuns::class)->pruneFiles();
+
         // 3. Files without a ready row, older than 25 h (a killed worker's .part or temporary files). No audit; logged.
-        $keep = Export::where('status', Export::READY)->whereNotNull('file_path')->pluck('file_path')->flip();
+        // A scheduled report PDF that is still kept (R12) is not an orphan.
+        $keep = Export::where('status', Export::READY)->whereNotNull('file_path')->pluck('file_path')
+            ->merge(ScheduledReportRuns::keptFiles())->flip();
         $cutoff = now()->subHours(25)->getTimestamp();
         foreach ($disk->allFiles() as $f) {
             if (! isset($keep[$f]) && $disk->lastModified($f) < $cutoff) {

@@ -7,7 +7,7 @@ import { MoneyPipe } from '../../core/money.pipe';
 import { AppDatePipe } from '../../core/app-date.pipe';
 import {
   BranchPickerComponent, ExportButtonsComponent, FiscalPresetsComponent, ReportHeadComponent, ReportMeta, ReportParams, currentMonth, fieldErrors, toHttpParams,
-  readQuery, reportError, writeQuery,
+  branchDenied, readQuery, reportError, writeQuery,
 } from './report-common';
 
 interface Line { id: number | null; name: string; is_active: boolean; amount: string; percent: string | null; code?: string | null; branch_only?: string | null }
@@ -119,6 +119,9 @@ export class IncomeExpenseComponent implements OnInit {
   errLine() { return Object.values(this.errs()).join(' '); }
 
   ngOnInit() {
+    // AG-088 W1: a link for a branch this user cannot open loads nothing.
+    const denied = branchDenied(this.route, this.auth);
+    if (denied) { this.msg.set(denied); return; }
     const { q, branches } = readQuery(this.route, this.auth.isAllBranches());
     this.f = { from: q.get('from') ?? this.f.from, to: q.get('to') ?? this.f.to, type: q.get('type') ?? this.f.type };
     this.branches.set(branches);

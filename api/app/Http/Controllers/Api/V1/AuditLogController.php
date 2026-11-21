@@ -11,6 +11,7 @@ use App\Models\Branch;
 use App\Models\Category;
 use App\Models\PeriodLock;
 use App\Models\RecurringTemplate;
+use App\Models\ReportSchedule;
 use App\Models\Role;
 use App\Models\Transaction;
 use App\Models\User;
@@ -68,7 +69,8 @@ class AuditLogController extends Controller
         'branches' => [['branch.'], []],
         'periods' => [['period.'], []],
         // AG-087 R11: background exports are in the Reports group.
-        'reports' => [['export.'], ['report.exported', 'audit.exported']],
+        // AG-088 R13: scheduled email reports too.
+        'reports' => [['export.', 'report_schedule.'], ['report.exported', 'audit.exported']],
         'logins' => [['auth.'], []],
         'attachments' => [['attachment.'], []],
         // AG-092 R12
@@ -119,6 +121,21 @@ class AuditLogController extends Controller
         'export.downloaded' => 'Export downloaded',
         'export.expired' => 'Export expired',
         'export.download_denied' => 'Export download refused',
+        // AG-088 R13
+        'report_schedule.created' => 'Report schedule created',
+        'report_schedule.updated' => 'Report schedule changed',
+        'report_schedule.paused' => 'Report schedule paused',
+        'report_schedule.resumed' => 'Report schedule resumed',
+        'report_schedule.archived' => 'Report schedule archived',
+        'report_schedule.restored' => 'Report schedule restored',
+        'report_schedule.owner_changed' => 'Report schedule owner changed',
+        'report_schedule.run_built' => 'Scheduled report built',
+        'report_schedule.run_failed' => 'Scheduled report failed',
+        'report_schedule.run_missed' => 'Scheduled report missed',
+        'report_schedule.delivered' => 'Scheduled report emailed',
+        'report_schedule.delivery_skipped' => 'Scheduled report not sent',
+        'report_schedule.delivery_failed' => 'Scheduled report email failed',
+        'report_schedule.files_removed' => 'Scheduled report files removed',
         'auth.login' => 'Login',
         'auth.logout' => 'Logout',
         'auth.locked_out' => 'Login locked',
@@ -408,6 +425,8 @@ class AuditLogController extends Controller
             'lock' => PeriodLock::with('branch:id,code')->whereIn('id', $ids(PeriodLock::class))->get()->keyBy('id'),
             // AG-066: the rows are already limited to the caller's branches (branchScope), so the names are read unscoped.
             'template' => RecurringTemplate::withoutGlobalScopes()->whereIn('id', $ids(RecurringTemplate::class))->pluck('name', 'id'),
+            // AG-088: the rows are already limited to the caller's branches; the schedule's current name.
+            'schedule' => ReportSchedule::whereIn('id', $ids(ReportSchedule::class))->pluck('name', 'id'),
         ];
     }
 
@@ -430,11 +449,13 @@ class AuditLogController extends Controller
                 : "#{$id}",
             Backup::class => (string) ($a->new_values['filename'] ?? "#{$id}"),
             RecurringTemplate::class => $s['template'][$id] ?? ($a->new_values['name'] ?? "#{$id}"),
+            ReportSchedule::class => $s['schedule'][$id] ?? ($a->new_values['name'] ?? "#{$id}"),
             YearEndClose::class => app(Settings::class)->fiscalYearStarting((int) ($a->new_values['fiscal_year'] ?? $a->old_values['fiscal_year'] ?? YearEndClose::find($id)?->fiscal_year ?? 0))->label(),
             default => match ($a->event) {
                 // AG-065 R14: 'transactions' is not a ReportService name (that would open reports/transactions/export).
                 'report.exported', 'export.requested', 'export.ready', 'export.failed', 'export.downloaded', 'export.expired', 'export.download_denied' => (ReportExporter::TITLES + ['transactions' => 'Transactions'])[$a->new_values['name'] ?? ''] ?? '',
                 'audit.exported' => 'Audit log',
+                'report_schedule.files_removed' => ($a->new_values['count'] ?? 0).' scheduled report file(s)',
                 'settings.updated' => 'Settings',
                 'settings.logo_uploaded', 'settings.logo_removed' => 'Logo',
                 'ledger.legacy_voids_identified' => ($a->new_values['count'] ?? 0).' legacy voids',

@@ -35,6 +35,17 @@ class InAppNotification extends Notification
 
     public const BACKUP_FAILED = 'backup.failed';
 
+    /** AG-088 S5 owner alerts of scheduled email reports (branch = null, url = /scheduled-reports/<id>). */
+    public const SCHEDULE_RUN_FAILED = 'report_schedule.run_failed';
+
+    public const SCHEDULE_MISSED = 'report_schedule.missed';
+
+    public const SCHEDULE_RECIPIENTS_SKIPPED = 'report_schedule.recipients_skipped';
+
+    public const SCHEDULE_DELIVERY_FAILED = 'report_schedule.delivery_failed';
+
+    public const SCHEDULE_PAUSED = 'report_schedule.paused';
+
     public function __construct(public string $kind, public array $data) {}
 
     public function via(object $notifiable): array

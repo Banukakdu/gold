@@ -1,5 +1,5 @@
 import { Routes } from '@angular/router';
-import { anyPermissionGuard, authGuard, branchModeGuard, entryBranchGuard, permissionGuard, superAdminGuard } from './core/guards';
+import { anyPermissionGuard, authGuard, branchModeGuard, entryBranchGuard, permissionGuard, reportBranchGuard, superAdminGuard } from './core/guards';
 import { ShellComponent } from './layout/shell.component';
 
 export const routes: Routes = [
@@ -42,13 +42,13 @@ export const routes: Routes = [
         loadComponent: () => import('./features/categories/categories.component').then(m => m.CategoriesComponent) },
       { path: 'reports', canActivate: [permissionGuard('report.view')],
         loadComponent: () => import('./features/reports/reports-hub.component').then(m => m.ReportsHubComponent) },
-      { path: 'reports/income-expense', canActivate: [permissionGuard('report.view')],
+      { path: 'reports/income-expense', canActivate: [reportBranchGuard, permissionGuard('report.view')],
         loadComponent: () => import('./features/reports/income-expense.component').then(m => m.IncomeExpenseComponent) },
-      { path: 'reports/branch-comparison', canActivate: [permissionGuard('report.view')],
+      { path: 'reports/branch-comparison', canActivate: [reportBranchGuard, permissionGuard('report.view')],
         loadComponent: () => import('./features/reports/branch-comparison.component').then(m => m.BranchComparisonComponent) },
-      { path: 'reports/transfers', canActivate: [permissionGuard('report.view')],
+      { path: 'reports/transfers', canActivate: [reportBranchGuard, permissionGuard('report.view')],
         loadComponent: () => import('./features/reports/transfers-report.component').then(m => m.TransfersReportComponent) },
-      { path: 'reports/cash-book', canActivate: [permissionGuard('report.view')],
+      { path: 'reports/cash-book', canActivate: [reportBranchGuard, permissionGuard('report.view')],
         loadComponent: () => import('./features/reports/cash-book.component').then(m => m.CashBookComponent) },
       { path: 'reports/cash-flow', canActivate: [permissionGuard('report.view')],
         loadComponent: () => import('./features/reports/cash-flow.component').then(m => m.CashFlowComponent) },
@@ -58,6 +58,15 @@ export const routes: Routes = [
         loadComponent: () => import('./features/reports/trial-balance.component').then(m => m.TrialBalanceComponent) },
       // AG-087 S2: any signed-in user (their own background exports only).
       { path: 'exports', loadComponent: () => import('./features/exports/exports.component').then(m => m.ExportsComponent) },
+      // AG-088 S1-S3 scheduled email reports: Super Admin only, in every switcher mode (a schedule has its own branches).
+      { path: 'scheduled-reports', canActivate: [superAdminGuard],
+        loadComponent: () => import('./features/scheduled-reports/schedule-list.component').then(m => m.ScheduleListComponent) },
+      { path: 'scheduled-reports/new', canActivate: [superAdminGuard],
+        loadComponent: () => import('./features/scheduled-reports/schedule-form.component').then(m => m.ScheduleFormComponent) },
+      { path: 'scheduled-reports/:id/edit', canActivate: [superAdminGuard],
+        loadComponent: () => import('./features/scheduled-reports/schedule-form.component').then(m => m.ScheduleFormComponent) },
+      { path: 'scheduled-reports/:id', canActivate: [superAdminGuard],
+        loadComponent: () => import('./features/scheduled-reports/schedule-history.component').then(m => m.ScheduleHistoryComponent) },
       // AG-094 S2 / S3: any signed-in user (their own notifications only); /notifications/:id is the email link.
       { path: 'notifications', loadComponent: () => import('./features/notifications/notifications.component').then(m => m.NotificationsComponent) },
       { path: 'notifications/:id',

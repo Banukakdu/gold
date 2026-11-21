@@ -15,7 +15,7 @@ class ExportsPrune extends Command
     public function handle(BackgroundExports $exports): int
     {
         $r = $exports->prune();
-        $this->info("Expired {$r['expired']}, failed as stale {$r['stale']}, orphan files deleted {$r['orphans']}.");
+        $this->info("Expired {$r['expired']}, failed as stale {$r['stale']}, orphan files deleted {$r['orphans']}, scheduled report files removed {$r['scheduled']}.");
 
         return self::SUCCESS;
     }

@@ -17,6 +17,7 @@ use App\Http\Controllers\Api\V1\FiscalYearController;
 use App\Http\Controllers\Api\V1\NotificationController;
 use App\Http\Controllers\Api\V1\PeriodLockController;
 use App\Http\Controllers\Api\V1\ReportController;
+use App\Http\Controllers\Api\V1\ReportScheduleController;
 use App\Http\Controllers\Api\V1\RoleController;
 use App\Http\Controllers\Api\V1\SettingsController;
 use App\Http\Controllers\Api\V1\TransactionController;
@@ -49,6 +50,20 @@ Route::prefix('v1')->group(function () {
             // AG-093 S1 backups (docs/specs/backups.md section 5): read-only. There is deliberately no POST, PUT or
             // DELETE route: backups are started, restored and pruned on the server only.
             Route::get('backups', [BackupController::class, 'index']);
+
+            // AG-088 scheduled email reports (docs/specs/scheduled-reports.md section 5): outside `branch`, like
+            // settings; a schedule carries its own branch scope. There is deliberately no DELETE route (R11).
+            Route::get('report-schedules', [ReportScheduleController::class, 'index']);
+            Route::post('report-schedules', [ReportScheduleController::class, 'store']);
+            Route::get('report-schedules/recipient-options', [ReportScheduleController::class, 'recipientOptions']);
+            Route::get('report-schedules/preview-time', [ReportScheduleController::class, 'previewTime']);
+            Route::get('report-schedules/{id}', [ReportScheduleController::class, 'show'])->whereNumber('id');
+            Route::put('report-schedules/{id}', [ReportScheduleController::class, 'update'])->whereNumber('id');
+            Route::get('report-schedules/{id}/runs', [ReportScheduleController::class, 'runs'])->whereNumber('id');
+            Route::post('report-schedules/{id}/pause', [ReportScheduleController::class, 'pause'])->whereNumber('id');
+            Route::post('report-schedules/{id}/resume', [ReportScheduleController::class, 'resume'])->whereNumber('id');
+            Route::post('report-schedules/{id}/archive', [ReportScheduleController::class, 'archive'])->whereNumber('id');
+            Route::post('report-schedules/{id}/restore', [ReportScheduleController::class, 'restore'])->whereNumber('id');
         });
 
         // AG-087 background exports (docs/specs/background-exports.md section 5): the requester's own only (404

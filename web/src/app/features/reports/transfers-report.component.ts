@@ -8,7 +8,7 @@ import { MoneyPipe } from '../../core/money.pipe';
 import { receiptLabel } from '../../core/receipts';
 import {
   BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, ReportMeta, ReportParams, currentMonth, fieldErrors, toHttpParams,
-  readQuery, reportError, writeQuery,
+  branchDenied, readQuery, reportError, writeQuery,
 } from './report-common';
 
 interface Movement {
@@ -173,6 +173,9 @@ export class TransfersReportComponent implements OnInit {
   errLine() { return Object.values(this.errs()).join(' '); }
 
   ngOnInit() {
+    // AG-088 W1: a link for a branch this user cannot open loads nothing.
+    const denied = branchDenied(this.route, this.auth);
+    if (denied) { this.msg.set(denied); return; }
     const { q, branches } = readQuery(this.route, this.auth.isAllBranches());
     this.f = { from: q.get('from') ?? this.f.from, to: q.get('to') ?? this.f.to };
     const types = q.getAll('types').filter(t => MOVEMENT_TYPES.some(m => m[0] === t));

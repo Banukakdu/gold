@@ -9,7 +9,7 @@ import { Account } from '../../core/models';
 import {
   BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, ReportMeta, ReportParams, SignaturesComponent,
   fieldErrors, isoDate, toHttpParams,
-  readQuery, reportError, writeQuery,
+  branchDenied, readQuery, reportError, writeQuery,
 } from './report-common';
 
 interface Day {
@@ -112,6 +112,9 @@ export class CashBookComponent implements OnInit {
 
   ngOnInit() {
     // The account picker needs account.view; without it the report covers all accounts in scope.
+    // AG-088 W1: a link for a branch this user cannot open loads nothing.
+    const denied = branchDenied(this.route, this.auth);
+    if (denied) { this.msg.set(denied); return; }
     const { q, branches } = readQuery(this.route, this.auth.isAllBranches());
     this.f = { from: q.get('from') ?? this.f.from, to: q.get('to') ?? this.f.to };
     this.branches.set(branches);

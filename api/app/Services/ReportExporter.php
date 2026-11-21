@@ -222,6 +222,47 @@ class ReportExporter
     }
 
     /**
+     * AG-088 R6: a scheduled report, built inside the job's snapshot (the caller opens it) as a synchronous PDF export:
+     * the count is the first read; with at most PDF_EXPORT_CAP rows the PDF is built from the same header and views,
+     * else no PDF (the email carries a link). The control totals (accounting review A4) come from the same data.
+     *
+     * @return array{rows: int, built: int, pdf: ?string, provisional: bool, totals: array, unfooted: string[]}
+     */
+    public function buildScheduled(string $name, ReportParams $p, User $owner, string $printed, string $extracted): array
+    {
+        $data = $this->prebuild($name, $p);
+        $rows = $this->countRows($name, $p, $data);
+        ReadSnapshot::hook('counted');
+        $data ??= $this->build($name, $p);
+        $pdf = null;
+        if ($rows <= ReportService::PDF_EXPORT_CAP) {
+            self::raisePdfLimits();
+            $pdf = $this->pdfBytes($name, $this->header($name, $p, $data, $owner, $extracted, $printed), $data);
+        }
+
+        return ['rows' => $rows, 'built' => $this->builtRows($name, $data), 'pdf' => $pdf, 'provisional' => (bool) $data['provisional'],
+            'totals' => self::controlTotals($name, $data), 'unfooted' => [...$this->unfooted($name, $data), ...$this->unconfirmed($name, $p, $data)]];
+    }
+
+    /**
+     * AG-088 R13 / accounting review A4: the headline totals of a report as sent, as Money strings. Income & Expense:
+     * total income, total expense, net; Branch Comparison: the Total row opening and closing; Transfers: net moved;
+     * Cash book: per account opening, receipts, payments, closing.
+     */
+    public static function controlTotals(string $name, array $d): array
+    {
+        return match ($name) {
+            'income-expense' => ['total_income' => $d['income']['total'] ?? null, 'total_expense' => $d['expense']['total'] ?? null, 'net' => $d['net'] ?? null],
+            'branch-comparison' => ['opening' => $d['total']['opening'], 'closing' => $d['total']['closing']],
+            'transfers' => ['net_moved' => $d['net_moved']],
+            'cash-book' => ['accounts' => collect($d['accounts'])->mapWithKeys(fn ($a) => [(string) $a['account']['id'] => [
+                'opening' => $a['opening'], 'receipts' => $a['receipts'], 'payments' => $a['payments'], 'closing' => $a['closing'],
+            ]])->all()],
+            default => [],
+        };
+    }
+
+    /**
      * Finding 5: each total printed equals the sum of the rows written for it. Returns the totals that do not foot
      * (empty = complete). All sums in integer cents.
      *
@@ -307,14 +348,17 @@ class ReportExporter
     }
 
     /** Header block (finding 4): identical lines at the top of every PDF page and every Excel sheet. */
-    public function header(string $name, ReportParams $p, array $data, User $user, ?string $extracted = null): array
+    /**
+     * @param  string|null  $extracted  AG-087 R3 "Data extracted" line (queued exports and scheduled reports)
+     * @param  string|null  $printed  AG-088 R6: replaces the "Printed by" line (a scheduled report names its schedule)
+     */
+    public function header(string $name, ReportParams $p, array $data, User $user, ?string $extracted = null, ?string $printed = null): array
     {
         $settings = app(Settings::class);
         $company = $settings->companyName();
         // AG-092 R3: built from the stored file after its sha256 check; null (no logo, no error for the user) otherwise.
         $logo = (string) $settings->logoDataUri();
-        $now = now()->setTimezone('Asia/Colombo');
-        $printed = 'Printed by '.$user->name.' at '.$settings->formatDate($now->format('Y-m-d')).' '.$now->format('H:i').' (Asia/Colombo)';
+        $printed ??= 'Printed by '.$user->name.' at '.self::printedAt();
         $currency = 'Amounts in '.$settings->currencyCode();
         $basis = $data['basis'] ?? ReportService::basis($name);
         $title = self::TITLES[$name];
@@ -389,6 +433,8 @@ class ReportExporter
             'period_word' => $periodWord,
             'currency' => $currency,
             'printed' => $printed,
+            // AG-088 R6: printed on every PDF page right after "Printed by" (AG-087 put it in the Excel lines only).
+            'extracted' => $extracted,
             'basis' => $basis,
             'notes' => $notes,
             'provisional' => $data['provisional'],
@@ -448,6 +494,26 @@ class ReportExporter
 
     private function pdf(string $name, array $head, array $data, string $file): Response
     {
+        return response($this->pdfBytes($name, $head, $data), 200, [
+            'Content-Type' => 'application/pdf',
+            'Content-Disposition' => 'attachment; filename="'.$file.'"',
+        ]);
+    }
+
+    /** "<date> HH:mm (Asia/Colombo)" in the date format setting, now. */
+    public static function printedAt(): string
+    {
+        $now = now()->setTimezone('Asia/Colombo');
+
+        return app(Settings::class)->formatDate($now->format('Y-m-d')).' '.$now->format('H:i').' (Asia/Colombo)';
+    }
+
+    /**
+     * AG-088 R6: the PDF bytes from the same views and header as the synchronous export (pdf() wraps this). The caller
+     * holds the snapshot and has checked the PDF cap.
+     */
+    public function pdfBytes(string $name, array $head, array $data): string
+    {
         $view = match ($name) {
             'income-expense' => ['reports.pdf.income-expense', ['data' => $data]],
             'branch-comparison' => ['reports.pdf.branch-comparison', ['data' => $data]],
@@ -466,10 +532,7 @@ class ReportExporter
         $font = $dompdf->getFontMetrics()->getFont('Helvetica');
         $canvas->page_text($canvas->get_width() - 90, $canvas->get_height() - 28, 'Page {PAGE_NUM} of {PAGE_COUNT}', $font, 8);
 
-        return response($pdf->output(), 200, [
-            'Content-Type' => 'application/pdf',
-            'Content-Disposition' => 'attachment; filename="'.$file.'"',
-        ]);
+        return (string) $pdf->output();
     }
 
     /** Flatten a cash book account into printable lines: one summary row per day, then its detail lines. */
