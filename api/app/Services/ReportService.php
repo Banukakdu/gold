@@ -9,12 +9,14 @@ use App\Models\PeriodLock;
 use App\Models\Transaction;
 use App\Models\YearEndClose;
 use App\Support\BranchContext;
+use App\Support\BusinessDate;
 use App\Support\FiscalYear;
 use App\Support\Money;
 use App\Support\ReportParams;
 use App\Support\Settings;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Query\Builder;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -49,7 +51,7 @@ class ReportService
         self::$receiptColumns = null;
     }
 
-    public const NAMES = ['income-expense', 'branch-comparison', 'transfers', 'cash-book', 'trial-balance'];
+    public const NAMES = ['income-expense', 'branch-comparison', 'transfers', 'cash-book', 'trial-balance', 'cash-flow'];
 
     /** Excel export and cash book screen cap (detail rows). */
     public const EXPORT_CAP = 5000;
@@ -145,6 +147,8 @@ class ReportService
                 && ($d['to'] !== $fy->end() || ! YearEndClose::active()->where('fiscal_year', $fy->startYear)->exists())) {
                 throw ValidationException::withMessages(['closing_entries' => self::TB_CLOSING_ONLY_AT_YEAR_END]);
             }
+        } elseif ($name === 'cash-flow') {
+            $this->cashFlowRange($d['from'], $d['to']);
         } else {
             $days = CarbonImmutable::parse($d['from'])->diffInDays(CarbonImmutable::parse($d['to'])) + 1;
             $max = $name === 'cash-book' ? self::CASH_BOOK_MAX_DAYS : self::MAX_DAYS;
@@ -349,17 +353,19 @@ class ReportService
         $before = fn (string $op, string $date) => $this->moneyLines()->whereIn('le.branch_id', $ids)->whereDate('le.entry_date', $op, $date)
             ->groupBy('le.branch_id')->selectRaw("le.branch_id, SUM($dr - $cr) as cents")->pluck('cents', 'branch_id');
         $opening = $before('<', $p->from);
-        $ledgerClosing = $before('<=', $p->to);
 
-        // Effective side: a reversal entry is booked on the original entry's side, negated.
+        // Effective side: a reversal entry is booked on the original entry's side, negated. Every status is read in this
+        // one statement (cash-flow review M1): `ledger` (plain debit - credit of all lines, voids included) and the
+        // counted figures come from the same consistent read, so a posting or void committing while the report runs
+        // cannot fake a reconciliation failure. The ledger closing is the opening plus that movement.
         $moves = $this->moneyLines()
             ->join('transactions as t', 't.id', '=', 'le.transaction_id')
             ->leftJoin('transactions as o', 'o.id', '=', 't.reversal_of_id')
             ->whereIn('le.branch_id', $ids)
-            ->whereIn('t.status', ['posted', 'reversed'])
             ->whereDate('le.entry_date', '>=', $p->from)->whereDate('le.entry_date', '<=', $p->to)
-            ->groupByRaw('le.branch_id, COALESCE(o.type, t.type)')
-            ->selectRaw("le.branch_id, COALESCE(o.type, t.type) as etype,
+            ->groupByRaw("le.branch_id, COALESCE(o.type, t.type), CASE WHEN t.status IN ('posted', 'reversed') THEN 1 ELSE 0 END")
+            ->selectRaw("le.branch_id, COALESCE(o.type, t.type) as etype, CASE WHEN t.status IN ('posted', 'reversed') THEN 1 ELSE 0 END as counted,
+                SUM($dr - $cr) as ledger,
                 SUM(CASE WHEN t.type = 'reversal' THEN -$cr ELSE $dr END) as dr,
                 SUM(CASE WHEN t.type = 'reversal' THEN -$dr ELSE $cr END) as cr")
             ->get()->groupBy('branch_id');
@@ -369,7 +375,12 @@ class ReportService
         foreach ($p->branches as $b) {
             $c = array_fill_keys(self::COMPARISON_KEYS, 0);
             $c['opening'] = (int) ($opening[$b->id] ?? 0);
+            $expected = $c['opening'];
             foreach ($moves[$b->id] ?? [] as $m) {
+                $expected += (int) $m->ledger;
+                if (! (int) $m->counted) {
+                    continue; // voided: lines and contras net to zero, not counted (R2)
+                }
                 $in = (int) $m->dr;
                 $out = (int) $m->cr;
                 match ($m->etype) {
@@ -384,7 +395,6 @@ class ReportService
                 };
             }
             $c['closing'] = $c['opening'] + $c['capital'] + $c['funds_received'] + $c['income'] - $c['expenses'] + $c['transfers_in'] - $c['transfers_out'];
-            $expected = (int) ($ledgerClosing[$b->id] ?? 0);
             if ($c['closing'] !== $expected) {
                 Log::error('Branch comparison does not reconcile', ['branch' => $b->code, 'from' => $p->from, 'to' => $p->to, 'computed' => $c['closing'], 'ledger' => $expected]);
                 throw new RuntimeException("Branch comparison for {$b->code} does not reconcile with the ledger.");
@@ -396,6 +406,237 @@ class ReportService
         }
 
         return $this->meta($p) + ['rows' => $rows, 'total' => array_map([Money::class, 'fromCents'], $total)];
+    }
+
+    // ------------------------------------------------------------------ AG-086 Cash Flow Summary (docs/specs/cash-flow.md)
+
+    /** Response keys of a month and of the total, in the column order of the spec (section 4, review finding 2). */
+    public const CASH_FLOW_KEYS = ['opening', 'income', 'expenses', 'operating_net', 'capital', 'funds_received', 'transfers_in', 'transfers_out',
+        'funding_net', 'inflow', 'outflow', 'net', 'closing', 'eliminated'];
+
+    /**
+     * Figures that only a reversal of an earlier month can make negative (review finding 5), as shown on screen.
+     * Eliminated is in the exports only; ReportExporter adds the note there when it is negative (review m5).
+     */
+    private const CASH_FLOW_GROSS = ['income', 'expenses', 'capital', 'funds_received', 'transfers_in', 'transfers_out'];
+
+    public const CASH_FLOW_MAX_MONTHS = 24;
+
+    public const CASH_FLOW_BASIS = 'Cash, bank and wallet accounts; posted entries incl. reversals; voided entries excluded';
+
+    public const CASH_FLOW_BASIS_ELIMINATED = '; inter-branch movements within the selection eliminated';
+
+    public const CASH_FLOW_WHOLE_MONTHS = 'Cash flow uses whole months: From must be the first day of a month and To the last day of a month.';
+
+    public const CASH_FLOW_FUTURE = 'The report cannot cover future months.';
+
+    public const CASH_FLOW_TOO_LONG = 'The range may not be longer than 24 months.';
+
+    public const CASH_FLOW_UNRECONCILED = 'This report could not be produced because its figures do not agree with the ledger. Nothing was changed. Please report this to your administrator.';
+
+    public const CASH_FLOW_FORMULA_NOTE = 'Inflow = Income received + Capital introduced + Funds received + Transfers in. Outflow = Expenses paid + Transfers out. '
+        .'Operating net = Income received - Expenses paid. Funding net = Capital introduced + Funds received + Transfers in - Transfers out. '
+        .'Net change = Operating net + Funding net = Inflow - Outflow. Closing = Opening + Net change; it carries on across fiscal-year ends.';
+
+    public const CASH_FLOW_TRANSFER_NOTE = 'Funds received = opening allocations and top-ups. Transfers in = fund returns and branch transfers. Transfers out = all four, sent. '
+        .'Only movements with branches outside the selection are shown. Internal transfers between accounts of the same branch and year-end closing entries do not move cash and are not shown.';
+
+    public const CASH_FLOW_NEGATIVE_NOTE = 'Negative amounts are reversals of entries recorded in an earlier month.';
+
+    public const CASH_FLOW_EMPTY = 'No cash movements in this period.';
+
+    /** R7: whole months, not beyond the current month, at most 24 months. */
+    private function cashFlowRange(string $from, string $to): void
+    {
+        $f = CarbonImmutable::createFromFormat('!Y-m-d', $from);
+        $t = CarbonImmutable::createFromFormat('!Y-m-d', $to);
+        if ($f->day !== 1) {
+            throw ValidationException::withMessages(['from' => self::CASH_FLOW_WHOLE_MONTHS]);
+        }
+        if ($t->day !== $t->daysInMonth) {
+            throw ValidationException::withMessages(['to' => self::CASH_FLOW_WHOLE_MONTHS]);
+        }
+        if ($t->format('Y-m') > BusinessDate::currentPeriod()) {
+            throw ValidationException::withMessages(['to' => self::CASH_FLOW_FUTURE]);
+        }
+        if (count(self::monthsBetween($from, $to)) > self::CASH_FLOW_MAX_MONTHS) {
+            throw ValidationException::withMessages(['to' => self::CASH_FLOW_TOO_LONG]);
+        }
+    }
+
+    /** @return string[] every calendar month "YYYY-MM" from the month of $from to the month of $to */
+    public static function monthsBetween(string $from, string $to): array
+    {
+        $months = [];
+        for ($m = CarbonImmutable::createFromFormat('!Y-m-d', substr($from, 0, 7).'-01'); $m->format('Y-m') <= substr($to, 0, 7); $m = $m->addMonth()) {
+            $months[] = $m->format('Y-m');
+        }
+
+        return $months;
+    }
+
+    /**
+     * R7: a full fiscal year (or calendar year) as the other reports; a range over two or more fiscal years reads
+     * "Apr 2025 - Nov 2026 (FY 2025-26 and FY 2026-27 to date)" (review finding 6c); otherwise the date range.
+     */
+    public static function cashFlowPeriodLabel(string $from, string $to): string
+    {
+        $settings = app(Settings::class);
+        $first = $settings->fiscalYear($from);
+        $last = $settings->fiscalYear($to);
+        if ($first->startYear === $last->startYear) {
+            return ReportExporter::periodLabel($from, $to);
+        }
+        $labels = [];
+        for ($fy = $first; $fy->startYear <= $last->startYear; $fy = $fy->next()) {
+            $labels[] = $fy->label();
+        }
+        if (substr($to, 0, 7) === BusinessDate::currentPeriod() && $to < $last->end()) {
+            $labels[count($labels) - 1] .= ' to date';
+        }
+        $tail = array_pop($labels);
+        $mon = fn (string $d) => CarbonImmutable::createFromFormat('!Y-m-d', $d)->format('M Y');
+
+        return $mon($from).' - '.$mon($to).' ('.($labels ? implode(', ', $labels).' and ' : '').$tail.')';
+    }
+
+    /**
+     * R1-R6. One row per calendar month. Money lines only (account type in MONEY_TYPES, finding 4); a reversal line is
+     * classified by the original's type, on the original line's side, negated (R2); transfer lines whose counterparty
+     * branch is in the selection are eliminated (R4). Every month is checked against the ledger (R6, finding 3).
+     */
+    public function cashFlow(ReportParams $p): array
+    {
+        $ids = $p->branchIds();
+        $selected = array_flip($ids);
+        $months = self::monthsBetween($p->from, $p->to);
+        $dr = $this->cents('le.debit');
+        $cr = $this->cents('le.credit');
+        $inRange = fn (Builder $q) => $q->whereIn('le.branch_id', $ids)->whereDate('le.entry_date', '>=', $p->from)->whereDate('le.entry_date', '<=', $p->to);
+
+        // R5 opening (all statuses: voided lines net to 0). Both sides of check (a) start from it, so a posting dated
+        // before `from` that lands after this read cannot make the check fail.
+        $opening = (int) $this->moneyLines()->whereIn('le.branch_id', $ids)->whereDate('le.entry_date', '<', $p->from)->sum(DB::raw("$dr - $cr"));
+
+        // Every money line in range, of every status, in ONE statement (review M1): the plain ledger movement for check (a)
+        // and the counted lines (R2) come from the same consistent read, so a posting or void that commits while the
+        // report runs cannot fake a mismatch. Grouped by plain columns (portable GROUP BY); classification is below.
+        // ledger_entries.transaction_id is a non-null foreign key, so the inner join loses no line.
+        $lines = $inRange($this->moneyLines())
+            ->join('transactions as t', 't.id', '=', 'le.transaction_id')
+            ->leftJoin('transactions as o', 'o.id', '=', 't.reversal_of_id')
+            ->groupBy('le.entry_date', 'le.branch_id', 't.status', 't.type', 'o.type', 't.branch_id', 't.related_branch_id', 'o.branch_id', 'o.related_branch_id')
+            ->selectRaw("le.entry_date as d, le.branch_id as b, t.status as status, t.type as ttype, o.type as otype, t.branch_id as tb, t.related_branch_id as tr,
+                o.branch_id as ob, o.related_branch_id as orr, SUM($dr) as dr, SUM($cr) as cr")
+            ->get();
+        $ledger = array_fill_keys($months, 0);
+
+        $zero = array_fill_keys(self::CASH_FLOW_KEYS, 0) + ['eliminated_out' => 0];
+        $c = array_fill_keys($months, $zero);
+        $eliminatedAny = false;
+        $moved = false;
+        foreach ($lines as $l) {
+            $m = substr((string) $l->d, 0, 7);
+            $ledger[$m] += (int) $l->dr - (int) $l->cr;
+            // R2: voided entries (original lines and their contras) are not counted.
+            if (! in_array($l->status, ['posted', 'reversed'], true)) {
+                continue;
+            }
+            $reversal = $l->ttype === Transaction::REVERSAL;
+            $type = $reversal ? $l->otype : $l->ttype;
+            // Effective side: a reversal entry is booked on the original entry's side, negated.
+            $in = $reversal ? -(int) $l->cr : (int) $l->dr;
+            $out = $reversal ? -(int) $l->dr : (int) $l->cr;
+            if (in_array($type, self::MOVEMENT_TYPES, true)) {
+                // R4: the counterparty is the other branch of the transaction's pair (a reversal keeps the original's).
+                [$sender, $receiver] = $reversal ? [$l->ob, $l->orr] : [$l->tb, $l->tr];
+                $counterparty = (int) $l->b === (int) $sender ? $receiver : $sender;
+                if ($counterparty !== null && isset($selected[(int) $counterparty])) {
+                    $c[$m]['eliminated'] += $in;
+                    $c[$m]['eliminated_out'] += $out;
+                    $eliminatedAny = $eliminatedAny || $in !== 0 || $out !== 0;
+
+                    continue;
+                }
+            }
+            // Finding m4: only what is shown counts as movement (not eliminated lines, not internal transfers).
+            if ($type !== Transaction::INTERNAL_TRANSFER) {
+                $moved = $moved || $in !== 0 || $out !== 0;
+            }
+            match ($type) {
+                Transaction::INCOME => $c[$m]['income'] += $in - $out,
+                Transaction::EXPENSE => $c[$m]['expenses'] += $out - $in,
+                Transaction::CAPITAL => $c[$m]['capital'] += $in - $out,
+                Transaction::OPENING_ALLOCATION, Transaction::FUND_ALLOCATION => [$c[$m]['funds_received'] += $in, $c[$m]['transfers_out'] += $out],
+                Transaction::FUND_RETURN, Transaction::BRANCH_TRANSFER => [$c[$m]['transfers_in'] += $in, $c[$m]['transfers_out'] += $out],
+                // Internal transfers net to zero in the branch on the same day; anything else is unexpected and
+                // makes check (a) fail.
+                default => null,
+            };
+        }
+
+        $run = $opening;
+        $ledgerRun = $opening;
+        $total = array_fill_keys(self::CASH_FLOW_KEYS, 0);
+        $rows = [];
+        $negative = false;
+        foreach ($months as $m) {
+            $x = $c[$m];
+            $x['opening'] = $run;
+            $x['operating_net'] = $x['income'] - $x['expenses'];
+            $x['funding_net'] = $x['capital'] + $x['funds_received'] + $x['transfers_in'] - $x['transfers_out'];
+            $x['inflow'] = $x['income'] + $x['capital'] + $x['funds_received'] + $x['transfers_in'];
+            $x['outflow'] = $x['expenses'] + $x['transfers_out'];
+            $x['net'] = $x['inflow'] - $x['outflow'];
+            $x['closing'] = $x['opening'] + $x['net'];
+            $ledgerRun += $ledger[$m];
+
+            // R6 runtime checks (b) and (a). Check (c), Operating net + Funding net = Net = Inflow - Outflow, holds by
+            // construction of the figures above (review nit: it can never fail), so the tests assert it instead.
+            if ($x['eliminated'] !== $x['eliminated_out']) {
+                $this->cashFlowUnreconciled($p, $m, 'eliminated debits = eliminated credits', $x['eliminated'], $x['eliminated_out']);
+            }
+            if ($x['closing'] !== $ledgerRun) {
+                $this->cashFlowUnreconciled($p, $m, 'closing = ledger', $x['closing'], $ledgerRun);
+            }
+
+            foreach (self::CASH_FLOW_KEYS as $k) {
+                $total[$k] += $x[$k];
+                $negative = $negative || (in_array($k, self::CASH_FLOW_GROSS, true) && $x[$k] < 0);
+            }
+            $rows[] = ['month' => $m] + array_map([Money::class, 'fromCents'], array_intersect_key($x, $total));
+            $run = $x['closing'];
+        }
+        $total['opening'] = $opening;
+        $total['closing'] = $run;
+
+        $notes = [self::CASH_FLOW_FORMULA_NOTE, self::CASH_FLOW_TRANSFER_NOTE];
+        if (count($ids) > 1 && $eliminatedAny) {
+            $notes[] = 'Inter-branch movements within the selection eliminated: '.Money::format(Money::fromCents($total['eliminated']));
+        }
+        if ($negative) {
+            $notes[] = self::CASH_FLOW_NEGATIVE_NOTE;
+        }
+
+        return $this->meta($p) + [
+            // A branch user is never "consolidated", even in a company with one branch (review nit).
+            'consolidated' => ! app(BranchContext::class)->isScoped() && count($ids) === Branch::count(),
+            'period_label' => self::cashFlowPeriodLabel($p->from, $p->to),
+            'basis' => self::CASH_FLOW_BASIS.($eliminatedAny ? self::CASH_FLOW_BASIS_ELIMINATED : ''),
+            'empty' => ! $moved,
+            'notes' => $notes,
+            'months' => $rows,
+            'total' => array_map([Money::class, 'fromCents'], $total),
+        ];
+    }
+
+    /** R6 / finding 3: no figures; a logged error and one plain message (no PHP text). */
+    private function cashFlowUnreconciled(ReportParams $p, string $month, string $check, int $computed, int $ledger): never
+    {
+        Log::error('Cash flow does not reconcile', ['check' => $check, 'branches' => $p->branches->pluck('code')->all(), 'from' => $p->from, 'to' => $p->to,
+            'month' => $month, 'computed' => Money::fromCents($computed), 'ledger' => Money::fromCents($ledger)]);
+
+        throw new HttpResponseException(response()->json(['message' => self::CASH_FLOW_UNRECONCILED], 500));
     }
 
     // ------------------------------------------------------------------ AG-084 Transfers & Allocations (R6)

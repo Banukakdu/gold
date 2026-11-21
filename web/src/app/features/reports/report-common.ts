@@ -45,6 +45,9 @@ export function toHttpParams(p: ReportParams): HttpParams {
   return params;
 }
 
+/** Cash flow R6 / review finding 3: the API's message for a report that does not tie to the ledger (shown as is). */
+export const UNRECONCILED = 'This report could not be produced because its figures do not agree with the ledger. Nothing was changed. Please report this to your administrator.';
+
 /**
  * Error text for a report request. Server errors (500) and network failures get a friendly line:
  * raw PHP messages are never shown (fix round, QA bug 1).
@@ -214,8 +217,12 @@ export class ExportButtonsComponent {
       // Error bodies arrive as a Blob because of responseType: 'blob'.
       const err = e as HttpErrorResponse;
       let msg = reportError(e);
-      if (err?.status && err.status < 500 && err.error instanceof Blob) {
-        try { msg = JSON.parse(await err.error.text())?.message ?? msg; } catch { /* keep default */ }
+      if (err?.status && err.error instanceof Blob) {
+        try {
+          const body = JSON.parse(await err.error.text())?.message;
+          // A 500 keeps the generic text, except the reconciliation stop, whose message is meant for the user (m1).
+          if (body && (err.status < 500 || body === UNRECONCILED)) msg = body;
+        } catch { /* keep default */ }
       }
       this.error.set(msg);
     } finally {
@@ -249,6 +256,8 @@ export class ReportHeadComponent {
   title = input('');
   /** Basis line; the trial balance has its own (double-entry S2). */
   basis = input('');
+  /** Period label sent by the API (AG-086 R7: a range over two fiscal years names both); default periodLabel(). */
+  periodText = input('');
   /** Time of printing (QA bug 3): refreshed when the browser starts printing. */
   printedAt = signal(this.now());
 
@@ -259,7 +268,7 @@ export class ReportHeadComponent {
   private now() { return `${this.settings.dateTime(new Date().toISOString())} (Asia/Colombo)`; }
 
   branchLabel(m: ReportMeta) { return m.branches.map(b => `${b.code} ${b.name}`).join(', '); }
-  period(m: ReportMeta) { return periodLabel(m.from, m.to, this.settings); }
+  period(m: ReportMeta) { return this.periodText() || periodLabel(m.from, m.to, this.settings); }
 }
 
 /** Prepared / Checked / Approved lines for printed reports (finding 4). */

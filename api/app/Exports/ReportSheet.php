@@ -13,7 +13,7 @@ use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
 /**
  * Writes every cell with an explicit type, so nothing a user typed is ever read as a formula:
- * amounts are numeric (#,##0.00), dates are date cells, text is a string cell; text starting with = + - @
+ * amounts are numeric (#,##0.00), dates (and months) are date cells, text is a string cell; text starting with = + - @
  * gets Excel's leading-apostrophe (quote prefix) so it stays literal when the cell is edited (spec section 5).
  */
 class ReportSheet implements WithEvents, WithTitle
@@ -95,6 +95,10 @@ class ReportSheet implements WithEvents, WithTitle
         } elseif ($type === 'date' && is_string($v) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $v)) {
             $ws->setCellValueExplicit([$col, $row], ExcelDate::stringToExcel($v), DataType::TYPE_NUMERIC);
             $ws->getStyle([$col, $row])->getNumberFormat()->setFormatCode(app(Settings::class)->excelDateFormat()); // AG-092 S3
+        } elseif ($type === 'month' && is_string($v) && preg_match('/^\d{4}-\d{2}$/', $v)) {
+            // AG-086 review finding 7: a real date cell (1st of the month) shown as "Oct 2026".
+            $ws->setCellValueExplicit([$col, $row], ExcelDate::stringToExcel($v.'-01'), DataType::TYPE_NUMERIC);
+            $ws->getStyle([$col, $row])->getNumberFormat()->setFormatCode('mmm yyyy');
         } else {
             $this->text($ws, $col, $row, (string) $v);
         }
