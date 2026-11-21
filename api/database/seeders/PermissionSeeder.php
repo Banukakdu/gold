@@ -16,6 +16,8 @@ class PermissionSeeder extends Seeder
         'role.view', 'role.manage',
         'account.view', 'account.manage',
         'transfer.create', 'transfer.reverse', 'transfer.acknowledge',
+        // AG-051: approve or reject held transfers; it only counts in MAIN (R3). "*" templates only by default.
+        'transfer.approve',
         'transaction.view',
         'income.create', 'income.edit', 'income.void',
         'expense.create', 'expense.edit', 'expense.void',

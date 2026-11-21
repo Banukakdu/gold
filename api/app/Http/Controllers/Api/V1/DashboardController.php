@@ -71,7 +71,9 @@ class DashboardController extends Controller
             'trend' => $trend,
             // AG-092 (settings spec R5, review finding 15): the dashboard is unchanged by a year-end close; a closing
             // transaction moves no money and is not a recent entry.
-            'recent' => Transaction::with(['branch:id,code', 'category:id,name'])->where('type', '<>', Transaction::YEAR_END_CLOSE)->latest('txn_date')->latest('id')->limit(10)
+            // AG-051 R13: transfer requests that never posted are not recent entries.
+            'recent' => Transaction::with(['branch:id,code', 'category:id,name'])->where('type', '<>', Transaction::YEAR_END_CLOSE)
+                ->whereNotIn('status', ['pending', 'rejected'])->latest('txn_date')->latest('id')->limit(10)
                 ->get(['id', 'ref_no', 'branch_id', 'type', 'txn_date', 'amount', 'category_id', 'status', 'description']),
         ];
     }

@@ -7,9 +7,11 @@ use App\Models\AuditLog;
 use App\Models\Setting;
 use App\Models\User;
 use App\Models\YearEndClose;
+use App\Services\TransferApprovals;
 use App\Support\Currencies;
 use App\Support\LogoFile;
 use App\Support\LogoStore;
+use App\Support\Money;
 use App\Support\Settings;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -32,7 +34,16 @@ class SettingsController extends Controller
         'fiscal_year_start_month' => 'fiscal_year_start_month',
         // AG-052 S1 / R3 (stored as 0 / 1).
         'transfer_receipt_required' => 'transfer_receipt_required',
+        // AG-051 S1 / R2: decimal string in the API, integer cents in the row, null = never.
+        'transfer_approval_threshold' => 'transfer_approval_threshold',
     ];
+
+    public const THRESHOLD = 'Enter an amount of 0 or more with up to 2 decimals, or leave it empty.';
+
+    /** AG-051 R18 (accounting review finding 7): shown, never blocking. */
+    public const THRESHOLD_INVALID = 'The stored approval threshold is not valid, so no transfer is held. Enter it again and save.';
+
+    public const NO_APPROVER = "Only the Super Admin can approve; requests from MAIN's own admin will wait for you.";
 
     public const CURRENCY_LOCKED = 'The currency cannot be changed after entries have been posted.';
 
@@ -95,6 +106,14 @@ class SettingsController extends Controller
             'date_format' => ['sometimes', 'required', Rule::in(array_keys(Settings::DATE_FORMATS))],
             'fiscal_year_start_month' => 'sometimes|required|integer|between:1,12',
             'transfer_receipt_required' => 'sometimes|required|boolean',
+            'transfer_approval_threshold' => ['sometimes', 'nullable', function (string $a, mixed $v, \Closure $fail) {
+                if (is_string($v) && trim($v) === '') {
+                    return; // empty = never
+                }
+                if (! (is_string($v) || is_int($v)) || ! preg_match('/^\d{1,13}(\.\d{1,2})?$/', trim((string) $v))) {
+                    $fail(self::THRESHOLD);
+                }
+            }],
             // Review N3: an array or text is a 422, never a string cast of an array.
             'currency_decimals' => 'sometimes|required|integer',
         ], [
@@ -118,6 +137,12 @@ class SettingsController extends Controller
             $d['transfer_receipt_required'] = filter_var($d['transfer_receipt_required'], FILTER_VALIDATE_BOOLEAN) ? 1 : 0;
         }
 
+        if (array_key_exists('transfer_approval_threshold', $d)) {
+            // Exact through integer cents ("100000" and "100000.00" are the same value).
+            $v = trim((string) $d['transfer_approval_threshold']);
+            $d['transfer_approval_threshold'] = $v === '' ? null : Money::fromCents(Money::toCents($v));
+        }
+
         DB::transaction(function () use ($d) {
             // Review N4: the rows FOR UPDATE before the old values are read, so two saves cannot both audit the same
             // old value. Ordered by key, one lock order.
@@ -134,7 +159,11 @@ class SettingsController extends Controller
                 throw ValidationException::withMessages(['fiscal_year_start_month' => self::FISCAL_LOCKED]);
             }
             foreach ($changed as $k => $v) {
-                Setting::put(self::EDITABLE[$k], (string) $v);
+                Setting::put(self::EDITABLE[$k], match (true) {
+                    $k !== 'transfer_approval_threshold' => (string) $v,
+                    $v === null => null,
+                    default => (string) Money::toCents($v),
+                });
             }
             // R2: accounts.currency follows the setting (amounts are never converted).
             if (isset($changed['currency_code'])) {
@@ -202,6 +231,7 @@ class SettingsController extends Controller
             'date_format' => $this->settings->dateFormat(),
             'fiscal_year_start_month' => $this->settings->fiscalYearStartMonth(),
             'transfer_receipt_required' => $this->settings->transferReceiptRequired() ? 1 : 0,
+            'transfer_approval_threshold' => ($c = $this->settings->transferApprovalThresholdCents()) === null ? null : Money::fromCents($c),
         ];
     }
 
@@ -243,6 +273,11 @@ class SettingsController extends Controller
         $out['fiscal_year_start_locked'] = YearEndClose::query()->exists();
         $out['date_formats'] = array_keys(Settings::DATE_FORMATS);
         $out['currencies'] = Currencies::CODES;
+        $out['transfer_approval_warning'] = match (true) {
+            $this->settings->transferApprovalThresholdInvalid() => self::THRESHOLD_INVALID,
+            $out['transfer_approval_threshold'] !== null && ! app(TransferApprovals::class)->mainHasApprover() => self::NO_APPROVER,
+            default => null,
+        };
 
         // "Last changed by <name> on <date>" per field, from the audit (newest first).
         $last = [];

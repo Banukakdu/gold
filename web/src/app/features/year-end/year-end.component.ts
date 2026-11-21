@@ -8,6 +8,7 @@ import { MoneyPipe } from '../../core/money.pipe';
 import { SettingsService } from '../../core/settings.service';
 import { SignaturesComponent } from '../reports/report-common';
 import { InTransitInfo, inTransitLine } from '../../core/receipts';
+import { PendingApprovalInfo, pendingApprovalLine } from '../../core/approvals';
 
 interface Person { id: number; name: string }
 interface Close {
@@ -25,7 +26,7 @@ interface BranchPreview {
   branch: { id: number; code: string; name: string; status: string };
   income: string; expense: string; net: string; ie_net: string; difference: string; lines: Line[];
 }
-interface Preview extends InTransitInfo {
+interface Preview extends InTransitInfo, PendingApprovalInfo {
   fiscal_year: { start_year: number; label: string; short_label: string; start: string; end: string; closed: boolean };
   branches: BranchPreview[]; total_net: string; total_ie_net: string; retained_earnings_movement: string;
   checks: { code: string; message: string }[];
@@ -187,7 +188,10 @@ export class YearEndComponent implements OnInit {
   preview = signal<Preview | null>(null);
 
   transit(p: Preview | null): string {
-    return p ? inTransitLine(p, this.settings.date(p.fiscal_year.end), v => new MoneyPipe().transform(v)) : '';
+    if (!p) return '';
+    const money = (v: string) => new MoneyPipe().transform(v);
+    // AG-051 finding 15: requests dated in the year and still pending (information only).
+    return [inTransitLine(p, this.settings.date(p.fiscal_year.end), money), pendingApprovalLine(p, p.fiscal_year.label, money)].filter(Boolean).join(' ');
   }
 
   closePreview = signal<Preview | null>(null);

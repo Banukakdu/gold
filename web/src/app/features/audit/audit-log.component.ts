@@ -47,6 +47,9 @@ function show(v: unknown): string {
         @for (a of actors(); track a.id) { <option [value]="a.id">{{ a.name }}{{ a.tag ? ' (' + a.tag + ')' : '' }}</option> }
       </select>
       <label><input type="checkbox" name="self" [(ngModel)]="f.self" style="width:auto" /> Self only</label>
+      <!-- AG-051 accounting review finding 6 -->
+      <label title="Super Admin branch transfers and fund returns above the approval threshold, posted without approval">
+        <input type="checkbox" name="unapproved" [(ngModel)]="f.unapproved" style="width:auto" /> Super Admin, not held for approval</label>
       <input name="ref_no" placeholder="Ref no (exact)" [(ngModel)]="f.ref_no" />
       @if (auth.isAllBranches()) {
         <span class="picker-inline">
@@ -120,7 +123,7 @@ export class AuditLogComponent implements OnInit {
   groups: [string, string][] = [['', 'All events'], ['transactions', 'Transactions'], ['voids', 'Voids and reversals'], ['users', 'Users'],
     ['roles', 'Roles'], ['accounts', 'Accounts'], ['branches', 'Branches'], ['periods', 'Period locks'], ['reports', 'Reports'], ['logins', 'Logins'],
     ['attachments', 'Attachments'], ['settings', 'Settings'], ['year_end', 'Year-end'], ['categories', 'Categories'], ['backups', 'Backups']];
-  f = { from: colomboToday().slice(0, 8) + '01', to: colomboToday(), event_group: '', user_id: '', self: false, ref_no: '' };
+  f = { from: colomboToday().slice(0, 8) + '01', to: colomboToday(), event_group: '', user_id: '', self: false, ref_no: '', unapproved: false };
   branches: string[] = [];
   page = signal<AuditPage | null>(null);
   actors = signal<Actor[]>([]);
@@ -160,7 +163,8 @@ export class AuditLogComponent implements OnInit {
 
   private params(): ReportParams {
     return { from: this.f.from, to: this.f.to, event_group: this.f.event_group, user_id: this.f.user_id, self: this.f.self ? 1 : '',
-      ref_no: this.f.ref_no.trim(), branches: this.auth.isAllBranches() ? this.branches : [] };
+      ref_no: this.f.ref_no.trim(), branches: this.auth.isAllBranches() ? this.branches : [],
+      approval: this.f.unapproved ? 'not_required_super_admin' : '' };
   }
 
   toggleBranch(id: string) {

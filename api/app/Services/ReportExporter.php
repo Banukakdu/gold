@@ -503,6 +503,17 @@ class ReportExporter
                     ),
                 ],
                 $this->matrixSheet($d, $row),
+                // AG-051 S7: only when something is pending.
+                ...(($d['pending_approval']['count'] ?? 0) > 0 ? [[
+                    'title' => 'Pending approval',
+                    'columns' => [['Requested on', 'date'], ['Ref no', 'text'], ['Type', 'text'], ['From', 'text'], ['To', 'text'], ['Amount', 'amount']],
+                    'rows' => array_merge(
+                        array_map(fn ($m) => $row([$m['requested_date'], $m['ref_no'], ReportService::typeLabel($m['type']), $m['from']['branch_code'].' - '.$m['from']['account'],
+                            $m['to']['branch_code'].' - '.$m['to']['account'], $m['amount']]), $d['pending_approval']['data']),
+                        [$row(["{$d['pending_approval']['count']} pending", '', '', '', '', $d['pending_approval']['amount']], true)],
+                    ),
+                    'notes' => ['Pending approval now (not included in Movements, Net moved or the matrix).'],
+                ]] : []),
             ],
 
             'trial-balance' => $this->trialBalanceSheets($d, $row),

@@ -14,6 +14,8 @@ export interface PublicSettings {
   date_format: string;
   fiscal_year_start_month: number | string;
   current_fiscal_year: FiscalYearInfo;
+  /** AG-051 R2: transfers above this amount need Main's approval; null = never. */
+  transfer_approval_threshold?: string | null;
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];

@@ -86,7 +86,7 @@ class LedgerFlowTest extends AccountingTestCase
         $this->asAdmin()->postJson('/api/v1/transfers', [
             'from_account_id' => $this->cashOf($kdy)->id, 'to_account_id' => $this->cashOf($gle)->id,
             'amount' => '10', 'txn_date' => now()->toDateString(), 'note' => 'x',
-        ])->assertStatus(422)->assertJsonFragment(['message' => 'Insufficient balance in Cash (available 0.00).']);
+        ])->assertStatus(422)->assertJsonFragment(['message' => 'Insufficient balance in KDY Cash (available 0.00).']);
 
         PeriodLock::create(['branch_id' => null, 'period' => now()->format('Y-m'), 'locked_by' => $this->admin->id]);
         $this->asAdmin()->postJson('/api/v1/capital', ['account_id' => $this->mainAcc->id, 'amount' => '5', 'txn_date' => now()->toDateString()])

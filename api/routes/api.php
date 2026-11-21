@@ -16,6 +16,7 @@ use App\Http\Controllers\Api\V1\ReportController;
 use App\Http\Controllers\Api\V1\RoleController;
 use App\Http\Controllers\Api\V1\SettingsController;
 use App\Http\Controllers\Api\V1\TransactionController;
+use App\Http\Controllers\Api\V1\TransferApprovalController;
 use App\Http\Controllers\Api\V1\TransferController;
 use App\Http\Controllers\Api\V1\TransferReceiptController;
 use App\Http\Controllers\Api\V1\UserController;
@@ -112,6 +113,15 @@ Route::prefix('v1')->group(function () {
             Route::post('capital', [TransferController::class, 'capital'])->middleware('super');
             Route::post('allocations', [TransferController::class, 'allocate'])->middleware('super');
             Route::post('transfers', [TransferController::class, 'transfer'])->middleware('perm:transfer.create');
+            // AG-051 transfer approvals: rows are read without the branch scope; the service checks Main (R3) and the
+            // requester (R4) itself.
+            Route::get('transfer-approvals', [TransferApprovalController::class, 'index'])->middleware('perm:transaction.view');
+            Route::post('transfer-approvals/{transactionId}/approve', [TransferApprovalController::class, 'approve'])->whereNumber('transactionId')
+                ->middleware('perm:transfer.approve');
+            Route::post('transfer-approvals/{transactionId}/reject', [TransferApprovalController::class, 'reject'])->whereNumber('transactionId')
+                ->middleware('perm:transfer.approve');
+            Route::post('transfer-approvals/{transactionId}/cancel', [TransferApprovalController::class, 'cancel'])->whereNumber('transactionId')
+                ->middleware('perm:transfer.create');
 
             Route::get('permissions', [RoleController::class, 'permissions'])->middleware('perm:role.view');
             Route::get('roles', [RoleController::class, 'index'])->middleware('perm:role.view');

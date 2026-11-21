@@ -38,12 +38,41 @@ final class LedgerChecks
             ->orderBy('le.transaction_id')->get();
     }
 
-    /** V1: transactions without lines that are not legacy voids. */
+    /**
+     * V1: transactions without lines that are not legacy voids. AG-051 R13: transfer requests that never posted
+     * (status pending / rejected) have no lines by design; V9 (approvalRequests) asserts that instead.
+     */
     public static function withoutLines(): Collection
     {
-        return DB::table('transactions as t')->join('branches as b', 'b.id', '=', 't.branch_id')->where('t.status', '!=', 'void')
+        return DB::table('transactions as t')->join('branches as b', 'b.id', '=', 't.branch_id')->whereNotIn('t.status', ['void', 'pending', 'rejected'])
             ->whereNotExists(fn ($q) => $q->select(DB::raw(1))->from('ledger_entries as le')->whereColumn('le.transaction_id', 't.id'))
             ->orderBy('t.id')->get(['t.id as transaction_id', 't.ref_no', 't.txn_date', 'b.code as branch']);
+    }
+
+    /**
+     * V9 (AG-051, accounting review MUST 2): a transfer request that never posted has zero ledger lines, and status
+     * agrees with approval_status (pending <-> pending; rejected / cancelled / expired <-> rejected; approved <->
+     * posted | reversed; status pending / rejected only with an approval_status). Offenders as [ref, date, branch, problem].
+     */
+    public static function approvalRequests(): Collection
+    {
+        $closed = ['rejected', 'cancelled', 'expired'];
+        $lines = fn ($q) => $q->select(DB::raw(1))->from('ledger_entries as le')->whereColumn('le.transaction_id', 't.id');
+        $base = fn () => DB::table('transactions as t')->join('branches as b', 'b.id', '=', 't.branch_id')
+            ->select('t.id as transaction_id', 't.ref_no', 't.txn_date', 'b.code as branch', 't.status', 't.approval_status')->orderBy('t.id');
+
+        $withLines = $base()->where(fn ($w) => $w->whereIn('t.status', ['pending', 'rejected'])->orWhereIn('t.approval_status', ['pending', ...$closed]))
+            ->whereExists($lines)->get()
+            ->each(fn ($r) => $r->problem = 'request that never posted has ledger lines');
+        $disagree = $base()->where(fn ($w) => $w
+            ->where(fn ($x) => $x->where('t.approval_status', 'pending')->where('t.status', '!=', 'pending'))
+            ->orWhere(fn ($x) => $x->whereIn('t.approval_status', $closed)->where('t.status', '!=', 'rejected'))
+            ->orWhere(fn ($x) => $x->where('t.approval_status', 'approved')->whereNotIn('t.status', ['posted', 'reversed']))
+            ->orWhere(fn ($x) => $x->whereIn('t.status', ['pending', 'rejected'])->whereNull('t.approval_status'))
+            ->orWhere(fn ($x) => $x->whereNotNull('t.approval_status')->whereNotIn('t.approval_status', ['pending', 'approved', ...$closed])))
+            ->get()->each(fn ($r) => $r->problem = "status {$r->status} disagrees with approval_status ".($r->approval_status ?? 'null'));
+
+        return $withLines->merge($disagree)->values();
     }
 
     /** V3: debit - credit (cents) per branch over all lines; the trial balance nets to zero when every value is 0. */

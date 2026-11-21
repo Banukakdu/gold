@@ -14,6 +14,7 @@ import { SettingsService } from '../../core/settings.service';
 import { LockBannerComponent } from '../period-locks/lock-banner.component';
 import { BranchPickerComponent, queuedNotice } from '../reports/report-common';
 import { RECEIPT_TAGS, receiptLabel } from '../../core/receipts';
+import { approvalLabel } from '../../core/approvals';
 
 interface Creator { id: number; name: string; tag: string | null }
 interface AccountOpt { id: number; name: string; status?: string; branch_id: number; branch?: { code: string } }
@@ -22,7 +23,8 @@ interface BranchOpt { id: number; code: string; name: string }
 
 /** The filter params of the URL and the API (spec S1: param names are the API names, so the URL is the API query). */
 const FILTER_KEYS = ['from', 'to', 'type', 'status', 'receipt', 'account_id', 'category_id', 'category_only', 'created_by', 'min', 'max', 'q', 'files', 'branches'] as const;
-const STATUS_LABELS: Record<string, string> = { posted: 'Posted', void: 'Void', reversed: 'Reversed' };
+// AG-051 S6: pending = waiting for approval; rejected covers rejected, cancelled and expired requests (the tag says which).
+const STATUS_LABELS: Record<string, string> = { posted: 'Posted', void: 'Void', reversed: 'Reversed', pending: 'Pending approval', rejected: 'Rejected' };
 /** AG-052 S4: the receipt filter (checkbox labels). */
 const RECEIPT_FILTER: [string, string][] = [['awaiting', 'Awaiting'], ['received', 'Received'], ['disputed', 'Discrepancy'], ['cancelled', 'Cancelled']];
 const FILES_LABELS: Record<string, string> = { with: 'Has files', none: 'No files', removed: 'Has removed files' };
@@ -220,6 +222,8 @@ interface Chip { key: string; label: string; remove: string[] }
       } @else if (t.status === 'void') {
         <span class="tag" data-s="void">{{ t.type === 'year_end_close' ? 'Void (year reopened)' : 'Void' }}</span>
         @if (t.legacy_void_note) { <br /><small class="muted">{{ t.legacy_void_note }}</small> }
+      } @else if (t.approval_status && (t.status === 'pending' || t.status === 'rejected')) {
+        <span class="tag" data-s="reversed" [title]="t.approval_note ?? ''">{{ approvalText(t.approval_status) }}</span>
       } @else {
         <span class="tag" [attr.data-s]="t.status">{{ statusLabel(t.status) }}</span>
       }
@@ -633,6 +637,7 @@ export class TransactionListComponent implements OnInit {
 
   label(t: string) { return TYPE_LABELS[t] ?? t; }
   statusLabel(s: string) { return STATUS_LABELS[s] ?? s; }
+  approvalText(s: string) { return approvalLabel(s); }
   receiptTag(s: string) { return RECEIPT_TAGS[s] ?? s; }
   receiptTitle(t: Transaction) {
     return receiptLabel(t.receipt_status) + (t.received_on ? ` on ${this.date(t.received_on)}` : '') + (t.receipt_note ? `: ${t.receipt_note}` : '');

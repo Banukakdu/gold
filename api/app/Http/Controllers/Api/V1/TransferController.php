@@ -54,7 +54,11 @@ class TransferController extends Controller
             abort(403, self::MAIN_TO_BRANCH);
         }
 
-        return response()->json($this->ledger->transfer($d['from_account_id'], $d['to_account_id'], (string) $d['amount'], $d['txn_date'], $d['note']), 201);
+        $txn = $this->ledger->transfer($d['from_account_id'], $d['to_account_id'], (string) $d['amount'], $d['txn_date'], $d['note']);
+        // AG-051 section 5: status pending | posted decides the toast; R17 warning (never a block).
+        $txn->setAttribute('warning', $txn->requestWarning);
+
+        return response()->json($txn, 201);
     }
 
     public const MAIN_TO_BRANCH = 'Only a Super Admin can send funds from Main to a branch. Use "Fund a branch".';

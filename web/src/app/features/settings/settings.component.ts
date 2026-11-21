@@ -21,8 +21,11 @@ interface FullSettings extends Omit<PublicSettings, 'logo'> {
   last_changed: Record<string, { by: Person | null; at: string | null }>;
   /** AG-052 S1. */
   transfer_receipt_required: boolean;
+  /** AG-051 S1 / R18. */
+  transfer_approval_threshold: string | null;
+  transfer_approval_warning: string | null;
 }
-type Editable = 'company_name' | 'currency_code' | 'date_format' | 'fiscal_year_start_month' | 'transfer_receipt_required';
+type Editable = 'company_name' | 'currency_code' | 'date_format' | 'fiscal_year_start_month' | 'transfer_receipt_required' | 'transfer_approval_threshold';
 
 const MAX_LOGO = 1024 * 1024;
 const SAMPLE = '2026-10-05';
@@ -116,11 +119,20 @@ const SAMPLE = '2026-10-05';
             (branch roles already copied from the templates do not get it automatically).</small>
           @if (err()['transfer_receipt_required']) { <span class="neg">{{ err()['transfer_receipt_required'] }}</span> }
           <div class="changed">{{ changed('transfer_receipt_required') }}</div>
+          <!-- AG-051 S1 -->
+          <label>Transfers above this amount need approval
+            <input name="transfer_approval_threshold" inputmode="decimal" [(ngModel)]="form.transfer_approval_threshold" placeholder="Never" />
+            @if (err()['transfer_approval_threshold']) { <span class="neg">{{ err()['transfer_approval_threshold'] }}</span> }
+          </label>
+          <small class="muted">Leave empty for never. 0 means every branch transfer and fund return. Applies to branch transfers and fund
+            returns made by branch users; Super Admin transfers and internal transfers are never held. Grant 'transfer.approve' in MAIN before setting this.</small>
+          @if (s.transfer_approval_warning) { <div class="warn">{{ s.transfer_approval_warning }}</div> }
+          <div class="changed">{{ changed('transfer_approval_threshold') }}</div>
         </fieldset>
 
         <fieldset>
           <legend>Approvals</legend>
-          <span class="muted">Approval thresholds are set here when transfer approval (AG-051) and expense approval (AG-064) are released.</span>
+          <span class="muted">Expense approval thresholds are set here when expense approval (AG-064) is released.</span>
         </fieldset>
 
         <div style="display:flex;gap:8px">
@@ -137,7 +149,7 @@ export class SettingsComponent implements OnInit {
   months = MONTH_NAMES;
   s = signal<FullSettings | null>(null);
   form: Record<Editable, string | number | boolean> = { company_name: '', currency_code: '', date_format: '', fiscal_year_start_month: 4,
-    transfer_receipt_required: false };
+    transfer_receipt_required: false, transfer_approval_threshold: '' };
   msg = signal('');
   ok = signal('');
   logoMsg = signal('');
@@ -165,7 +177,8 @@ export class SettingsComponent implements OnInit {
     const s = this.s();
     if (!s) return;
     this.form = { company_name: s.company_name, currency_code: s.currency_code, date_format: s.date_format,
-      fiscal_year_start_month: Number(s.fiscal_year_start_month), transfer_receipt_required: !!s.transfer_receipt_required };
+      fiscal_year_start_month: Number(s.fiscal_year_start_month), transfer_receipt_required: !!s.transfer_receipt_required,
+      transfer_approval_threshold: s.transfer_approval_threshold ?? '' };
     this.err.set({});
   }
 
@@ -180,6 +193,9 @@ export class SettingsComponent implements OnInit {
     if (this.form.date_format !== s.date_format) out.date_format = this.form.date_format;
     if (Number(this.form.fiscal_year_start_month) !== Number(s.fiscal_year_start_month)) out.fiscal_year_start_month = Number(this.form.fiscal_year_start_month);
     if (!!this.form.transfer_receipt_required !== !!s.transfer_receipt_required) out.transfer_receipt_required = !!this.form.transfer_receipt_required;
+    // AG-051: sent as typed (the API checks the format and compares in cents); '' = never.
+    const threshold = String(this.form.transfer_approval_threshold ?? '').trim();
+    if (threshold !== (s.transfer_approval_threshold ?? '')) out.transfer_approval_threshold = threshold;
     return out;
   }
 

@@ -25,3 +25,7 @@ Schedule::command('backup:verify --oldest-offsite')->description('Monthly restor
 // AG-087 background exports (docs/specs/background-exports.md section 5 "Schedule"): expire files 24 h after ready,
 // fail stale exports, remove orphan files.
 Schedule::command('exports:prune')->description('Expire background exports')->hourly()->withoutOverlapping(30)->onOneServer();
+
+// AG-051 R8: transfer approval requests pending for 30 days expire (posts nothing).
+Schedule::command('transfers:expire-approvals')->description('Expire transfer approval requests')
+    ->dailyAt('00:30')->timezone($tz)->withoutOverlapping(60)->onOneServer();

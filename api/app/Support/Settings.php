@@ -93,6 +93,36 @@ final class Settings
         return $this->raw('transfer_receipt_required') === '1';
     }
 
+    /**
+     * AG-051 R2: transfers above this many cents need Main's approval. Null = never (default); 0 = every branch
+     * transfer and fund return. Stored as integer cents text; anything else reads as never.
+     */
+    public function transferApprovalThresholdCents(): ?int
+    {
+        $v = $this->raw('transfer_approval_threshold');
+        if ($v !== null && $v !== '' && ! ctype_digit($v)) {
+            // Review m9: never silent. A hand-edited value turns the control off; the Settings screen warns too.
+            if (! $this->thresholdLogged) {
+                Log::warning('Setting transfer_approval_threshold is not integer cents; transfers are not held for approval.', ['value' => $v]);
+                $this->thresholdLogged = true;
+            }
+
+            return null;
+        }
+
+        return $v !== null && $v !== '' ? (int) $v : null;
+    }
+
+    private bool $thresholdLogged = false;
+
+    /** Review m9: the stored threshold is set but not integer cents (it reads as never). */
+    public function transferApprovalThresholdInvalid(): bool
+    {
+        $v = $this->raw('transfer_approval_threshold');
+
+        return $v !== null && $v !== '' && ! ctype_digit($v);
+    }
+
     /** The stored logo metadata (R3) or null. A legacy data: URI is not a logo any more (the migration converted it). */
     public function logo(): ?array
     {

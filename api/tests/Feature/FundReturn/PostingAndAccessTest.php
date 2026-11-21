@@ -70,7 +70,7 @@ class PostingAndAccessTest extends FundReturnTestCase
     public function test_ac5_insufficient_balance(): void
     {
         $before = $this->state();
-        $this->fundReturn('40000.01')->assertStatus(422)->assertJsonPath('message', 'Insufficient balance in Cash (available 40000.00).');
+        $this->fundReturn('40000.01')->assertStatus(422)->assertJsonPath('message', 'Insufficient balance in GAL Cash (available 40,000.00).');
         $this->assertSame($before, $this->state());
         $this->assertSame(0, Transaction::withoutGlobalScopes()->where('type', 'fund_return')->count());
     }

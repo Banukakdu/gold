@@ -7,6 +7,7 @@ use App\Models\LedgerEntry;
 use App\Models\Transaction;
 use App\Services\Backups\BackupStatus;
 use App\Services\LedgerService;
+use App\Services\TransferApprovals;
 use App\Services\TransferReceipts;
 use App\Services\YearEnd;
 use App\Support\Money;
@@ -34,7 +35,9 @@ class FiscalYearController extends Controller
 
         // AG-052 R8 / R14: transfers in transit at the year end, every branch. Information only, not a check.
         return $this->yearEnd->preview($fy) + ['backup_warning' => BackupStatus::warning()]
-            + app(TransferReceipts::class)->inTransitSummary($fy->end());
+            + app(TransferReceipts::class)->inTransitSummary($fy->end())
+            // AG-051 finding 15: requests dated in the year and still pending; information only.
+            + app(TransferApprovals::class)->pendingSummary($fy->start(), $fy->end());
     }
 
     public function close(Request $request, int $startYear)

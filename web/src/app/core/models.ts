@@ -69,6 +69,12 @@ export interface Transaction {
   receipt_note?: string | null;
   receipt_by?: { id: number; name: string } | null;
   receipt_at?: string | null;
+  /** AG-051: null = no approval needed. */
+  approval_status?: string | null;
+  requested_date?: string | null;
+  approval_note?: string | null;
+  decided_by?: { id: number; name: string } | null;
+  decided_at?: string | null;
 }
 
 export interface Page<T> {

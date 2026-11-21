@@ -51,7 +51,8 @@ class SearchAndReportsTest extends TransferReceiptTestCase
 
         $sheet = $this->xlsxSheet($this->as($this->acc, $this->kdy)->postJson('/api/v1/transactions/export', ['receipt' => 'awaiting,disputed']));
         $status = array_search('Status', $sheet['labels'], true);
-        $this->assertSame(['Receipt', 'Received on', 'Receipt by', 'Receipt note'], array_slice($sheet['labels'], $status + 1, 4));
+        // AG-051 S6: Approval, Decided by, Decided at come right after Status, then the receipt columns.
+        $this->assertSame(['Approval', 'Decided by', 'Decided at', 'Receipt', 'Received on', 'Receipt by', 'Receipt note'], array_slice($sheet['labels'], $status + 1, 7));
         $this->assertContains('Filters: Receipt: Awaiting receipt, Discrepancy reported', $sheet['lines']);
         $byRef = collect($sheet['rows'])->keyBy('Ref no');
         $d = $byRef[$this->txn($ids['disputed'])->ref_no];

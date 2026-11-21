@@ -37,8 +37,13 @@ class Transaction extends Model
 
     protected $guarded = ['id'];
 
+    /** AG-051 R17: the over-commitment warning of a request just made (not a column; the API adds it as `warning`). */
+    public ?string $requestWarning = null;
+
     protected $casts = ['txn_date' => 'date:Y-m-d', 'amount' => 'decimal:2', 'approved_at' => 'datetime',
-        'received_on' => 'date:Y-m-d', 'receipt_at' => 'datetime'];
+        'received_on' => 'date:Y-m-d', 'receipt_at' => 'datetime',
+        // AG-051 transfer approvals.
+        'requested_date' => 'date:Y-m-d', 'requested_on' => 'date:Y-m-d', 'approval_threshold' => 'decimal:2', 'decided_at' => 'datetime'];
 
     public function entries(): HasMany
     {
@@ -97,6 +102,15 @@ class Transaction extends Model
     public function receiptBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'receipt_by');
+    }
+
+    /**
+     * AG-051: who approved, rejected or cancelled the request (null for expiry). Loaded, it serialises as
+     * `decided_by: {id, name}` in place of the id; `$t->decided_by` still reads the id.
+     */
+    public function decidedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'decided_by');
     }
 
     public function creator(): BelongsTo

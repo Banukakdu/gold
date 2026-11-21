@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Events\TransferApprovalRequested;
 use App\Events\TransferReceiptRequested;
 use App\Exceptions\LedgerException;
 use App\Models\Account;
@@ -14,6 +15,7 @@ use App\Models\Transaction;
 use App\Models\User;
 use App\Models\YearEndClose;
 use App\Notifications\YearEndNotification;
+use App\Support\BranchContext;
 use App\Support\BusinessDate;
 use App\Support\FiscalYear;
 use App\Support\Money;
@@ -113,7 +115,7 @@ class LedgerService
 
             foreach ([$from, $to] as $a) {
                 if ($a->status !== 'active' || $a->branch->status !== 'active') {
-                    throw new LedgerException("Account {$a->name} or its branch is inactive.");
+                    throw new LedgerException('Account '.trim(($a->branch?->code ?? '').' '.$a->name).' or its branch is inactive.');
                 }
             }
             // MAIN is only the head-office side of a branch transfer or a fund return (fund return G2).
@@ -125,6 +127,14 @@ class LedgerService
             $this->assertFunds($from, $amount);
 
             $type ??= $this->transferType($from, $to);
+
+            // AG-051 R2 / R5: above the threshold a non-Super-Admin's transfer waits for Main's approval. Every check
+            // above has run; the request posts nothing.
+            $approvals = app(TransferApprovals::class);
+            $rule = $approvals->rule(auth()->user(), $type, Money::toCents($amount));
+            if ($rule === TransferApprovals::HOLD) {
+                return $this->request($type, $from, $to, $date, $amount, $note);
+            }
 
             $txn = $this->newTxn($type, $from->branch_id, $date, $amount, [
                 'from_account_id' => $from->id,
@@ -139,7 +149,109 @@ class LedgerService
                 DB::afterCommit(fn () => TransferReceiptRequested::dispatch($txn->id));
             }
 
-            return $this->finish($txn);
+            // AG-051 accounting review finding 6: a Super Admin's movement above the threshold is flagged in the audit.
+            return $this->finish($txn, $rule === TransferApprovals::NOT_REQUIRED_SUPER_ADMIN ? ['approval' => $rule] : []);
+        }, self::ATTEMPTS);
+    }
+
+    /**
+     * AG-051 R5: the pending request. A `transactions` row with status pending and no ledger lines; the accounts are
+     * locked by the caller, so the pending total read here (R17 warning) is consistent with the balance.
+     */
+    private function request(string $type, Account $from, Account $to, string $date, string $amount, ?string $note): Transaction
+    {
+        $approvals = app(TransferApprovals::class);
+        $other = $approvals->pendingFromAccount($from->id, current: true);
+        $threshold = app(Settings::class)->transferApprovalThresholdCents();
+        $txn = $this->newTxn($type, $from->branch_id, $date, $amount, [
+            'from_account_id' => $from->id,
+            'to_account_id' => $to->id,
+            'related_branch_id' => $to->branch_id,
+            'description' => $note,
+            'status' => 'pending',
+            'approval_status' => TransferApprovals::PENDING,
+            'requested_date' => $date,
+            'requested_on' => BusinessDate::today(),
+            'approval_threshold' => Money::fromCents((int) $threshold),
+            // AG-052: a receipt starts only after approval (R5).
+            'receipt_status' => null,
+        ]);
+        $txn->ref_no = $this->refNo($txn);
+        $txn->save();
+        AuditLog::record('transfer.approval_requested', $txn, null, [
+            'ref_no' => $txn->ref_no, 'type' => $type, 'amount' => Money::add($amount), 'requested_date' => $date,
+            'requested_on' => BusinessDate::today(), 'from_account_id' => $from->id, 'to_account_id' => $to->id,
+            'threshold' => Money::fromCents((int) $threshold), 'other_pending_from_account' => Money::fromCents($other), 'status' => 'pending',
+        ]);
+        $id = $txn->id;
+        DB::afterCommit(fn () => TransferApprovalRequested::dispatch($id));
+
+        // QA nit: a request has no lines, so the response carries no `entries` key.
+        $txn = $txn->fresh();
+        $txn->requestWarning = TransferApprovals::overCommitWarning((string) $from->current_balance, $amount, $other);
+
+        return $txn;
+    }
+
+    /**
+     * AG-051 R5 / R6: post an approved request. Locks the row and the accounts, repeats every check of transfer() for
+     * the approval date (BusinessDate::today(), never the requested date: accounting review MUST 1) against the current
+     * balances, writes the lines dated that day and moves the row to posted with one conditional update on
+     * approval_status = pending (R10). The ref_no is kept. Audit: transfer.approved, then transaction.<type>.
+     * The caller (TransferApprovals::approve) has checked who may approve (R3, R4, R9).
+     */
+    public function postApproved(Transaction $pending, ?string $comment = null): Transaction
+    {
+        return DB::transaction(function () use ($pending, $comment) {
+            $t = Transaction::withoutGlobalScopes()->lockForUpdate()->findOrFail($pending->id);
+            if ($t->status !== 'pending' || $t->approval_status !== TransferApprovals::PENDING || ! in_array($t->type, TransferApprovals::TYPES, true)) {
+                throw new LedgerException(TransferApprovals::CHANGED);
+            }
+            $date = BusinessDate::today();
+            $from = $this->moneyAccount((int) $t->from_account_id);
+            $to = $this->moneyAccount((int) $t->to_account_id);
+            $amount = Money::add($t->amount);
+            $spec = $this->rules->transfer($from->id, $from->branch_id, $to->id, $to->branch_id, Branch::main()->id, Money::toCents($amount));
+            [$lines, $locked] = $this->prepare($spec, $date);
+            $from = $locked[$from->id];
+            $to = $locked[$to->id];
+            foreach ([$from, $to] as $a) {
+                if ($a->status !== 'active' || $a->branch->status !== 'active') {
+                    throw new LedgerException('Account '.trim(($a->branch?->code ?? '').' '.$a->name).' or its branch is inactive.');
+                }
+            }
+            if ($this->transferType($from, $to) !== $t->type) {
+                throw new LedgerException('The accounts of this request no longer match its type. Reject it and request again.');
+            }
+            $this->assertOpenFor($lines, headOfficeOf: $t->type === Transaction::FUND_RETURN ? 'fund return' : 'transfer');
+            $availableBefore = Money::add($from->current_balance);
+            $this->assertFunds($from, $amount);
+
+            $now = now();
+            $receipt = app(TransferReceipts::class)->initialStatus($t->type);
+            $done = Transaction::withoutGlobalScopes()->whereKey($t->id)->where('approval_status', TransferApprovals::PENDING)->update([
+                'status' => 'posted', 'approval_status' => TransferApprovals::APPROVED, 'txn_date' => $date, 'approval_note' => $comment,
+                'decided_by' => auth()->id(), 'decided_at' => $now, 'approved_by' => auth()->id(), 'approved_at' => $now,
+                'receipt_status' => $receipt, 'updated_at' => $now,
+            ]);
+            if ($done !== 1) {
+                throw new LedgerException(TransferApprovals::CHANGED);
+            }
+            $t->refresh();
+            AuditLog::record('transfer.approved', $t, ['approval_status' => TransferApprovals::PENDING], [
+                'approval_status' => TransferApprovals::APPROVED, 'posting_date' => $date, 'requested_date' => $t->requested_date?->format('Y-m-d'),
+                'comment' => $comment, 'all_branches' => ! app(BranchContext::class)->isScoped(), 'available_before' => $availableBefore,
+                // Review m1: the branch the approver worked in ('MAIN' for a Main approver, any branch for a Super Admin).
+                'approver_branch' => ($ctx = app(BranchContext::class))->isScoped() ? Branch::whereKey($ctx->branchId)->value('code') : 'all',
+                'ref_no' => $t->ref_no,
+            ]);
+            $this->post($t, $lines);
+            if ($receipt === TransferReceipts::AWAITING) {
+                $id = $t->id;
+                DB::afterCommit(fn () => TransferReceiptRequested::dispatch($id));
+            }
+
+            return $this->finish($t, keepRef: true);
         }, self::ATTEMPTS);
     }
 
@@ -760,7 +872,9 @@ class LedgerService
     private function assertFunds(Account $acc, string $amount): void
     {
         if (Money::cmp($acc->current_balance, $amount) < 0) {
-            throw new LedgerException("Insufficient balance in {$acc->name} (available {$acc->current_balance}).");
+            // AG-051 QA B4: every branch's cash account is "Cash", so the branch is named; the amount is formatted.
+            $code = $acc->branch?->code;
+            throw new LedgerException('Insufficient balance in '.trim("{$code} {$acc->name}").' (available '.Money::format($acc->current_balance).').');
         }
     }
 
@@ -847,18 +961,35 @@ class LedgerService
         $acc->save();
     }
 
-    private function finish(Transaction $txn): Transaction
+    private function refNo(Transaction $txn): string
     {
         $prefix = ['capital' => 'CAP', 'opening_allocation' => 'OPN', 'fund_allocation' => 'ALC', 'fund_return' => 'RET',
             'branch_transfer' => 'TRF', 'internal_transfer' => 'INT', 'income' => 'INC', 'expense' => 'EXP', 'reversal' => 'REV', 'year_end_close' => 'YEC'][$txn->type];
-        $txn->ref_no = sprintf('%s-%s-%s-%06d', $txn->branch->code, $prefix, substr((string) $txn->txn_date->format('Y'), 0, 4), $txn->id);
-        $txn->save();
+
+        return sprintf('%s-%s-%s-%06d', $txn->branch->code, $prefix, substr((string) $txn->txn_date->format('Y'), 0, 4), $txn->id);
+    }
+
+    /**
+     * The creation audit row (and the ref_no, unless $keepRef: an approved request keeps the ref_no of its request,
+     * AG-051 R5). $auditExtra adds keys to the audit row (AG-051 finding 6).
+     */
+    private function finish(Transaction $txn, array $auditExtra = [], bool $keepRef = false): Transaction
+    {
+        if (! $keepRef) {
+            $txn->ref_no = $this->refNo($txn);
+            $txn->save();
+        }
         // AG-052 R12: the creation row of a between-branch transfer carries its receipt status.
         $keys = ['ref_no', 'amount', 'txn_date', 'from_account_id', 'to_account_id', 'account_id', 'category_id'];
         if (in_array($txn->type, TransferReceipts::TYPES, true)) {
             $keys[] = 'receipt_status';
         }
-        AuditLog::record("transaction.{$txn->type}", $txn, null, $txn->only($keys));
+        $values = $txn->only($keys);
+        // A re-read row (an approved request, AG-051) holds a Carbon date: the audit keeps Y-m-d, as for a new row.
+        if ($values['txn_date'] instanceof \DateTimeInterface) {
+            $values['txn_date'] = $values['txn_date']->format('Y-m-d');
+        }
+        AuditLog::record("transaction.{$txn->type}", $txn, null, $values + $auditExtra);
 
         return $txn->load('entries');
     }
