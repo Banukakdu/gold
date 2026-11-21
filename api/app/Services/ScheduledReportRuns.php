@@ -60,10 +60,10 @@ class ScheduledReportRuns
 
     // ------------------------------------------------------------------ dispatch (R4)
 
-    /** @return array{queued: int, missed: int, stale_runs: int, stale_deliveries: int} */
+    /** @return array{queued: int, missed: int, stale_runs: int, stale_deliveries: int, settled: int} */
     public function dispatch(): array
     {
-        $out = ['queued' => 0, 'missed' => 0, 'stale_runs' => 0, 'stale_deliveries' => 0];
+        $out = ['queued' => 0, 'missed' => 0, 'stale_runs' => 0, 'stale_deliveries' => 0, 'settled' => 0];
         $due = ReportSchedule::where('status', ReportSchedule::ACTIVE)->whereNotNull('next_run_at')->where('next_run_at', '<=', now())
             ->orderBy('next_run_at')->orderBy('id')->pluck('id');
         foreach ($due as $id) {
@@ -77,6 +77,7 @@ class ScheduledReportRuns
         }
         $out['stale_runs'] = $this->failStaleRuns();
         $out['stale_deliveries'] = $this->failStaleDeliveries();
+        $out['settled'] = $this->settleOpenRuns();
 
         return $out;
     }
@@ -399,8 +400,10 @@ class ScheduledReportRuns
     {
         $s = null;
         DB::transaction(function () use ($run, $skipped, &$s) {
+            // Settled at once (R15): every delivery is skipped. Counted here, never again by settleRun().
             if (! ReportScheduleRun::whereKey($run->id)->where('status', ReportScheduleRun::RUNNING)
-                ->update(['status' => ReportScheduleRun::DONE, 'attached' => false, 'finished_at' => now(), 'updated_at' => now()])) {
+                ->update(['status' => ReportScheduleRun::DONE, 'attached' => false, 'finished_at' => now(), 'updated_at' => now(),
+                    'settled_at' => now(), 'delivery_outcome' => ReportScheduleRun::NOTHING_SENT])) {
                 return;
             }
             $run->refresh();
@@ -610,7 +613,8 @@ class ScheduledReportRuns
      */
     public function markSent(int $deliveryId): void
     {
-        DB::transaction(function () use ($deliveryId) {
+        $runId = null;
+        DB::transaction(function () use ($deliveryId, &$runId) {
             if (! ReportScheduleDelivery::whereKey($deliveryId)->where('status', ReportScheduleDelivery::SENDING)
                 ->update(['status' => ReportScheduleDelivery::SENT, 'sent_at' => now(), 'updated_at' => now()])) {
                 return;
@@ -622,7 +626,11 @@ class ScheduledReportRuns
                 'file' => $run->attached ? $run->sha256 : 'link'], $run->auditBranchId());
             // R9: a run with at least one delivery sent resets the count.
             ReportSchedule::whereKey($s->id)->update(['consecutive_failures' => 0]);
+            $runId = $run->id;
         }, 3);
+        if ($runId !== null) {
+            $this->settleAfterCommit($runId);
+        }
     }
 
     /** R5 at send: a queued delivery is skipped with its reason (and `report_schedule.delivery_skipped`). */
@@ -636,6 +644,7 @@ class ScheduledReportRuns
             $run = ReportScheduleRun::find($d->run_id);
             $this->systemAudit('report_schedule.delivery_skipped', ReportSchedule::find($run->schedule_id),
                 ['run_id' => $run->id, 'recipient_id' => $d->user_id, 'email' => $d->email, 'reason' => $reason], $run->auditBranchId());
+            $this->settleAfterCommit($run->id);
 
             return true;
         });
@@ -651,7 +660,8 @@ class ScheduledReportRuns
     {
         $s = null;
         $name = '';
-        $won = DB::transaction(function () use ($deliveryId, $code, $from, $guard, &$s, &$name) {
+        $runId = '';
+        $won = DB::transaction(function () use ($deliveryId, $code, $from, $guard, &$s, &$name, &$runId) {
             if (! ReportScheduleDelivery::whereKey($deliveryId)->whereIn('status', $from)->when($guard, $guard)
                 ->update(['status' => ReportScheduleDelivery::FAILED, 'reason' => $code, 'failed_at' => now(), 'updated_at' => now()])) {
                 return false;
@@ -662,11 +672,115 @@ class ScheduledReportRuns
             $name = (string) User::whereKey($d->user_id)->value('name');
             $this->systemAudit('report_schedule.delivery_failed', $s, ['run_id' => $run->id, 'recipient_id' => $d->user_id, 'email' => $d->email,
                 'reason' => $code], $run->auditBranchId());
+            $runId = $run->id;
 
             return true;
         });
         if ($won && $s) {
             $this->alertOwner($s->id, N::SCHEDULE_DELIVERY_FAILED, "{$s->name}: email to {$name} failed", ScheduledReports::reasonText($code), false);
+            $this->settleAfterCommit($runId);
+        }
+
+        return $won;
+    }
+
+    // ------------------------------------------------------------------ settlement (R15)
+
+    /**
+     * R15: settle a built run once every delivery is final (sent, skipped or failed). It is called after the commit of
+     * each change that makes a delivery final, and by the dispatcher sweep. Best effort: a failure here never fails the
+     * caller (a mail job must not be retried after its email went out); the sweep settles the run later.
+     */
+    private function settleAfterCommit(string $runId): void
+    {
+        $this->afterCommit(fn () => $this->settleRun($runId));
+    }
+
+    /**
+     * R15: the dispatcher sweep. Built runs that are not settled and have no queued or sending delivery (the settle
+     * after a commit was lost: the worker died between the commit and the call).
+     */
+    public function settleOpenRuns(): int
+    {
+        $n = 0;
+        ReportScheduleRun::where('status', ReportScheduleRun::DONE)->whereNull('settled_at')
+            ->whereExists(fn ($q) => $q->from('report_schedule_deliveries as d')->whereColumn('d.run_id', 'report_schedule_runs.id'))
+            ->whereNotExists(fn ($q) => $q->from('report_schedule_deliveries as d')->whereColumn('d.run_id', 'report_schedule_runs.id')
+                ->whereIn('d.status', [ReportScheduleDelivery::QUEUED, ReportScheduleDelivery::SENDING]))
+            ->orderBy('planned_at')->pluck('id')
+            ->each(function ($id) use (&$n) {
+                try {
+                    if ($this->settleRun((string) $id)) {
+                        $n++;
+                    }
+                } catch (Throwable $e) {
+                    report($e);
+                }
+            });
+
+        return $n;
+    }
+
+    /**
+     * R15: when every delivery of a `done` run is final, record its outcome once:
+     *  - at least one `sent`: delivered (the count was already reset by markSent, R9);
+     *  - none sent and at least one `failed` (mail_error, damaged, missing, stale or unknown): not delivered. One more
+     *    failure for R10, unless a later run of the schedule already sent an email (the streak is runs in a row); the
+     *    `report_schedule.run_not_delivered` audit row, and the owner gets a bell row and an email;
+     *  - only `skipped`: nothing sent. Not counted here (a run where nobody passed at build is counted when it is
+     *    built, R5; skips at send are not failures).
+     *
+     * Exactly once under MySQL REPEATABLE READ: the run row is locked first, the deliveries are read with a locking
+     * read (the latest committed rows, not an older snapshot), and the outcome is written by a conditional UPDATE
+     * (`settled_at IS NULL`). A second call, concurrent or later, changes no row and does nothing. Every read before
+     * the schedule lock is a locking read, so the check for a later sent run is this transaction's first consistent
+     * read and sees every reset committed before the lock; a reset committed after it lands after this increment.
+     * Lock order run -> deliveries -> schedule, the same as failRun (run -> schedule -> deliveries starts with the run,
+     * so the two queue behind each other); markSent and deliveryFailed never lock a run.
+     */
+    public function settleRun(string $runId): bool
+    {
+        $alert = null;
+        $won = DB::transaction(function () use ($runId, &$alert) {
+            $run = ReportScheduleRun::whereKey($runId)->lockForUpdate()->first();
+            if (! $run || $run->status !== ReportScheduleRun::DONE || $run->settled_at !== null) {
+                return false;
+            }
+            $deliveries = ReportScheduleDelivery::where('run_id', $runId)->orderBy('id')->sharedLock()->get(['id', 'user_id', 'status', 'reason']);
+            $by = $deliveries->countBy('status');
+            if ($deliveries->isEmpty() || ($by[ReportScheduleDelivery::QUEUED] ?? 0) + ($by[ReportScheduleDelivery::SENDING] ?? 0) > 0) {
+                return false;
+            }
+            $sent = (int) ($by[ReportScheduleDelivery::SENT] ?? 0);
+            $failed = (int) ($by[ReportScheduleDelivery::FAILED] ?? 0);
+            $outcome = $sent > 0 ? ReportScheduleRun::DELIVERED : ($failed > 0 ? ReportScheduleRun::NOT_DELIVERED : ReportScheduleRun::NOTHING_SENT);
+            if (! ReportScheduleRun::whereKey($runId)->where('status', ReportScheduleRun::DONE)->whereNull('settled_at')
+                ->update(['settled_at' => now(), 'delivery_outcome' => $outcome, 'updated_at' => now()])) {
+                return false;
+            }
+            if ($outcome !== ReportScheduleRun::NOT_DELIVERED) {
+                return true;
+            }
+
+            $s = ReportSchedule::whereKey($run->schedule_id)->lockForUpdate()->first();
+            $laterSent = ReportScheduleDelivery::where('status', ReportScheduleDelivery::SENT)
+                ->whereIn('run_id', ReportScheduleRun::select('id')->where('schedule_id', $s->id)->where('planned_at', '>', $run->planned_at))
+                ->exists();
+            $paused = $laterSent ? false : $this->countFailure($s);
+            $this->systemAudit('report_schedule.run_not_delivered', $s, [
+                'run_id' => $run->id, 'period' => ['from' => $run->periodFrom(), 'to' => $run->periodTo()],
+                'failed' => $deliveries->where('status', ReportScheduleDelivery::FAILED)->mapWithKeys(fn ($d) => [(int) $d->user_id => $d->reason])->all(),
+                'skipped' => $deliveries->where('status', ReportScheduleDelivery::SKIPPED)->mapWithKeys(fn ($d) => [(int) $d->user_id => $d->reason])->all(),
+                'counted' => ! $laterSent, 'consecutive_failures' => (int) $s->consecutive_failures, 'paused' => $paused,
+            ], $run->auditBranchId());
+            $alert = [$s->id, $s->name, $failed];
+
+            return true;
+        });
+        if ($won && $alert) {
+            [$id, $name, $failed] = $alert;
+            $this->alertOwner($id, N::SCHEDULE_RUN_FAILED, "Scheduled report {$name} was not delivered",
+                'No email of this run was confirmed as sent ('.$failed.' failed). An email that "may have been sent" must be checked with the recipient.', true);
         }
 
         return $won;

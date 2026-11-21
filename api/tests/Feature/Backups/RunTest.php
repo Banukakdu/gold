@@ -74,7 +74,7 @@ class RunTest extends BackupsTestCase
         $this->assertSame(1, $m['files']['branding']['files_count']);
         $this->assertSame('sqlite', $m['db_driver']);
         $this->assertNull($m['year_end']);
-        $this->assertSame('2026_12_04_000000_two_factor', $m['last_migration']);
+        $this->assertSame('2026_12_05_000000_report_schedule_run_settlement', $m['last_migration']);
         // AG-087: background export files are not part of the backup set.
         $this->assertArrayNotHasKey('exports', $m['files']);
         $this->assertSame($m['backup'], self::FIRST);
