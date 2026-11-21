@@ -517,3 +517,17 @@ Spec accepted for development once MUST findings A1-A3 are in the build (they ar
 
 ### Verdict
 **SIGNED OFF.** A1-A3 (MUST) and A4-A7 (SHOULD) are implemented and tested; the review/QA fixes strengthen control. No blockers.
+
+## Accountant sign-off (follow-up R15, 2026-11-21)
+Build reviewed: ffa9dee (`ScheduledReportRuns::settleRun()`, `settleOpenRuns()`, migration `2026_12_05_000000_report_schedule_run_settlement`). Test results as reported by the team (not re-run here): SQLite 1051 passed, MySQL 1052 passed, pint green.
+
+1. **Accepted risk 3 DONE.** A `done` run with no `sent` and at least one `failed` delivery settles once as `not_delivered`, increments `consecutive_failures` under the schedule lock and runs the R10 check (`countFailure()`), writes `report_schedule.run_not_delivered` (failed/skipped reasons, `counted`, count after, `paused`), and sends the owner one bell row and one email. Exactly once through the conditional `settled_at IS NULL` UPDATE. Tests `test_ac44_*`, `test_ac47_*`, `test_ac49_*`.
+2. **(a) `unknown` counted as failed: correct.** Nothing confirms delivery, so a person must check. The pause can only be stricter, never looser, and the S3 text still says "may have been sent" with no resend (`test_ac48_*`).
+3. **(b) Late-settling earlier run not counted: correct.** The streak is about runs in a row. A later confirmed send has already shown the schedule works, so counting the older run would undo a valid reset. It is still audited (`counted` false) and alerted, so nothing is hidden (`test_ac50_*`).
+4. **(c) All skipped for access: correct.** Nobody passed at build, so the run is counted once at build and settled at once as `nothing_sent` (`finishNothingSent()`). Skips at send are access decisions, not delivery faults, and are not counted (`test_ac46_*`).
+5. **(d) Migration: correct.** Existing `done` runs with no `queued`/`sending` delivery are marked settled with no outcome, so the sweep never counts or alerts on history after deploy. Runs still in flight at deploy settle normally, which is the correct behaviour.
+6. **SHOULD (next story, not blocking).** (i) `settled_at`/`delivery_outcome` are not in the runs frozen-column trigger. Add them once set (`OLD.settled_at IS NOT NULL`), like `sha256`. The audit row is already the evidence. (ii) Under R9, a delayed `sent` on an older run still resets the count after a later run was counted as a failure. This is the mirror of point 3 and is rare (stale after 24 h). The reset could be limited to "no later counted failure".
+
+Nothing posts money. No delete path was added. Every outcome that counts or alerts has an audit row.
+
+**Verdict: SIGNED OFF.**
