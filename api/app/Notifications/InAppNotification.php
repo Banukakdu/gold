@@ -1,0 +1,47 @@
+<?php
+
+namespace App\Notifications;
+
+use Illuminate\Notifications\Notification;
+
+/**
+ * AG-094 one in-app notification (docs/specs/notifications.md section 5 "Storage"): database channel only, never
+ * queued (R3). `type` holds the kind (e.g. transfer.approval_requested); `data` is the snapshot
+ * {title, body, branch_id, branch_code, url, transaction_id?, export_id?} built when it is created (R1). It is a pointer
+ * to something already recorded and audited elsewhere: it posts nothing and changes no accounting record.
+ */
+class InAppNotification extends Notification
+{
+    public const APPROVAL_REQUESTED = 'transfer.approval_requested';
+
+    public const APPROVAL_DECIDED = 'transfer.approval_decided';
+
+    public const RECEIPT_REQUESTED = 'transfer.receipt_requested';
+
+    public const RECEIPT_DISPUTED = 'transfer.receipt_disputed';
+
+    public const RECEIPT_SETTLED = 'transfer.receipt_settled';
+
+    public const EXPORT_READY = 'export.ready';
+
+    public const EXPORT_FAILED = 'export.failed';
+
+    public const BACKUP_FAILED = 'backup.failed';
+
+    public function __construct(public string $kind, public array $data) {}
+
+    public function via(object $notifiable): array
+    {
+        return ['database'];
+    }
+
+    public function databaseType(object $notifiable): string
+    {
+        return $this->kind;
+    }
+
+    public function toDatabase(object $notifiable): array
+    {
+        return $this->data;
+    }
+}

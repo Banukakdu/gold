@@ -2,11 +2,13 @@ import { Component, OnInit, inject } from '@angular/core';
 import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { AuthService } from '../core/auth.service';
 import { SettingsService } from '../core/settings.service';
+import { ToastService } from '../core/toast.service';
+import { NotificationBellComponent } from './notification-bell.component';
 
 @Component({
   selector: 'ag-shell',
   standalone: true,
-  imports: [RouterOutlet, RouterLink, RouterLinkActive],
+  imports: [RouterOutlet, RouterLink, RouterLinkActive, NotificationBellComponent],
   template: `
     <div class="shell">
       <aside class="side">
@@ -50,6 +52,8 @@ import { SettingsService } from '../core/settings.service';
               }
             </select>
           </label>
+          <!-- AG-094 S1: before .who; at phone width it stays next to the branch switcher -->
+          <ag-notification-bell />
           <div class="who">
             <span>{{ auth.me()?.name }} @if (auth.isSuperAdmin()) { <span class="tag">Super Admin</span> }</span>
             <small>{{ auth.isSuperAdmin() ? '' : auth.activeBranch()?.roles?.join(', ') }}</small>
@@ -60,6 +64,7 @@ import { SettingsService } from '../core/settings.service';
           <!-- Re-create the page whenever the active branch changes so it refetches its data -->
           @for (k of [auth.activeBranchId()]; track k) { <router-outlet /> }
         </main>
+        <div class="toast" role="status" aria-live="polite">@if (toast.text()) { <span>{{ toast.text() }}</span> }</div>
       </div>
     </div>
   `,
@@ -67,6 +72,7 @@ import { SettingsService } from '../core/settings.service';
 export class ShellComponent implements OnInit {
   auth = inject(AuthService);
   settings = inject(SettingsService);
+  toast = inject(ToastService);
   private router = inject(Router);
 
   ngOnInit() { this.settings.load(); }

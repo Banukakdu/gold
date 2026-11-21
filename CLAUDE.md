@@ -7,6 +7,7 @@ Product docs: `docs/Account-gold_Project_Document.pdf`, backlog `docs/Account-go
 - All money postings go through `api/app/Services/LedgerService.php`. Never update `accounts.current_balance` anywhere else.
 - Money is handled with `App\Support\Money` (integer cents). No floats, no bcmath.
 - Nothing is hard-deleted. Income/expense are voided, transfers are reversed. Every change writes `AuditLog::record(...)`.
+  - Exception: `notifications` rows are pruned after 90 days, AG-094.
 - Branch isolation: branch-owned models use the `BranchScoped` trait; the active branch comes from `X-Branch-Id` via `SetBranchContext`. Only use `withoutGlobalScopes()` when you have checked access yourself.
 - Permissions are fixed in `database/seeders/PermissionSeeder.php`; roles are per branch (spatie teams, `branch_id`). Nobody may grant a permission they do not hold.
 - Date filters use `whereDate` (portable between SQLite tests and MySQL).

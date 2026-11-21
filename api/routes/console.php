@@ -29,3 +29,8 @@ Schedule::command('exports:prune')->description('Expire background exports')->ho
 // AG-051 R8: transfer approval requests pending for 30 days expire (posts nothing).
 Schedule::command('transfers:expire-approvals')->description('Expire transfer approval requests')
     ->dailyAt('00:30')->timezone($tz)->withoutOverlapping(60)->onOneServer();
+
+// AG-094 R11: in-app notifications older than 90 days are deleted (the one hard delete of the item, notifications table
+// only; see App\Console\Commands\NotificationsPrune).
+Schedule::command('notifications:prune')->description('Delete in-app notifications older than 90 days')
+    ->dailyAt('02:30')->timezone($tz)->withoutOverlapping(60)->onOneServer();

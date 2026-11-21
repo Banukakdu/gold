@@ -2,6 +2,7 @@ import { Component, EventEmitter, HostListener, Input, OnInit, Output, inject, s
 import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { errorText } from './api.interceptor';
+import { NotificationsService } from './notifications.service';
 import { MoneyPipe } from './money.pipe';
 import { AppDatePipe } from './app-date.pipe';
 import { colomboToday } from './dates';
@@ -81,6 +82,7 @@ export class ApprovalDialogComponent implements OnInit {
   @Output() refused = new EventEmitter<string>();
 
   private http = inject(HttpClient);
+  private notifications = inject(NotificationsService);
   today = '';
   comment = '';
   busy = signal(false);
@@ -105,7 +107,8 @@ export class ApprovalDialogComponent implements OnInit {
     const body: Record<string, string> = {};
     if (this.comment.trim()) body['comment'] = this.comment.trim();
     this.http.post<{ ref_no: string }>(`/api/v1/transfer-approvals/${this.target.id}/${this.mode}`, body).subscribe({
-      next: r => { this.busy.set(false); this.done.emit(r); },
+      // AG-094 R9: the user's own action may close or create notifications; refresh the bell's count now.
+      next: r => { this.busy.set(false); this.notifications.refreshCount(); this.done.emit(r); },
       error: e => {
         this.busy.set(false);
         this.error.set(errorText(e));

@@ -146,7 +146,8 @@ class LedgerService
             ]);
             $this->post($txn, $lines);
             if ($txn->receipt_status === TransferReceipts::AWAITING) {
-                DB::afterCommit(fn () => TransferReceiptRequested::dispatch($txn->id));
+                $userId = auth()->id();
+                DB::afterCommit(fn () => TransferReceiptRequested::dispatch($txn->id, $userId));
             }
 
             // AG-051 accounting review finding 6: a Super Admin's movement above the threshold is flagged in the audit.
@@ -184,7 +185,8 @@ class LedgerService
             'threshold' => Money::fromCents((int) $threshold), 'other_pending_from_account' => Money::fromCents($other), 'status' => 'pending',
         ]);
         $id = $txn->id;
-        DB::afterCommit(fn () => TransferApprovalRequested::dispatch($id));
+        $userId = auth()->id();
+        DB::afterCommit(fn () => TransferApprovalRequested::dispatch($id, $userId));
 
         // QA nit: a request has no lines, so the response carries no `entries` key.
         $txn = $txn->fresh();
@@ -248,7 +250,8 @@ class LedgerService
             $this->post($t, $lines);
             if ($receipt === TransferReceipts::AWAITING) {
                 $id = $t->id;
-                DB::afterCommit(fn () => TransferReceiptRequested::dispatch($id));
+                $userId = auth()->id();
+                DB::afterCommit(fn () => TransferReceiptRequested::dispatch($id, $userId));
             }
 
             return $this->finish($t, keepRef: true);
