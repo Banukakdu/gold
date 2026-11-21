@@ -7,6 +7,7 @@ use App\Models\Account;
 use App\Models\AuditLog;
 use App\Models\Transaction;
 use App\Models\User;
+use App\Services\BackgroundExports;
 use App\Services\LedgerService;
 use App\Services\TransactionExporter;
 use App\Services\TransactionSearch;
@@ -56,7 +57,10 @@ class TransactionController extends Controller
     /** AG-065 R14: the filtered list as xlsx (transaction.view + report.export), same filters, scope and sort. */
     public function export(Request $request, TransactionExporter $exporter)
     {
-        return $exporter->download($this->search->params($request->all(), export: true), $request->user());
+        $params = $this->search->params($request->all(), export: true);
+
+        // AG-087 R1: more than exports.sync_rows rows is queued (202).
+        return $exporter->download($params, $request->user(), fn (int $rows) => app(BackgroundExports::class)->queueTransactions($request, $params, $rows));
     }
 
     /**

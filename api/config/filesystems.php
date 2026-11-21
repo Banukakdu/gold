@@ -69,6 +69,22 @@ return [
             'report' => false,
         ],
 
+        // AG-087 background exports (docs/specs/background-exports.md): private, never served or linked, and not part
+        // of the backup set. Files are streamed only by GET /exports/{id}/download to their requester, and only
+        // `exports:prune` deletes here. Files and the folders holding them are readable by the app user only (finding 4).
+        'exports' => [
+            'driver' => 'local',
+            'root' => storage_path('app/exports'),
+            'visibility' => 'private',
+            'serve' => false,
+            'throw' => true,
+            'report' => false,
+            'permissions' => [
+                'file' => ['public' => 0600, 'private' => 0600],
+                'dir' => ['public' => 0700, 'private' => 0700],
+            ],
+        ],
+
         // AG-093 backups (docs/specs/backups.md): local archives, private, never served. Only `backup:prune`
         // (App\Services\Backups\BackupPruner) deletes here.
         'backups' => [

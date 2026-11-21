@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\V1\BranchController;
 use App\Http\Controllers\Api\V1\CategoryController;
 use App\Http\Controllers\Api\V1\ChartOfAccountsController;
 use App\Http\Controllers\Api\V1\DashboardController;
+use App\Http\Controllers\Api\V1\ExportController;
 use App\Http\Controllers\Api\V1\FiscalYearController;
 use App\Http\Controllers\Api\V1\PeriodLockController;
 use App\Http\Controllers\Api\V1\ReportController;
@@ -44,6 +45,13 @@ Route::prefix('v1')->group(function () {
             // DELETE route: backups are started, restored and pruned on the server only.
             Route::get('backups', [BackupController::class, 'index']);
         });
+
+        // AG-087 background exports (docs/specs/background-exports.md section 5): the requester's own only (404
+        // otherwise). Outside `branch` (reviewer m1): they never use the active branch, and download re-checks access
+        // against the export's stored branch context, so a user who lost that branch still reaches the audited 403.
+        Route::get('exports', [ExportController::class, 'index']);
+        Route::get('exports/{exportId}', [ExportController::class, 'show']);
+        Route::get('exports/{exportId}/download', [ExportController::class, 'download']);
 
         // Everything below runs in the context of the branch in X-Branch-Id
         Route::middleware('branch')->group(function () {

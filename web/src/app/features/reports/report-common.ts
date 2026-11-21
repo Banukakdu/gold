@@ -1,7 +1,7 @@
 import { Component, HostListener, computed, inject, input, model, OnInit, output, signal } from '@angular/core';
-import { HttpClient, HttpErrorResponse, HttpParams } from '@angular/common/http';
+import { HttpClient, HttpErrorResponse, HttpParams, HttpResponse } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
-import { ActivatedRoute, ParamMap, Router } from '@angular/router';
+import { ActivatedRoute, ParamMap, Router, RouterLink } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 import { AuthService } from '../../core/auth.service';
 import { errorText } from '../../core/api.interceptor';
@@ -178,10 +178,24 @@ export class BranchPickerComponent implements OnInit {
   }
 }
 
+/**
+ * AG-087 S1: the 202 answer of an export endpoint (a large Excel export prepared in the background). The body arrives
+ * as a Blob (responseType: 'blob'); null when the response is a file.
+ */
+export async function queuedNotice(res: HttpResponse<Blob>): Promise<string | null> {
+  if (res.status !== 202) return null;
+  try {
+    return JSON.parse(await (res.body as Blob).text())?.message ?? 'This export is being prepared in the background.';
+  } catch {
+    return 'This export is being prepared in the background.';
+  }
+}
+
 /** PDF / Excel buttons (only with report.export). The export uses the same filters as the screen. */
 @Component({
   selector: 'ag-export-buttons',
   standalone: true,
+  imports: [RouterLink],
   template: `
     @if (auth.can('report.export')) {
       <span class="export">
@@ -190,6 +204,7 @@ export class BranchPickerComponent implements OnInit {
       </span>
     }
     @if (error()) { <div class="alert">{{ error() }}</div> }
+    @if (notice(); as n) { <div class="alert info">{{ n }} <a routerLink="/exports">View exports</a></div> }
   `,
 })
 export class ExportButtonsComponent {
@@ -199,14 +214,34 @@ export class ExportButtonsComponent {
   params = input.required<ReportParams>();
   busy = signal<'' | 'pdf' | 'xlsx'>('');
   error = signal('');
+  /** AG-087 S1: the background notice, shown until the filters change (it belongs to the filters it was asked for). */
+  private queued = signal<{ key: string; message: string } | null>(null);
+  notice = computed(() => {
+    const q = this.queued();
+    return q && q.key === this.key() ? q.message : '';
+  });
+
+  private key() {
+    const p = { ...this.params() };
+    delete p['page'];
+    return `${this.name()}|${JSON.stringify(p)}`;
+  }
 
   async download(format: 'pdf' | 'xlsx') {
     this.busy.set(format);
     this.error.set('');
+    this.queued.set(null);
     const p = { ...this.params() };
     delete p['page'];
+    const key = this.key();
     try {
-      const blob = await firstValueFrom(this.http.post(`/api/v1/reports/${this.name()}/export`, { ...p, format }, { responseType: 'blob' }));
+      const res = await firstValueFrom(this.http.post(`/api/v1/reports/${this.name()}/export`, { ...p, format }, { responseType: 'blob', observe: 'response' }));
+      const message = await queuedNotice(res);
+      if (message !== null) {
+        this.queued.set({ key, message });
+        return;
+      }
+      const blob = res.body as Blob;
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;

@@ -4,6 +4,7 @@ namespace Tests\Feature\Transactions;
 
 use App\Models\AuditLog;
 use App\Models\Branch;
+use App\Models\Export;
 use App\Models\Setting;
 use App\Models\Transaction;
 use App\Services\ReportService;
@@ -12,6 +13,7 @@ use App\Support\BusinessDate;
 use App\Support\Settings;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Queue;
 use PhpOffice\PhpSpreadsheet\Cell\DataType;
 use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
 
@@ -173,8 +175,10 @@ class ExportTest extends TransactionSearchTestCase
         $this->assertSame('=HYPERLINK("x")', $cell->getValue());
     }
 
+    /** AC 32, as changed by AG-087: 5,001 rows are queued (202, no file, no report.exported); 5,000 download at once. */
     public function test_ac32_export_cap(): void
     {
+        Queue::fake();
         $now = now();
         $base = ['branch_id' => $this->kdy->id, 'type' => Transaction::INCOME, 'amount' => '1.00', 'status' => 'posted',
             'account_id' => $this->kdyCash->id, 'category_id' => $this->walkIn->id, 'created_by' => $this->kamal->id,
@@ -184,8 +188,9 @@ class ExportTest extends TransactionSearchTestCase
         foreach (array_chunk(range(1, 4993), 500) as $chunk) {
             DB::table('transactions')->insert(array_map(fn ($i) => $base + ['ref_no' => "CAP-TEST-{$i}", 'txn_date' => '2026-09-15'], $chunk));
         }
-        $this->exportAs($this->nimal, $this->kdy->id)->assertStatus(422)
-            ->assertJsonPath('message', 'This export has 5,001 rows; the limit is 5,000. Narrow the filters.');
+        $this->exportAs($this->nimal, $this->kdy->id)->assertStatus(202)
+            ->assertJsonPath('message', 'This export has 5,001 rows, so it is being prepared in the background. We will email you when it is ready.');
+        $this->assertSame(1, Export::count());
         $this->assertSame(0, AuditLog::where('event', 'report.exported')->count());
 
         $sheet = $this->sheet($this->exportAs($this->nimal, $this->kdy->id, ['from' => '2026-04-01']));

@@ -46,6 +46,8 @@ export const routes: Routes = [
         loadComponent: () => import('./features/reports/cash-flow.component').then(m => m.CashFlowComponent) },
       { path: 'reports/trial-balance', canActivate: [permissionGuard('report.view')],
         loadComponent: () => import('./features/reports/trial-balance.component').then(m => m.TrialBalanceComponent) },
+      // AG-087 S2: any signed-in user (their own background exports only).
+      { path: 'exports', loadComponent: () => import('./features/exports/exports.component').then(m => m.ExportsComponent) },
       { path: 'audit-log', canActivate: [permissionGuard('audit.view')],
         loadComponent: () => import('./features/audit/audit-log.component').then(m => m.AuditLogComponent) },
       { path: 'period-locks', canActivate: [superAdminGuard],

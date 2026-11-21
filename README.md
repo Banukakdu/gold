@@ -22,6 +22,7 @@ cp .env.example .env && php artisan key:generate
 php artisan migrate --seed                # Main branch, Main Account, permissions, role templates, categories, Super Admin
 php artisan serve                         # http://localhost:8000
 php artisan queue:work                    # sends invitation, password reset and alert emails (or set QUEUE_CONNECTION=sync)
+php artisan queue:work exports --queue=exports --timeout=600 --memory=1024   # builds large Excel exports (AG-087)
 
 cd ../web
 npm install
@@ -32,7 +33,7 @@ Sign in with `admin@accountgold.local` / `ChangeMe123` (set `ADMIN_EMAIL` / `ADM
 Replace that password with `php artisan auth:reset-password admin@accountgold.local` (see "Password reset" below).
 
 In production, run `php artisan queue:work` under a process manager (e.g. Supervisor); without it invitation and
-password reset emails are never sent.
+password reset emails are never sent. Run the exports worker alongside it, as one process (see "Background exports").
 
 Locally, reset and invitation links are written to `api/storage/logs/laravel.log` with the default `MAIL_MAILER=log`
 (or see them in Mailpit on :8025 with `MAIL_MAILER=smtp`, `MAIL_PORT=1025`). Set `QUEUE_CONNECTION=sync` in `api/.env`
@@ -277,6 +278,32 @@ Restoring never deletes anything in the backups folder.
 **Release restore drill (once per release).** On staging, follow the steps above end to end with the latest production
 backup, then `php artisan backup:verify {file}` (it repeats the control comparison automatically). Record the result in the
 release notes.
+
+### Background exports (AG-087, docs/specs/background-exports.md)
+
+An Excel export of more than 5,000 rows (up to 100,000) is prepared in the background: the export button answers
+"being prepared in the background", the file appears on the **Exports** page (`/exports`) and the requester gets an
+email when it is ready or has failed. PDF is never queued (it keeps its 1,000-row cap).
+
+1. **Worker.** `php artisan queue:work exports --queue=exports --timeout=600 --memory=1024`, under the process manager,
+   **one process**, next to the normal `queue:work` (so emails never wait behind an export). The `exports` queue
+   connection (`config/queue.php`, database driver, `retry_after` 900) exists so that a running export is never started
+   a second time. Its jobs table is reached through `exports_queue`, a second connection to the same database (made
+   from the default one; `EXPORTS_QUEUE_DB_CONNECTION` names another), because the export's read snapshot holds the
+   default connection. Without this worker, queued exports fail as "did not run" after 2 hours (a running one after
+   25 minutes without progress: the job timeout plus `retry_after`). Locally,
+   `EXPORTS_QUEUE_DRIVER=sync` in `api/.env` builds the file inside the request instead (like `QUEUE_CONNECTION=sync`).
+2. **Cron.** `exports:prune` runs hourly from the scheduler (`php artisan schedule:run` every minute, as for backups):
+   files expire 24 h after they are ready, stale exports fail, orphan files go after 25 h. It is the only code that
+   deletes export files; `exports` rows are never deleted (database triggers refuse it, as for attachments).
+3. **Storage.** Files go to the private `exports` disk (`storage/app/exports`, mode 0600, never served or linked, no
+   `storage:link`). It is **not** part of the backup set: a file is a 24-hour convenience copy that can be run again.
+4. **Limits** (`config/exports.php`, env `EXPORTS_*`): 5,000 rows at once, 100,000 queued, 50 MB, 2 active exports per
+   user, email on (`EXPORTS_EMAIL=false` turns the email off).
+5. **Snapshot.** Each Excel file is read inside one read-only consistent snapshot (MySQL `REPEATABLE READ` set for that
+   transaction, `WITH CONSISTENT SNAPSHOT, READ ONLY`), and a queued file says when the data was extracted.
+   Measured: 100,000 transaction rows in about 33 s with a peak of 55 MB (MySQL 8.0, local).
+6. **MySQL privilege.** The migration creates two triggers on `exports` (same trigger privilege as the attachments release).
 
 ## How it works
 

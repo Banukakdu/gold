@@ -21,3 +21,7 @@ Schedule::command('backup:verify --latest')->description('Weekly restore test')
 // Review F7: monthly, first Sunday 04:00. Cron cannot say "first Sunday" (day-of-month and day-of-week are OR-ed).
 Schedule::command('backup:verify --oldest-offsite')->description('Monthly restore test of the oldest off-server archive (first Sunday)')
     ->weeklyOn(0, '04:00')->timezone($tz)->when(fn () => BusinessDate::now()->day <= 7)->withoutOverlapping(360)->onOneServer();
+
+// AG-087 background exports (docs/specs/background-exports.md section 5 "Schedule"): expire files 24 h after ready,
+// fail stale exports, remove orphan files.
+Schedule::command('exports:prune')->description('Expire background exports')->hourly()->withoutOverlapping(30)->onOneServer();

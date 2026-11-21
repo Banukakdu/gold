@@ -9,10 +9,12 @@ use App\Services\Backups\SqliteDumper;
 use App\Services\ReportService;
 use App\Support\BranchContext;
 use App\Support\Minutes;
+use App\Support\ReadSnapshot;
 use App\Support\Settings;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Events\MigrationsEnded;
 use Illuminate\Http\Request;
+use Illuminate\Queue\Events\JobTimedOut;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\RateLimiter;
@@ -24,6 +26,10 @@ class AppServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->app->scoped(BranchContext::class);
+        // AG-087 (reviewer M1): the exports queue's own connection, a copy of the default one (config/queue.php).
+        if (config('database.connections.exports_queue') === null) {
+            config(['database.connections.exports_queue' => config('database.connections.'.config('database.default'))]);
+        }
         // AG-092 R1: settings are read once per request (memoised); a saved Setting flushes the memo.
         $this->app->scoped(Settings::class);
         // AG-093 R2: the dumper of the default connection's driver. Tests bind a fake instead.
@@ -42,6 +48,10 @@ class AppServiceProvider extends ServiceProvider
     {
         // AG-052: ReportService caches whether the receipt columns exist; a migrate or rollback may change that.
         Event::listen(MigrationsEnded::class, fn () => ReportService::forgetSchemaCache());
+
+        // AG-087 (reviewer M1): a timed-out export ends its read snapshot before anything else runs on the connection.
+        // RunExport::failed() does this too; this also covers a worker that does not fail jobs on timeout.
+        Event::listen(JobTimedOut::class, fn () => ReadSnapshot::abandon());
 
         // Password reset spec R10: the one password policy. Every endpoint (and the console command) that accepts a
         // new password uses ['required', 'string', Password::defaults(), 'confirmed'] and keeps no rule of its own.

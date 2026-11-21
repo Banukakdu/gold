@@ -4,6 +4,7 @@ namespace Tests\Feature\Reports;
 
 use App\Models\AuditLog;
 use App\Models\Category;
+use App\Models\Export;
 use App\Models\PeriodLock;
 use App\Models\Role;
 use App\Models\Setting;
@@ -15,6 +16,7 @@ use App\Services\ReportService;
 use Database\Seeders\ReportExampleSeeder;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Queue;
 
 /** PDF / Excel export (spec section 5, accounting review findings 4, 5, 7). */
 class ReportExportTest extends ReportTestCase
@@ -124,9 +126,10 @@ class ReportExportTest extends ReportTestCase
         $this->assertSame('Net moved (reversals deducted)', $ws->getCell([1, $headRow + 6])->getValue());
     }
 
-    /** AC 22: 5,001 detail rows -> 422 and no file; exactly 5,000 -> file. */
+    /** AC 22: exactly 5,000 detail rows -> file; 5,001 -> Excel is queued (AG-087: 202, no file), PDF still 422. */
     public function test_ac22_row_cap(): void
     {
+        Queue::fake();
         $cash = $this->acc($this->kdy, 'Cash');
         $txnId = DB::table('transactions')->insertGetId(['branch_id' => $this->kdy->id, 'type' => 'income', 'txn_date' => '2026-11-03', 'amount' => '50.00',
             'account_id' => $cash->id, 'category_id' => Category::where('name', 'Retail')->value('id'), 'status' => 'posted', 'created_by' => $this->admin->id,
@@ -143,8 +146,9 @@ class ReportExportTest extends ReportTestCase
 
         DB::table('ledger_entries')->insert($row);
         $before = AuditLog::where('event', 'report.exported')->count();
-        $this->export('cash-book', $q, 'xlsx')->assertStatus(422)
-            ->assertJsonPath('message', 'This export has 5,001 rows; the limit is 5,000. Narrow the date range or branches.');
+        $this->export('cash-book', $q, 'xlsx')->assertStatus(202)
+            ->assertJsonPath('message', 'This export has 5,001 rows, so it is being prepared in the background. We will email you when it is ready.');
+        $this->assertSame(1, Export::count());
         $this->export('cash-book', $q, 'pdf')->assertStatus(422);
         $this->assertSame($before, AuditLog::where('event', 'report.exported')->count());
     }
@@ -200,7 +204,7 @@ class ReportExportTest extends ReportTestCase
         $q = $this->bulkLines(5001);
         $this->actingAs($this->acct)->withHeader('X-Branch-Id', (string) $this->kdy->id)
             ->getJson('/api/v1/reports/cash-book?'.http_build_query($q))->assertStatus(422)
-            ->assertJsonPath('message', 'This cash book has 5,001 lines; the limit is 5,000. Narrow the date range, branches or accounts.');
+            ->assertJsonPath('message', 'This cash book has 5,001 lines, too many to show on screen (the limit is 5,000). Narrow the date range, branches or accounts, or export it to Excel.');
     }
 
     /** QA bug 2: cash book Type column shows labels; day totals are formatted. QA bug 4: em dash drawn with DejaVu Sans. */

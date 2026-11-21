@@ -12,18 +12,32 @@ class ReportWorkbook implements WithMultipleSheets
 
     public function sheets(): array
     {
+        $titles = self::titles(array_column($this->sheets, 'title'));
+
+        return array_map(fn (array $s, string $title) => new ReportSheet($title, $this->headerLines, $s['columns'], $s['rows'], $s['notes'] ?? []),
+            $this->sheets, $titles);
+    }
+
+    /**
+     * Excel sheet names: max 31 characters, no []:*?/\ and unique within the workbook. Shared with the background
+     * export writer (AG-087 R5), so both files name their sheets alike.
+     *
+     * @param  string[]  $titles
+     * @return string[]
+     */
+    public static function titles(array $titles): array
+    {
         $used = [];
 
-        return array_map(function (array $s) use (&$used) {
-            // Excel sheet names: max 31 characters, no []:*?/\ and unique within the workbook.
-            $base = mb_substr(trim(preg_replace('/[\[\]:*?\/\\\\]/', ' ', $s['title'])), 0, 28) ?: 'Sheet';
+        return array_map(function (string $t) use (&$used) {
+            $base = mb_substr(trim(preg_replace('/[\[\]:*?\/\\\\]/', ' ', $t)), 0, 28) ?: 'Sheet';
             $title = $base;
             for ($i = 2; in_array(mb_strtolower($title), $used, true); $i++) {
                 $title = "{$base} {$i}";
             }
             $used[] = mb_strtolower($title);
 
-            return new ReportSheet($title, $this->headerLines, $s['columns'], $s['rows'], $s['notes'] ?? []);
-        }, $this->sheets);
+            return $title;
+        }, array_values($titles));
     }
 }

@@ -43,6 +43,22 @@ return [
             'after_commit' => false,
         ],
 
+        // AG-087 (docs/specs/background-exports.md section 5 "Queue"): its own connection, because the default
+        // `retry_after` (90 s) is shorter than an export can take and would start a second copy of a running job.
+        // Worker: php artisan queue:work exports --queue=exports --timeout=600 --memory=1024 (one process).
+        // Its own database connection (reviewer M1): the job's snapshot holds a hand-opened transaction on the default
+        // connection, and the queue's bookkeeping (deleting the job on a timeout) opens its own transaction, which the
+        // default connection would refuse. `exports_queue` is a copy of the default connection, made in
+        // AppServiceProvider::register unless config/database.php defines one.
+        'exports' => [
+            'driver' => env('EXPORTS_QUEUE_DRIVER', 'database'),
+            'connection' => env('EXPORTS_QUEUE_DB_CONNECTION', 'exports_queue'),
+            'table' => env('DB_QUEUE_TABLE', 'jobs'),
+            'queue' => 'exports',
+            'retry_after' => 900,
+            'after_commit' => true,
+        ],
+
         'beanstalkd' => [
             'driver' => 'beanstalkd',
             'host' => env('BEANSTALKD_QUEUE_HOST', 'localhost'),

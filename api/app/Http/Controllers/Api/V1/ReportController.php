@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
+use App\Services\BackgroundExports;
 use App\Services\ReportExporter;
 use App\Services\ReportService;
 use Illuminate\Http\Request;
@@ -32,7 +33,9 @@ class ReportController extends Controller
         $params = $this->reports->params('cash-book', $request->all());
         $rows = $this->reports->cashBookRows($params);
         if ($rows > ReportService::EXPORT_CAP) {
-            return response()->json(['message' => 'This cash book has '.number_format($rows).' lines; the limit is '.number_format(ReportService::EXPORT_CAP).'. Narrow the date range, branches or accounts.'], 422);
+            // AG-087 QA L1: the screen's cap only; Excel takes the full book (in the background), so the text says so.
+            return response()->json(['message' => 'This cash book has '.number_format($rows).' lines, too many to show on screen (the limit is '
+                .number_format(ReportService::EXPORT_CAP).'). Narrow the date range, branches or accounts, or export it to Excel.'], 422);
         }
 
         return $this->reports->cashBook($params);
@@ -50,12 +53,14 @@ class ReportController extends Controller
         return $this->reports->cashFlow($this->reports->params('cash-flow', $request->all()));
     }
 
-    public function export(Request $request, string $name)
+    /** AG-087 R1: validation first, then the count; a large Excel export is queued (202), anything else downloads. */
+    public function export(Request $request, string $name, BackgroundExports $exports)
     {
         abort_unless(in_array($name, ReportService::NAMES, true), 404, 'Unknown report.');
         $format = $request->validate(['format' => 'required|in:pdf,xlsx'])['format'];
         $params = $this->reports->params($name, $request->except('format'));
 
-        return $this->exporter->download($name, $params, $format, $request->user());
+        return $this->exporter->download($name, $params, $format, $request->user(),
+            fn (int $rows) => $exports->queueReport($request, $name, $params, $rows));
     }
 }
