@@ -7,22 +7,31 @@ use App\Models\ReportSchedule;
 use App\Models\ReportScheduleDelivery;
 use App\Models\ReportScheduleRun;
 use App\Notifications\InAppNotification;
+use App\Services\InAppNotifications;
+use App\Services\ReportExporter;
+use App\Services\ReportService;
 use App\Services\ScheduledReportRuns;
+use App\Services\ScheduledReports;
+use App\Support\ReadSnapshot;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Mail;
+use RuntimeException;
 use Symfony\Component\Mailer\Exception\TransportException;
 use Symfony\Component\Mailer\SentMessage;
 use Symfony\Component\Mailer\Transport\AbstractTransport;
 
 /**
  * docs/specs/scheduled-reports.md R15 (accepted risk 3 follow-up): a built run whose emails all failed counts towards
- * the automatic pause (R10), once, when it is settled. ACs 44-50.
+ * the automatic pause (R10), once, when it is settled. ACs 44-50 and the review fixes (ACs 51-55).
  */
 class DeliveryFailurePauseTest extends ScheduledReportsTestCase
 {
     /** Addresses the mail server refuses (TransportException on every try). */
     private array $refuse = [];
+
+    /** Addresses the mail server accepted, one entry per email. */
+    public array $accepted = [];
 
     protected function setUp(): void
     {
@@ -41,6 +50,9 @@ class DeliveryFailurePauseTest extends ScheduledReportsTestCase
                     if (in_array($r->getAddress(), $this->test->refused(), true)) {
                         throw new TransportException('550 mailbox unavailable');
                     }
+                }
+                foreach ($message->getEnvelope()->getRecipients() as $r) {
+                    $this->test->accepted[] = $r->getAddress();
                 }
             }
 
@@ -275,5 +287,135 @@ class DeliveryFailurePauseTest extends ScheduledReportsTestCase
         $this->assertSame($a->id, $audit->new_values['run_id']);
         $this->assertCount(1, $this->notDeliveredBell());
         $this->assertCount(1, $this->problemMailsTo($this->admin));
+    }
+
+    public function test_ac51_a_run_planned_before_a_resume_is_not_counted(): void
+    {
+        $d1 = $this->createD1();
+        $this->dispatchAt('2026-11-21 07:00');
+        $this->work();
+        $run = $this->latestRun($d1);
+        // The worker dies mid-SMTP for both emails; SA pauses, fixes the mail server and resumes.
+        DB::table('report_schedule_deliveries')->where('run_id', $run->id)->update(['status' => 'sending', 'sending_at' => now()]);
+        $this->travelTo(CarbonImmutable::parse('2026-11-21 07:10', 'Asia/Colombo'));
+        $this->as($this->admin)->postJson("/api/v1/report-schedules/{$d1->id}/pause")->assertOk();
+        $this->travelTo(CarbonImmutable::parse('2026-11-21 07:30', 'Asia/Colombo'));
+        $this->as($this->admin)->postJson("/api/v1/report-schedules/{$d1->id}/resume")->assertOk();
+        $this->assertNotNull($d1->fresh()->resumed_at);
+
+        $this->travelTo(CarbonImmutable::parse('2026-11-21 08:01', 'Asia/Colombo'));
+        $this->artisan('reports:dispatch-scheduled')->assertExitCode(0);
+        $this->assertSame(ReportScheduleRun::NOT_DELIVERED, $run->fresh()->delivery_outcome);
+        $this->assertSame(0, $d1->fresh()->consecutive_failures);
+        $audit = AuditLog::where('event', 'report_schedule.run_not_delivered')->sole();
+        $this->assertFalse($audit->new_values['counted']);
+        $this->assertSame('planned_before_resume', $audit->new_values['not_counted_reason']);
+        $this->assertCount(1, $this->notDeliveredBell());
+        $this->assertCount(1, $this->problemMailsTo($this->admin));
+
+        // A run planned after the resume counts as usual.
+        $this->refuse = ['sa@gold.example', 'ak@gold.example'];
+        $this->runAt($d1, '2026-11-22 07:00');
+        $this->assertSame(1, $d1->fresh()->consecutive_failures);
+        $last = AuditLog::where('event', 'report_schedule.run_not_delivered')->orderByDesc('id')->first();
+        $this->assertTrue($last->new_values['counted']);
+        $this->assertNull($last->new_values['not_counted_reason']);
+    }
+
+    public function test_ac52_a_manual_pause_with_queued_deliveries_sends_nothing_and_counts_nothing(): void
+    {
+        $d1 = $this->createD1();
+        $this->dispatchAt('2026-11-21 07:00');
+        $this->work();
+        $run = $this->latestRun($d1);
+        $this->as($this->admin)->postJson("/api/v1/report-schedules/{$d1->id}/pause")->assertOk();
+        $this->sendMails();
+        $this->assertSame([], $this->accepted);
+        $this->assertSame(['schedule_paused'], ReportScheduleDelivery::where('run_id', $run->id)->distinct()->pluck('reason')->all());
+        $this->assertSame(ReportScheduleRun::NOTHING_SENT, $run->fresh()->delivery_outcome);
+        $this->assertSame(0, $d1->fresh()->consecutive_failures);
+        $this->assertSame(0, AuditLog::where('event', 'report_schedule.run_not_delivered')->count());
+        $this->assertCount(0, $this->problemMailsTo($this->admin));
+    }
+
+    public function test_ac53_a_late_sent_of_an_older_run_does_not_reset_a_later_failure(): void
+    {
+        $d1 = $this->createD1();
+        // Run A (21 Nov) is built; its emails wait in the queue.
+        $this->dispatchAt('2026-11-21 07:00');
+        $this->work();
+        $a = $this->latestRun($d1);
+        // Run B (22 Nov) fails to build: counted (1).
+        $this->travelTo(CarbonImmutable::parse('2026-11-22 07:00', 'Asia/Colombo'));
+        DB::table('report_schedule_deliveries')->where('run_id', $a->id)->update(['queued_at' => now()]);
+        $this->artisan('reports:dispatch-scheduled')->assertExitCode(0);
+        ReadSnapshot::$hook = fn (string $p) => $p === 'counted' ? throw new RuntimeException('boom') : null;
+        $this->work();
+        ReadSnapshot::$hook = null;
+        $this->assertSame(1, $d1->fresh()->consecutive_failures);
+        $this->assertSame('failed', $this->latestRun($d1)->status);
+
+        // A's emails go out late: A is delivered, but B's failure stays counted.
+        $this->sendMails();
+        $this->assertSame(ReportScheduleRun::DELIVERED, $a->fresh()->delivery_outcome);
+        $this->assertSame(1, $d1->fresh()->consecutive_failures);
+
+        // Run C (23 Nov) is sent: the streak is reset.
+        $this->runAt($d1, '2026-11-23 07:00');
+        $this->assertSame(0, $d1->fresh()->consecutive_failures);
+    }
+
+    public function test_ac54_one_failed_and_the_rest_skipped_is_not_delivered(): void
+    {
+        $this->refuse = ['sa@gold.example'];
+        $d1 = $this->createD1();
+        $this->dispatchAt('2026-11-21 07:00');
+        $this->work();
+        $run = $this->latestRun($d1);
+        // AK loses Export between build and send: skipped; SA's email is refused.
+        $this->branchRole($this->kdy, 'Accountant')->revokePermissionTo('report.export');
+        $this->sendMails();
+        $this->assertSame([$this->admin->id => 'failed', $this->ak->id => 'skipped'], $this->statuses($run));
+        $this->assertSame(ReportScheduleRun::NOT_DELIVERED, $run->fresh()->delivery_outcome);
+        $this->assertSame(1, $d1->fresh()->consecutive_failures);
+        $audit = AuditLog::where('event', 'report_schedule.run_not_delivered')->sole();
+        $this->assertTrue($audit->new_values['counted']);
+        $this->assertEquals([$this->admin->id => 'mail_error'], $audit->new_values['failed']);
+        $this->assertEquals([$this->ak->id => 'missing_permission'], $audit->new_values['skipped']);
+        $this->assertCount(1, $this->problemMailsTo($this->admin));
+    }
+
+    public function test_ac55_a_settlement_error_does_not_fail_the_mail_job(): void
+    {
+        $this->refuse = ['ak@gold.example'];
+        $d1 = $this->createD1();
+        $this->dispatchAt('2026-11-21 07:00');
+        $this->work();
+        $run = $this->latestRun($d1);
+        $broken = new class(app(ScheduledReports::class), app(ReportService::class), app(ReportExporter::class), app(InAppNotifications::class)) extends ScheduledReportRuns
+        {
+            public int $calls = 0;
+
+            public function settleRun(string $runId): bool
+            {
+                $this->calls++;
+                throw new RuntimeException('Deadlock found when trying to get lock');
+            }
+        };
+        $this->app->instance(ScheduledReportRuns::class, $broken);
+        $this->sendMails();
+        // SA's email went out once (no retry after markSent), AK's failed after its 3 tries; both settle calls threw.
+        $this->assertSame(['sa@gold.example'], $this->accepted);
+        $this->assertSame([$this->admin->id => 'sent', $this->ak->id => 'failed'], $this->statuses($run));
+        $this->assertSame(1, ReportScheduleDelivery::where('run_id', $run->id)->where('user_id', $this->admin->id)->value('attempts'));
+        $this->assertSame(2, $broken->calls);
+        $this->assertNull($run->fresh()->settled_at);
+        $this->app->forgetInstance(ScheduledReportRuns::class);
+
+        // The dispatcher sweep settles it later, once.
+        $this->artisan('reports:dispatch-scheduled')->assertExitCode(0);
+        $this->assertSame(ReportScheduleRun::DELIVERED, $run->fresh()->delivery_outcome);
+        $this->assertSame(0, app(ScheduledReportRuns::class)->settleOpenRuns());
+        $this->assertSame(['sa@gold.example'], $this->accepted);
     }
 }
