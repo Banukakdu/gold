@@ -245,7 +245,9 @@ export class ExportButtonsComponent {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${this.name()}_${p['from']}_${p['to']}.${format}`;
+      // The server names the file (AG-033: bank-reconciliation_<as at>); the from/to name is the fallback.
+      const named = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') ?? '')?.[1];
+      a.download = named ?? `${this.name()}_${p['from']}_${p['to']}.${format}`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (e) {

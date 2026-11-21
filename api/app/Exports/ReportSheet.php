@@ -13,7 +13,7 @@ use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
 /**
  * Writes every cell with an explicit type, so nothing a user typed is ever read as a formula:
- * amounts are numeric (#,##0.00), dates (and months) are date cells, text is a string cell; text starting with = + - @
+ * amounts are numeric (#,##0.00), integers (counts, days) are numeric, dates (and months) are date cells, text is a string cell; text starting with = + - @
  * gets Excel's leading-apostrophe (quote prefix) so it stays literal when the cell is edited (spec section 5).
  */
 class ReportSheet implements WithEvents, WithTitle
@@ -23,6 +23,7 @@ class ReportSheet implements WithEvents, WithTitle
      * @param  array<int, array{0: string, 1: string}>  $columns  [label, type]
      * @param  array<int, array{cells: array, bold: bool}>  $rows
      * @param  string[]  $notes
+     * @param  string[]  $intro  lines between the header and the table (AG-033 QA D2: the account line)
      */
     public function __construct(
         private string $title,
@@ -30,6 +31,7 @@ class ReportSheet implements WithEvents, WithTitle
         private array $columns,
         private array $rows,
         private array $notes = [],
+        private array $intro = [],
     ) {}
 
     public function title(): string
@@ -53,6 +55,14 @@ class ReportSheet implements WithEvents, WithTitle
             $r++;
         }
         $r++;
+        foreach ($this->intro as $line) {
+            $this->text($ws, 1, $r, $line);
+            $ws->getStyle([1, $r])->getFont()->setBold(true);
+            $r++;
+        }
+        if ($this->intro) {
+            $r++;
+        }
 
         $headRow = $r;
         foreach ($this->columns as $c => [$label]) {
@@ -89,6 +99,9 @@ class ReportSheet implements WithEvents, WithTitle
         if ($type === 'amount' && is_string($v) && preg_match('/^-?\d+\.\d{2}$/', $v)) {
             $ws->setCellValueExplicit([$col, $row], $v, DataType::TYPE_NUMERIC);
             $ws->getStyle([$col, $row])->getNumberFormat()->setFormatCode('#,##0.00');
+        } elseif ($type === 'integer' && (is_int($v) || (is_string($v) && preg_match('/^-?\d+$/', $v)))) {
+            $ws->setCellValueExplicit([$col, $row], (int) $v, DataType::TYPE_NUMERIC);
+            $ws->getStyle([$col, $row])->getNumberFormat()->setFormatCode('0');
         } elseif ($type === 'percent' && is_string($v) && is_numeric($v)) {
             $ws->setCellValueExplicit([$col, $row], $v, DataType::TYPE_NUMERIC);
             $ws->getStyle([$col, $row])->getNumberFormat()->setFormatCode('0.0');

@@ -5,8 +5,10 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Models\Account;
 use App\Models\AuditLog;
+use App\Models\BankReconciliationMark;
 use App\Models\LedgerEntry;
 use App\Models\Transaction;
+use App\Services\BankReconciliation;
 use App\Services\LedgerService;
 use App\Support\BranchContext;
 use App\Support\Money;
@@ -23,7 +25,16 @@ class AccountController extends Controller
             $q->where('branch_id', $request->integer('branch_id'));
         }
 
-        return $q->get();
+        $accounts = $q->get();
+        // AG-033 SHOULD 10: the last completed reconciliation of each bank account (late-entry warning on the forms).
+        $dates = BankReconciliation::lastReconciledDates($accounts->where('type', 'bank')->pluck('id')->all());
+        foreach ($accounts as $a) {
+            if ($a->type === 'bank') {
+                $a->setAttribute('last_reconciled_date', $dates[$a->id] ?? null);
+            }
+        }
+
+        return $accounts;
     }
 
     /** Accounts of every branch, for picking a transfer destination (no balances exposed). */
@@ -103,8 +114,13 @@ class AccountController extends Controller
             ->where('auditable_type', Transaction::class)->whereIn('auditable_id', $entries->whereNotNull('contra_of_id')->pluck('transaction_id')->unique())
             ->get()->mapWithKeys(fn ($a) => [$a->auditable_id => $a->new_values['reason'] ?? null]);
 
+        // AG-033 S2: a bank account's lines carry the active mark's cleared date (read-only); other accounts have no key.
+        $bank = $account->type === 'bank';
+        $cleared = $bank ? BankReconciliation::installed(fn () => BankReconciliationMark::withoutGlobalScopes()->active()->where('account_id', $account->id)
+            ->whereIn('ledger_entry_id', $entries->pluck('id'))->pluck('cleared_date', 'ledger_entry_id'), collect()) : collect();
+
         $running = Money::toCents($opening);
-        $rows = $entries->map(function ($e) use (&$running, $reasons) {
+        $rows = $entries->map(function ($e) use (&$running, $reasons, $bank, $cleared) {
             $running += Money::toCents($e->debit) - Money::toCents($e->credit);
             $contra = $e->contra_of_id !== null;
 
@@ -122,7 +138,7 @@ class AccountController extends Controller
                 'in' => $e->debit,
                 'out' => $e->credit,
                 'balance' => Money::fromCents($running),
-            ];
+            ] + ($bank ? ['cleared_date' => isset($cleared[$e->id]) ? substr((string) $cleared[$e->id], 0, 10) : null] : []);
         });
 
         return [

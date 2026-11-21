@@ -548,6 +548,11 @@ class LedgerService
             $date = $txn->txn_date->format('Y-m-d');
             $originals = $txn->entries()->whereNull('contra_of_id')->orderBy('id')->get();
             $accounts = $this->lock($originals->pluck('account_id')->unique()->all());
+            // AG-033 R5: a line ticked on a bank reconciliation is never voided (locking read after the account locks, so a
+            // tick and a void cannot race: the marks endpoint locks the same account row first).
+            if ($refusal = BankReconciliation::voidRefusal($originals->pluck('id')->all(), $txn->ref_no ?? "#{$txn->id}")) {
+                throw new LedgerException($refusal);
+            }
             $lines = $originals->map(fn (LedgerEntry $e) => $this->line($accounts[$e->account_id], Money::toCents($e->credit), Money::toCents($e->debit),
                 $e->entry_date->format('Y-m-d'), contraOf: $e->id))->all();
             $this->assertOpen($txn->branch_id, $date);

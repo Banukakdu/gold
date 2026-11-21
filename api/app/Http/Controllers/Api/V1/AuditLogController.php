@@ -75,6 +75,8 @@ class AuditLogController extends Controller
         'categories' => [['category.'], []],
         // AG-093 R9
         'backups' => [['backup.'], []],
+        // AG-033 S5
+        'bank_reconciliation' => [['reconciliation.'], []],
     ];
 
     public const LABELS = [
@@ -144,6 +146,10 @@ class AuditLogController extends Controller
         'backup.control_failed' => 'Backup: books not balanced',
         'backup.continuity_failed' => 'Database rolled back without a recorded restore',
         'backup.year_end' => 'Year-end snapshot taken',
+        // AG-033 R10
+        'reconciliation.saved' => 'Bank lines reconciled',
+        'reconciliation.completed' => 'Bank statement completed',
+        'reconciliation.undone' => 'Bank statement undone',
     ];
 
     public function index(Request $request)

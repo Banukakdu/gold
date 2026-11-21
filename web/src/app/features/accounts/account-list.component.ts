@@ -22,7 +22,8 @@ import { errorText } from '../../core/api.interceptor';
               <td>{{ a.name }} @if (a.is_main_account) { <span class="tag">Main</span> }</td>
               <td>{{ a.type }}</td>
               <td class="num">{{ a.current_balance | money }}</td>
-              <td><a [routerLink]="['/accounts', a.id, 'statement']">Statement</a></td>
+              <td><a [routerLink]="['/accounts', a.id, 'statement']">Statement</a>
+                @if (a.type === 'bank' && auth.can('account.reconcile')) { · <a [routerLink]="['/accounts', a.id, 'reconcile']">Reconcile</a> }</td>
             </tr>
           }
         </tbody>

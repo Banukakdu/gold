@@ -2,6 +2,7 @@ import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { Account } from '../../core/models';
+import { lateEntryWarning } from '../../core/reconciliation';
 import { AuthService } from '../../core/auth.service';
 import { MoneyPipe } from '../../core/money.pipe';
 import { errorText } from '../../core/api.interceptor';
@@ -38,6 +39,7 @@ import { toCents } from '../../core/approvals';
         <p class="alert info wide">Above {{ threshold() | money }}: this transfer needs Main's approval before it is posted.</p>
       }
       <label>Date <input type="date" name="txn_date" [(ngModel)]="m.txn_date" [max]="today" required /></label>
+      @for (w of lateWarnings(); track w) { <p class="warn wide">{{ w }}</p> }
       <label class="wide">Reason <input name="note" [(ngModel)]="m.note" required /></label>
       @if (error()) { <div class="alert wide">{{ error() }}</div> }
       @if (saved()) {
@@ -126,6 +128,11 @@ export class TransferFormComponent implements OnInit {
       if (this.fromId() === null) this.setFrom(this.mine()[0]?.id ?? null);
     });
     this.http.get<Account[]>('/api/v1/accounts/destinations').subscribe(a => { this.destinations.set(a); this.dropHiddenTo(); });
+  }
+
+  /** AG-033 review finding 10: late-entry warnings for reconciled bank accounts of this branch (never blocking). */
+  lateWarnings() {
+    return [this.fromId(), this.toId()].map(id => lateEntryWarning(this.mine().find(a => a.id === id), this.m.txn_date)).filter(Boolean);
   }
 
   /** AG-052 F2: the transfer awaits receipt; toCode names the receiving branch when it is known. */

@@ -44,7 +44,7 @@
     <div class="company">{{ $head['company'] }}</div>
     <div class="title">{{ $head['title'] }}</div>
     <div class="line">Branches: {{ $head['branches'] }}</div>
-    <div class="line">Period: {{ $head['period'] }}</div>
+    <div class="line">{{ $head['period_word'] ?? 'Period' }}: {{ $head['period'] }}</div>
     <div class="line">{{ $head['currency'] ?? 'Amounts in LKR' }} &middot; {{ $head['basis'] ?? \App\Services\ReportService::BASIS }}</div>
     <div class="line">{{ $head['printed'] }}</div>
     @foreach ($head['notes'] ?? [] as $note)<div class="line"><b>{{ $note }}</b></div>@endforeach

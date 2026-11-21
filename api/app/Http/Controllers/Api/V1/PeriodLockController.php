@@ -10,6 +10,7 @@ use App\Models\Transaction;
 use App\Models\User;
 use App\Models\YearEndClose;
 use App\Services\Backups\BackupStatus;
+use App\Services\BankReconciliation;
 use App\Services\ExpenseApprovals;
 use App\Services\TransferApprovals;
 use App\Services\TransferReceipts;
@@ -128,7 +129,9 @@ class PeriodLockController extends Controller
             // AG-051 S8: requests dated in the month and still pending. Never blocking; they post on their approval date.
             + app(TransferApprovals::class)->pendingSummary(substr($periodEnd, 0, 8).'01', $periodEnd, $branches->pluck('id')->map(fn ($id) => (int) $id)->all())
             // AG-064 S8: expense requests dated in the month and still pending; never blocking.
-            + app(ExpenseApprovals::class)->pendingSummary(substr($periodEnd, 0, 8).'01', $periodEnd, $branches->pluck('id')->map(fn ($id) => (int) $id)->all());
+            + app(ExpenseApprovals::class)->pendingSummary(substr($periodEnd, 0, 8).'01', $periodEnd, $branches->pluck('id')->map(fn ($id) => (int) $id)->all())
+            // AG-033 S4 (Q8): bank accounts not reconciled through the month end; information only, never blocking.
+            + ['bank_reconciliation' => app(BankReconciliation::class)->lockReview($period, $branches->pluck('id')->map(fn ($id) => (int) $id)->all())];
     }
 
     public function store(Request $request)

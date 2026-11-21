@@ -7,10 +7,14 @@ import { SettingsService } from '../../core/settings.service';
 import { MoneyPipe } from '../../core/money.pipe';
 import { InTransitInfo, inTransitLine } from '../../core/receipts';
 import { PendingApprovalInfo, pendingApprovalLine } from '../../core/approvals';
+import { dayLabel } from '../../core/reconciliation';
 
 /** Lock confirm review (controls finding 7 + AG-062 finding 5): information only, never blocks. */
 interface Review extends InTransitInfo, PendingApprovalInfo {
   closes_from: string | null; self_voids: number; self_reversals: number; files_removed?: number; files_removed_self?: number; backup_warning?: string | null;
+  /** AG-033 S4: bank accounts not reconciled through the month end (information only). */
+  bank_reconciliation?: { branch: { id: number; code: string }; account: { id: number; code: string | null; name: string };
+    last_statement_date: string | null; changed_since_completion: boolean }[];
 }
 interface Person { id: number; name: string; tag: string | null }
 interface Lock {
@@ -34,6 +38,12 @@ interface Cell {
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const label = (period: string) => `${MONTHS[+period.slice(5, 7) - 1]} ${period.slice(0, 4)}`;
 const short = (period: string) => `${MONTHS[+period.slice(5, 7) - 1].slice(0, 3)} ${period.slice(0, 4)}`;
+
+/** AG-033 S4: "<code> <account>: last reconciled to <date | never>", with the branch code when the lock covers all branches. */
+export function bankReconciliationLines(rows: NonNullable<Review['bank_reconciliation']>, allBranches: boolean): string {
+  return rows.map(r => `${allBranches ? r.branch.code + ' · ' : ''}${r.account.code ? r.account.code + ' ' : ''}${r.account.name}: last reconciled to `
+    + `${r.last_statement_date ? dayLabel(r.last_statement_date) : 'never'}${r.changed_since_completion ? ', changed since completion' : ''}`).join('\n');
+}
 
 /** AG-091 period locks (docs/specs/controls.md S2 + accounting review finding 1, 7). Super Admin only. */
 @Component({
@@ -214,6 +224,8 @@ export class PeriodLocksComponent implements OnInit {
     // AG-051 S8: requests dated in the month and still pending (information only).
     const pendingLine = pendingApprovalLine(review, label(p), v => new MoneyPipe().transform(v));
     if (pendingLine) text += `\n\n${pendingLine}`;
+    // AG-033 S4 (Q8): bank accounts not reconciled through the month end; information only, never blocking.
+    if (review?.bank_reconciliation?.length) text += `\n\n${bankReconciliationLines(review.bank_reconciliation, branch === null)}`;
     if (!confirm(text) || this.busy()) return;
     this.busy.set(true);
     this.http.post('/api/v1/period-locks', { period: p, branch_id: branch }).subscribe({

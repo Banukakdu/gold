@@ -24,6 +24,9 @@ export interface Account {
   is_main_account?: boolean;
   status?: string;
   branch?: { id: number; code: string; name: string; is_main?: boolean };
+  code?: string | null;
+  /** AG-033 SHOULD 10: bank accounts only, the last completed reconciliation (YYYY-MM-DD) or null. */
+  last_reconciled_date?: string | null;
 }
 
 export interface Category {
