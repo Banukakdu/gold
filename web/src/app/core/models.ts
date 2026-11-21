@@ -13,6 +13,8 @@ export interface Me {
   email: string;
   is_super_admin: boolean;
   branches: BranchAccess[];
+  /** AG-005: the user's own two-factor summary. */
+  two_factor?: { enabled: boolean; required: boolean; recovery_codes_left: number };
 }
 
 export interface Account {
@@ -108,6 +110,9 @@ export interface UserRow {
   roles_in_branch?: string[];
   /** Detail only: why the actor cannot change profile/status/invitation (B5, B6, B2), or null. */
   profile_locked_reason?: string | null;
+  /** AG-005 S8: returned to Super Admins only. reset_blocked_since on the detail only (R16). */
+  two_factor?: { enabled: boolean; confirmed_at: string | null; required: boolean; recovery_codes_left: number;
+    reset_blocked_since?: string | null };
 }
 
 export interface RoleRow {

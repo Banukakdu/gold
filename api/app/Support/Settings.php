@@ -93,6 +93,12 @@ final class Settings
         return $this->raw('transfer_receipt_required') === '1';
     }
 
+    /** AG-005 R8: admins must use two-factor sign-in. Default off. Memoised with the other settings (R9: one read). */
+    public function twoFactorRequiredForAdmins(): bool
+    {
+        return $this->raw('two_factor_required_for_admins') === '1';
+    }
+
     /**
      * AG-051 R2: transfers above this many cents need Main's approval. Null = never (default); 0 = every branch
      * transfer and fund return. Stored as integer cents text; anything else reads as never.

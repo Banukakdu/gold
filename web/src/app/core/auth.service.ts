@@ -3,6 +3,7 @@ import { HttpClient } from '@angular/common/http';
 import { Router } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 import { BranchAccess, Me } from './models';
+import { TwoFactorChallenge } from './two-factor';
 
 const TOKEN = 'ag.token';
 const BRANCH = 'ag.branch';
@@ -34,11 +35,22 @@ export class AuthService {
   readonly isSuperAdmin = computed(() => !!this.me()?.is_super_admin);
   readonly isAllBranches = computed(() => this.isSuperAdmin() && this.activeBranchId() === 'all');
 
-  async login(email: string, password: string) {
-    const res = await firstValueFrom(this.http.post<{ token: string; user: Me }>('/api/v1/auth/login', { email, password }));
-    this.token.set(res.token);
-    write(TOKEN, res.token);
-    this.setUser(res.user);
+  /**
+   * Step 1 of sign-in. AG-005: when 2FA is on or required, the API answers with a challenge instead of a token; it is
+   * returned to the login screen (kept in its memory only) and nothing is stored.
+   */
+  async login(email: string, password: string): Promise<TwoFactorChallenge | null> {
+    const res = await firstValueFrom(this.http.post<{ token: string; user: Me } | TwoFactorChallenge>('/api/v1/auth/login', { email, password }));
+    if ('two_factor' in res) return res;
+    this.startSession(res.token, res.user);
+    return null;
+  }
+
+  /** AG-005 P1 / P3: the token after the second step. */
+  startSession(token: string, user: Me) {
+    this.token.set(token);
+    write(TOKEN, token);
+    this.setUser(user);
   }
 
   async loadMe(): Promise<boolean> {

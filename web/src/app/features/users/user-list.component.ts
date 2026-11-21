@@ -33,6 +33,7 @@ import { errorText } from '../../core/api.interceptor';
       <table class="list">
         <thead><tr>
           <th>Name</th><th>Email</th><th>Phone</th><th>{{ auth.isAllBranches() ? 'Branches' : 'Role' }}</th><th>Status</th><th>Last login</th>
+          @if (auth.isSuperAdmin()) { <th>2FA</th> }
         </tr></thead>
         <tbody>
           @for (u of page()?.data; track u.id) {
@@ -51,8 +52,14 @@ import { errorText } from '../../core/api.interceptor';
               </td>
               <td><span class="tag" [attr.data-s]="u.status">{{ u.status }}</span></td>
               <td>{{ u.last_login_at ? (u.last_login_at | appDateTime) : 'Invitation pending' }}</td>
+              <!-- AG-005 S8: Super Admin only -->
+              @if (auth.isSuperAdmin()) {
+                <td>@if (u.two_factor; as t) {
+                  @if (t.enabled) { On } @else if (t.required) { <span class="tf-2fa-off">Required, off</span> } @else { Off }
+                }</td>
+              }
             </tr>
-          } @empty { <tr><td colspan="6" class="muted">{{ auth.isAllBranches() ? 'No users match.' : 'No users in this branch yet.' }}</td></tr> }
+          } @empty { <tr><td [attr.colspan]="auth.isSuperAdmin() ? 7 : 6" class="muted">{{ auth.isAllBranches() ? 'No users match.' : 'No users in this branch yet.' }}</td></tr> }
         </tbody>
       </table>
       @if (page(); as p) {

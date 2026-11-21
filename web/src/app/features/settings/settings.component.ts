@@ -1,7 +1,10 @@
 import { Component, OnInit, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
+import { RouterLink } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
+import { AuthService } from '../../core/auth.service';
+import { StepUpAnswer, StepUpDialogComponent } from '../account/step-up-dialog.component';
 import { errorText } from '../../core/api.interceptor';
 import { fileSize } from '../../core/attachments';
 import { MONTH_NAMES, PublicSettings, SettingsService, formatYmd } from '../../core/settings.service';
@@ -24,8 +27,12 @@ interface FullSettings extends Omit<PublicSettings, 'logo'> {
   /** AG-051 S1 / R18. */
   transfer_approval_threshold: string | null;
   transfer_approval_warning: string | null;
+  /** AG-005 S6. */
+  two_factor_required_for_admins: boolean;
+  two_factor_pending_admins: { count: number; users: { id: number; name: string; email: string }[] };
 }
-type Editable = 'company_name' | 'currency_code' | 'date_format' | 'fiscal_year_start_month' | 'transfer_receipt_required' | 'transfer_approval_threshold';
+type Editable = 'company_name' | 'currency_code' | 'date_format' | 'fiscal_year_start_month' | 'transfer_receipt_required' | 'transfer_approval_threshold'
+  | 'two_factor_required_for_admins';
 
 const MAX_LOGO = 1024 * 1024;
 const SAMPLE = '2026-10-05';
@@ -33,7 +40,7 @@ const SAMPLE = '2026-10-05';
 /** AG-092 S1 Settings. Super Admin only, any switcher mode. */
 @Component({
   standalone: true,
-  imports: [FormsModule],
+  imports: [FormsModule, RouterLink, StepUpDialogComponent],
   template: `
     <h1>Settings</h1>
     @if (msg()) { <div class="alert">{{ msg() }}</div> }
@@ -130,6 +137,30 @@ const SAMPLE = '2026-10-05';
           <div class="changed">{{ changed('transfer_approval_threshold') }}</div>
         </fieldset>
 
+        <!-- AG-005 S6 -->
+        <fieldset>
+          <legend>Sign-in security</legend>
+          <label class="tr-check">
+            <input type="checkbox" style="width:auto" name="two_factor_required_for_admins" [(ngModel)]="form.two_factor_required_for_admins" />
+            <span>Require two-factor sign-in for admins</span>
+          </label>
+          <small class="muted">Admins are Super Admins and anyone whose role can create users, edit users, manage roles, or approve transfers or
+            expenses in any branch. They must set up two-factor sign-in at their next sign-in or request.</small>
+          @if (err()['two_factor_required_for_admins']; as e) {
+            <span class="neg">{{ e }} @if (e.includes('your own account')) { <a routerLink="/account/security">Security</a> }</span>
+          }
+          @if (s.two_factor_pending_admins.count) {
+            <div>{{ s.two_factor_pending_admins.count }} admins have not set it up yet:</div>
+            <ul class="tf-pending">
+              @for (u of s.two_factor_pending_admins.users; track u.id) { <li><a [routerLink]="['/users', u.id]">{{ u.name }} &lt;{{ u.email }}&gt;</a></li> }
+            </ul>
+            @if (s.two_factor_pending_admins.count > s.two_factor_pending_admins.users.length) {
+              <div class="muted">and {{ s.two_factor_pending_admins.count - s.two_factor_pending_admins.users.length }} more</div>
+            }
+          } @else { <div class="muted">Every admin has two-factor sign-in.</div> }
+          <div class="changed">{{ changed('two_factor_required_for_admins') }}</div>
+        </fieldset>
+
         <fieldset>
           <legend>Approvals</legend>
           <span class="muted">Expense approval thresholds are set here when expense approval (AG-064) is released.</span>
@@ -141,15 +172,26 @@ const SAMPLE = '2026-10-05';
         </div>
       </form>
     } @else if (!msg()) { <p class="muted">Loading...</p> }
+    @if (stepUp()) {
+      <app-step-up-dialog title="Confirm the change"
+        [text]="auth.me()?.two_factor?.enabled ? 'Changing two-factor sign-in for admins needs your password and current code.' : 'Changing two-factor sign-in for admins needs your password.'"
+        confirmLabel="Save" [second]="auth.me()?.two_factor?.enabled ? 'code' : 'none'" [busy]="busy()" [errors]="stepUpErrors()"
+        [alert]="stepUpAlert()" (submitted)="save($event)" (cancel)="stepUp.set(false)" />
+    }
   `,
 })
 export class SettingsComponent implements OnInit {
   private http = inject(HttpClient);
   settings = inject(SettingsService);
+  auth = inject(AuthService);
+  /** AG-005 S6: the step-up dialog before a save that changes two_factor_required_for_admins. */
+  stepUp = signal(false);
+  stepUpErrors = signal<Record<string, string>>({});
+  stepUpAlert = signal('');
   months = MONTH_NAMES;
   s = signal<FullSettings | null>(null);
   form: Record<Editable, string | number | boolean> = { company_name: '', currency_code: '', date_format: '', fiscal_year_start_month: 4,
-    transfer_receipt_required: false, transfer_approval_threshold: '' };
+    transfer_receipt_required: false, transfer_approval_threshold: '', two_factor_required_for_admins: false };
   msg = signal('');
   ok = signal('');
   logoMsg = signal('');
@@ -178,7 +220,7 @@ export class SettingsComponent implements OnInit {
     if (!s) return;
     this.form = { company_name: s.company_name, currency_code: s.currency_code, date_format: s.date_format,
       fiscal_year_start_month: Number(s.fiscal_year_start_month), transfer_receipt_required: !!s.transfer_receipt_required,
-      transfer_approval_threshold: s.transfer_approval_threshold ?? '' };
+      transfer_approval_threshold: s.transfer_approval_threshold ?? '', two_factor_required_for_admins: !!s.two_factor_required_for_admins };
     this.err.set({});
   }
 
@@ -196,23 +238,43 @@ export class SettingsComponent implements OnInit {
     // AG-051: sent as typed (the API checks the format and compares in cents); '' = never.
     const threshold = String(this.form.transfer_approval_threshold ?? '').trim();
     if (threshold !== (s.transfer_approval_threshold ?? '')) out.transfer_approval_threshold = threshold;
+    if (!!this.form.two_factor_required_for_admins !== !!s.two_factor_required_for_admins) {
+      out.two_factor_required_for_admins = !!this.form.two_factor_required_for_admins;
+    }
     return out;
   }
 
-  async save() {
-    const body = this.changes();
-    if (!Object.keys(body).length || this.busy()) return;
+  async save(stepUp?: StepUpAnswer) {
+    const changes = this.changes();
+    if (!Object.keys(changes).length || this.busy()) return;
+    // AG-005 S6: changing the 2FA switch first asks for the password (and code when the Super Admin has 2FA on).
+    if (changes.two_factor_required_for_admins !== undefined && !stepUp) {
+      this.stepUpErrors.set({});
+      this.stepUpAlert.set('');
+      this.stepUp.set(true);
+      return;
+    }
+    const body: Record<string, unknown> = { ...changes, ...(stepUp ?? {}) };
     // R4 / S1 (QA Q2): a new fiscal-year start moves every year boundary.
-    if (body.fiscal_year_start_month !== undefined
-      && !confirm(`Change the fiscal year start to ${MONTH_NAMES[Number(body.fiscal_year_start_month) - 1]}? Trial balances will use the new year boundaries.`)) return;
+    if (changes.fiscal_year_start_month !== undefined
+      && !confirm(`Change the fiscal year start to ${MONTH_NAMES[Number(changes.fiscal_year_start_month) - 1]}? Trial balances will use the new year boundaries.`)) return;
     this.busy.set(true);
     this.msg.set(''); this.ok.set(''); this.err.set({});
     try {
       this.take(await firstValueFrom(this.http.put<FullSettings>('/api/v1/settings', body)));
+      this.stepUp.set(false);
       this.ok.set('Settings saved.');
     } catch (e: any) {
       const errors = e?.error?.errors as Record<string, string[]> | undefined;
-      if (errors) this.err.set(Object.fromEntries(Object.entries(errors).map(([k, v]) => [k, v[0]])));
+      const flat: Record<string, string> = errors ? Object.fromEntries(Object.entries(errors).map(([k, v]) => [k, v[0]])) : {};
+      if (this.stepUp() && (flat['password'] || flat['code'] || e?.status === 429)) {
+        // Wrong password or code: the dialog stays open with the message.
+        this.stepUpErrors.set({ ...(flat['password'] ? { password: flat['password'] } : {}), ...(flat['code'] ? { code: flat['code'] } : {}) });
+        this.stepUpAlert.set(e?.status === 429 ? errorText(e) : '');
+        return;
+      }
+      this.stepUp.set(false);
+      this.err.set(flat);
       this.msg.set(errorText(e));
     } finally { this.busy.set(false); }
   }

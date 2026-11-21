@@ -7,12 +7,16 @@ use App\Models\AuditLog;
 use App\Models\Setting;
 use App\Models\User;
 use App\Models\YearEndClose;
+use App\Notifications\TwoFactorAlertNotification;
+use App\Services\AccessAlerts;
 use App\Services\TransferApprovals;
+use App\Services\TwoFactor;
 use App\Support\Currencies;
 use App\Support\LogoFile;
 use App\Support\LogoStore;
 use App\Support\Money;
 use App\Support\Settings;
+use App\Support\TwoFactorPolicy;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -36,7 +40,14 @@ class SettingsController extends Controller
         'transfer_receipt_required' => 'transfer_receipt_required',
         // AG-051 S1 / R2: decimal string in the API, integer cents in the row, null = never.
         'transfer_approval_threshold' => 'transfer_approval_threshold',
+        // AG-005 S6 / R8 (stored as 0 / 1). Changing it needs the step-up (accounting review 5).
+        'two_factor_required_for_admins' => 'two_factor_required_for_admins',
     ];
+
+    /** AG-005: request keys that are not settings (the step-up of two_factor_required_for_admins). */
+    public const STEP_UP_KEYS = ['password', 'code'];
+
+    public const OWN_TWO_FACTOR_FIRST = 'Turn on two-factor sign-in for your own account first.';
 
     public const THRESHOLD = 'Enter an amount of 0 or more with up to 2 decimals, or leave it empty.';
 
@@ -96,7 +107,7 @@ class SettingsController extends Controller
     {
         $input = $request->json()->all() ?: $request->all();
         foreach (array_keys($input) as $key) {
-            if ($key !== 'currency_decimals' && ! isset(self::EDITABLE[$key])) {
+            if ($key !== 'currency_decimals' && ! in_array($key, self::STEP_UP_KEYS, true) && ! isset(self::EDITABLE[$key])) {
                 throw ValidationException::withMessages([$key => "Unknown setting: {$key}."]);
             }
         }
@@ -106,6 +117,7 @@ class SettingsController extends Controller
             'date_format' => ['sometimes', 'required', Rule::in(array_keys(Settings::DATE_FORMATS))],
             'fiscal_year_start_month' => 'sometimes|required|integer|between:1,12',
             'transfer_receipt_required' => 'sometimes|required|boolean',
+            'two_factor_required_for_admins' => 'sometimes|required|boolean',
             'transfer_approval_threshold' => ['sometimes', 'nullable', function (string $a, mixed $v, \Closure $fail) {
                 if (is_string($v) && trim($v) === '') {
                     return; // empty = never
@@ -125,7 +137,7 @@ class SettingsController extends Controller
         if (array_key_exists('currency_decimals', $d) && (int) $d['currency_decimals'] !== Currencies::DECIMALS) {
             throw ValidationException::withMessages(['currency_decimals' => self::DECIMALS]);
         }
-        unset($d['currency_decimals']);
+        unset($d['currency_decimals'], $d['password'], $d['code']);
         if (isset($d['company_name'])) {
             $d['company_name'] = trim((string) $d['company_name']);
         }
@@ -137,13 +149,19 @@ class SettingsController extends Controller
             $d['transfer_receipt_required'] = filter_var($d['transfer_receipt_required'], FILTER_VALIDATE_BOOLEAN) ? 1 : 0;
         }
 
+        if (array_key_exists('two_factor_required_for_admins', $d)) {
+            $d['two_factor_required_for_admins'] = filter_var($d['two_factor_required_for_admins'], FILTER_VALIDATE_BOOLEAN) ? 1 : 0;
+            $this->stepUpForTwoFactorSetting($request, $d['two_factor_required_for_admins']);
+        }
+
         if (array_key_exists('transfer_approval_threshold', $d)) {
             // Exact through integer cents ("100000" and "100000.00" are the same value).
             $v = trim((string) $d['transfer_approval_threshold']);
             $d['transfer_approval_threshold'] = $v === '' ? null : Money::fromCents(Money::toCents($v));
         }
 
-        DB::transaction(function () use ($d) {
+        $twoFactorChanged = null;
+        DB::transaction(function () use ($d, &$twoFactorChanged) {
             // Review N4: the rows FOR UPDATE before the old values are read, so two saves cannot both audit the same
             // old value. Ordered by key, one lock order.
             Setting::whereIn('key', array_values(self::EDITABLE))->orderBy('key')->lockForUpdate()->get();
@@ -169,11 +187,37 @@ class SettingsController extends Controller
             if (isset($changed['currency_code'])) {
                 DB::table('accounts')->update(['currency' => $changed['currency_code']]);
             }
-            AuditLog::record('settings.updated', null, array_intersect_key($current, $changed), $changed);
+            // AG-005 S6: the 2FA switch is audited as a boolean (false -> true).
+            $bools = fn (array $v) => array_key_exists('two_factor_required_for_admins', $v)
+                ? ['two_factor_required_for_admins' => (bool) $v['two_factor_required_for_admins']] + $v : $v;
+            AuditLog::record('settings.updated', null, $bools(array_intersect_key($current, $changed)), $bools($changed));
+            $twoFactorChanged = array_key_exists('two_factor_required_for_admins', $changed) ? (bool) $changed['two_factor_required_for_admins'] : null;
         });
         $this->settings->flush();
+        if ($twoFactorChanged !== null) {
+            // R12 / accounting review 5: on or off, the other Super Admins are told.
+            $actor = $request->user();
+            AccessAlerts::twoFactor(new TwoFactorAlertNotification('setting', '', TwoFactor::who($actor), ['enabled' => $twoFactorChanged]), $actor->id);
+        }
 
         return $this->fullBody();
+    }
+
+    /**
+     * AG-005 S6 / R8 / accounting review 5: changing "Require two-factor sign-in for admins" (on or off) needs the
+     * Super Admin's password and, when their 2FA is on, their current code. Turning it on needs their own 2FA first.
+     * Nothing is checked when the value does not change.
+     */
+    private function stepUpForTwoFactorSetting(Request $request, int $value): void
+    {
+        if ($value === ($this->settings->twoFactorRequiredForAdmins() ? 1 : 0)) {
+            return;
+        }
+        $actor = $request->user();
+        if ($value === 1 && ! $actor->hasTwoFactor()) {
+            throw ValidationException::withMessages(['two_factor_required_for_admins' => self::OWN_TWO_FACTOR_FIRST]);
+        }
+        TwoFactor::stepUp($actor, $request, $actor->hasTwoFactor() ? 'code' : 'none');
     }
 
     /** POST /settings/logo: R3 checks, then the file is stored as received (0440); the old file stays. */
@@ -232,6 +276,7 @@ class SettingsController extends Controller
             'fiscal_year_start_month' => $this->settings->fiscalYearStartMonth(),
             'transfer_receipt_required' => $this->settings->transferReceiptRequired() ? 1 : 0,
             'transfer_approval_threshold' => ($c = $this->settings->transferApprovalThresholdCents()) === null ? null : Money::fromCents($c),
+            'two_factor_required_for_admins' => $this->settings->twoFactorRequiredForAdmins() ? 1 : 0,
         ];
     }
 
@@ -241,6 +286,8 @@ class SettingsController extends Controller
 
         $current = $this->current();
         $current['transfer_receipt_required'] = (bool) $current['transfer_receipt_required'];
+        // AG-005: on the Super Admin's GET /settings only (fullBody).
+        unset($current['two_factor_required_for_admins']);
 
         return $current + [
             'logo' => $logo ? ['sha256' => $logo['sha256'], 'updated_at' => $logo['uploaded_at'] ?? null] : null,
@@ -272,6 +319,9 @@ class SettingsController extends Controller
         $out['currency_locked'] = DB::table('ledger_entries')->exists();
         $out['fiscal_year_start_locked'] = YearEndClose::query()->exists();
         $out['date_formats'] = array_keys(Settings::DATE_FORMATS);
+        // AG-005 S6
+        $out['two_factor_required_for_admins'] = $this->settings->twoFactorRequiredForAdmins();
+        $out['two_factor_pending_admins'] = TwoFactorPolicy::pendingAdmins();
         $out['currencies'] = Currencies::CODES;
         $out['transfer_approval_warning'] = match (true) {
             $this->settings->transferApprovalThresholdInvalid() => self::THRESHOLD_INVALID,

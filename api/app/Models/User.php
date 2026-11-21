@@ -18,7 +18,9 @@ class User extends Authenticatable
 
     protected $fillable = ['name', 'email', 'phone', 'password', 'status'];
 
-    protected $hidden = ['password', 'remember_token'];
+    /** AG-005: the 2FA columns never appear in toArray() / JSON (section 5). */
+    protected $hidden = ['password', 'remember_token', 'two_factor_secret', 'two_factor_confirmed_at', 'two_factor_last_step',
+        'two_factor_pending_secret', 'two_factor_pending_at'];
 
     protected function casts(): array
     {
@@ -29,6 +31,12 @@ class User extends Authenticatable
             'is_super_admin' => 'boolean',
             // AG-094 R7: the approval-request email (only this email); changed through PUT /notifications/preferences.
             'approval_request_email' => 'boolean',
+            // AG-005 R2: the TOTP secrets are stored only with Laravel's encrypted cast (APP_KEY).
+            'two_factor_secret' => 'encrypted',
+            'two_factor_pending_secret' => 'encrypted',
+            'two_factor_confirmed_at' => 'datetime',
+            'two_factor_pending_at' => 'datetime',
+            'two_factor_last_step' => 'integer',
         ];
     }
 
@@ -60,6 +68,12 @@ class User extends Authenticatable
         $user = static::whereRaw('lower(email) = lower(?)', [$email])->first();
 
         return $user && hash_equals(mb_strtolower((string) $user->email), $email) ? $user : null;
+    }
+
+    /** AG-005: 2FA is on exactly when two_factor_confirmed_at is set. */
+    public function hasTwoFactor(): bool
+    {
+        return $this->two_factor_confirmed_at !== null;
     }
 
     public function branches(): BelongsToMany

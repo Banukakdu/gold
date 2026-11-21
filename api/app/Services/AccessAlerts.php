@@ -6,6 +6,7 @@ use App\Models\Branch;
 use App\Models\User;
 use App\Notifications\AccessChangedNotification;
 use App\Notifications\PasswordResetAlertNotification;
+use App\Notifications\TwoFactorAlertNotification;
 use App\Support\BranchAdmins;
 use Illuminate\Support\Facades\Notification;
 
@@ -47,6 +48,24 @@ class AccessAlerts
     public static function passwordResetRefused(User $user): void
     {
         self::toOtherSuperAdmins($user, new PasswordResetAlertNotification('refused', $user->email));
+    }
+
+    /**
+     * AG-005 R12: a two-factor alert to every active Super Admin except $exceptUserId (the actor; for the console and the
+     * user's own changes, the user concerned). Queued after commit; a mail failure is only reported.
+     */
+    public static function twoFactor(TwoFactorAlertNotification $n, ?int $exceptUserId): void
+    {
+        $admins = User::where('is_super_admin', true)->where('status', 'active')
+            ->when($exceptUserId !== null, fn ($q) => $q->whereKeyNot($exceptUserId))->get();
+        if ($admins->isEmpty()) {
+            return;
+        }
+        try {
+            Notification::send($admins, $n);
+        } catch (\Throwable $e) {
+            report($e);
+        }
     }
 
     private static function toOtherSuperAdmins(User $user, PasswordResetAlertNotification $n): void
