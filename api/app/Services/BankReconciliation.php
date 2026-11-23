@@ -914,6 +914,16 @@ class BankReconciliation
     }
 
     /**
+     * The `last_reconciled_date` key of an approval widget side (array rows, not models): present only when
+     * attachLastReconciledDates set it on the account, so another branch's reconciliation is never revealed.
+     */
+    public static function lastReconciledOf(?Account $account): array
+    {
+        return $account && array_key_exists('last_reconciled_date', $account->getAttributes())
+            ? ['last_reconciled_date' => $account->getAttribute('last_reconciled_date')] : [];
+    }
+
+    /**
      * Runs a read of the reconciliation tables, or returns $none while they do not exist yet: earlier migrations (the
      * double-entry back-fill) post, void and list accounts before AG-033 is migrated (as YearEnd::closedYearOf). Only a
      * missing table is absorbed; any other error is thrown.

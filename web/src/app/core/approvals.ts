@@ -6,6 +6,7 @@ import { NotificationsService } from './notifications.service';
 import { MoneyPipe } from './money.pipe';
 import { AppDatePipe } from './app-date.pipe';
 import { colomboToday } from './dates';
+import { ReconciledAccount, lateEntryWarnings } from './reconciliation';
 
 /** AG-051 R1 labels (same as the API's TransferApprovals::LABELS). A null approval_status is "Not required". */
 export const APPROVAL_LABELS: Record<string, string> = {
@@ -49,11 +50,17 @@ export interface ApprovalTarget {
   requested_period_locked?: boolean;
   /** AG-066 R7a: the template facts recorded at request (from template, changes, changed since last use, duplicate). */
   template_lines?: { text: string; warn?: boolean }[];
+  /**
+   * AG-033 review finding 10: the bank accounts the approval posts on (both sides of a transfer). Each carries
+   * `last_reconciled_date` only when the user may see it; the dialog warns when today (the posting date, R6) is on or
+   * before it. Never blocking.
+   */
+  accounts?: (ReconciledAccount | null | undefined)[];
 }
 
 /**
  * S3 dialogs (AG-051, reused by AG-064 expense approvals with `kind: 'expense'`). Approve: fixed posting date (today,
- * R6), optional comment (an expense with no file: required, "Why is there no receipt?"). Reject: reason 10-500, sent to
+ * R6), the late-entry warning when today is on or before a bank account's last reconciliation, optional comment (an expense with no file: required, "Why is there no receipt?"). Reject: reason 10-500, sent to
  * the requester.
  * Errors show the API message; a 422 that is not a field error also tells the host, which reloads. Esc closes it.
  */
@@ -72,6 +79,7 @@ export interface ApprovalTarget {
         } @else {
           <p class="muted">Posting date: today ({{ today | appDate }}). Requested for {{ target.requested_date | appDate }}.</p>
         }
+        @for (w of lateWarnings; track w) { <p class="warn">{{ w }}</p> }
         @if (target.requester_inactive) { <p class="neg">Requester is inactive.</p> }
         @if (target.template_lines?.length) {
           <!-- AG-066 R7a: what the template use recorded at request. -->
@@ -126,7 +134,13 @@ export class ApprovalDialogComponent implements OnInit {
   busy = signal(false);
   error = signal('');
 
-  ngOnInit() { this.today = colomboToday(); }
+  /** AG-033 review finding 10: late-entry warnings for the posting date (today), never blocking. */
+  lateWarnings: string[] = [];
+
+  ngOnInit() {
+    this.today = colomboToday();
+    this.lateWarnings = lateEntryWarnings(this.target.accounts ?? [], this.today);
+  }
 
   @HostListener('document:keydown.escape')
   onEscape() {

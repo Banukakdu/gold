@@ -7,7 +7,7 @@ import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
 import { errorText } from '../../core/api.interceptor';
 import { ApprovalDialogComponent, ApprovalTarget, toCents } from '../../core/approvals';
 
-interface Side { branch_code: string | null; account: string | null; available?: string }
+interface Side { branch_code: string | null; account: string | null; available?: string; last_reconciled_date?: string | null }
 interface Row {
   id: number; ref_no: string; type: string; requested_date: string | null; requested_on: string | null; age_days: number; expires_on: string | null;
   from: Side; to: Side; amount: string; other_pending_from_account: string; below_threshold_7d: { count: number; amount: string };
@@ -146,7 +146,13 @@ export class TransferApprovalsComponent implements OnInit {
     this.dialog.set({ mode, target: {
       id: t.id, ref_no: t.ref_no, amount: t.amount, requested_date: t.requested_date, requester_inactive: t.requester_inactive,
       from: `${t.from.branch_code} · ${t.from.account}`, to: `${t.to.branch_code} · ${t.to.account}`,
+      accounts: [this.side(t.from), this.side(t.to)],
     } });
+  }
+
+  /** AG-033 review finding 10: a side as the late-entry warning reads it (the date only when the API sent it). */
+  private side(s: Side) {
+    return { name: s.account ?? '', branch: s.branch_code ? { code: s.branch_code } : null, last_reconciled_date: s.last_reconciled_date };
   }
 
   done(res: { ref_no: string }) {

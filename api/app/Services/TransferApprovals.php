@@ -190,16 +190,22 @@ class TransferApprovals extends ApprovalRequests
         $approver = $this->isApprover($user, $ctx);
 
         $pending = fn () => Transaction::withoutGlobalScopes()->where('approval_status', self::PENDING)->whereIn('type', self::TYPES)
-            ->with(['fromAccount:id,name,branch_id,current_balance', 'fromAccount.branch:id,code', 'toAccount:id,name,branch_id', 'toAccount.branch:id,code',
+            ->with(['fromAccount:id,name,branch_id,type,current_balance', 'fromAccount.branch:id,code', 'toAccount:id,name,branch_id,type', 'toAccount.branch:id,code',
                 'creator:id,name,status'])
             ->orderBy('requested_on')->orderBy('id');
+        // AG-033 SHOULD 10: the approve dialog warns when today's posting (R6) is a late entry on either bank account.
+        $withDates = function ($rows) use ($user) {
+            BankReconciliation::attachLastReconciledDates($user, $rows->flatMap(fn ($t) => [$t->fromAccount, $t->toAccount])->filter());
+
+            return $rows;
+        };
 
         $toApprove = ['data' => [], 'total' => 0, 'amount' => '0.00'];
         if ($approver) {
             $q = $pending();
             $toApprove['total'] = (clone $q)->count();
             $toApprove['amount'] = Money::fromCents((int) (clone $q)->toBase()->selectRaw('COALESCE(SUM('.Money::sqlCents('amount').'), 0) as c')->value('c'));
-            $rows = $q->limit(self::WIDGET_ROWS)->get();
+            $rows = $withDates($q->limit(self::WIDGET_ROWS)->get());
             $ctxData = $this->pageData($rows, $today, $threshold);
             $toApprove['data'] = $rows->map(fn (Transaction $t) => $this->row($t, $user, $today, $threshold, true, $ctxData))->all();
         }
@@ -208,7 +214,7 @@ class TransferApprovals extends ApprovalRequests
         if ($ctx->isScoped()) {
             $q = $pending()->where('created_by', $user->id)->where('branch_id', $ctx->branchId);
             $mine['total'] = (clone $q)->count();
-            $rows = $q->limit(self::WIDGET_ROWS)->get();
+            $rows = $withDates($q->limit(self::WIDGET_ROWS)->get());
             $ctxData = $this->pageData($rows, $today, $threshold);
             $mine['data'] = $rows->map(fn (Transaction $t) => $this->row($t, $user, $today, $threshold, $approver, $ctxData))->all();
         }
@@ -243,8 +249,8 @@ class TransferApprovals extends ApprovalRequests
             'age_days' => $requestedOn ? TransferReceipts::ageDays($requestedOn, $today) : 0,
             'expires_on' => self::expiresOn($requestedOn),
             'from' => ['branch_code' => $t->fromAccount?->branch?->code, 'account' => $t->fromAccount?->name,
-                'available' => Money::fromCents(Money::toCents($t->fromAccount?->current_balance))],
-            'to' => ['branch_code' => $t->toAccount?->branch?->code, 'account' => $t->toAccount?->name],
+                'available' => Money::fromCents(Money::toCents($t->fromAccount?->current_balance))] + BankReconciliation::lastReconciledOf($t->fromAccount),
+            'to' => ['branch_code' => $t->toAccount?->branch?->code, 'account' => $t->toAccount?->name] + BankReconciliation::lastReconciledOf($t->toAccount),
             'amount' => Money::fromCents(Money::toCents($t->amount)),
             'other_pending_from_account' => Money::fromCents(($page['pending'][$acc] ?? 0) - Money::toCents($t->amount)),
             'below_threshold_7d' => $page['below'][$acc] ?? ['count' => 0, 'amount' => '0.00'],
