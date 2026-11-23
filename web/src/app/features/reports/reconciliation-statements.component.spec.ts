@@ -299,6 +299,66 @@ describe('AG-033c bank reconciliation statements list (web)', () => {
     req.flush(list({ data: [] }));
   });
 
+  it('QA D2: a bookmarked copy filter with copies off shows the 422 and the filter; other field errors go to the alert', async () => {
+    const req = await open(null, VIEWER, '/reports/reconciliation-statements?copy=none');
+    req!.flush({ message: 'x', errors: { copy: ['Bank statement copies are not available yet.'] } }, { status: 422, statusText: 'Unprocessable' });
+    await settle(fixture);
+    expect(el.querySelector('select[name="copy"]')).not.toBeNull();
+    expect(el.querySelector('.rs-panel .field-error')!.textContent).toContain('Bank statement copies are not available yet.');
+
+    button(el, 'Apply')!.click();
+    http.expectOne(r => r.url === URL).flush({ message: 'x', errors: { status: ['The selected status is invalid.'], 'branches.0': ['Unknown branch.'] } },
+      { status: 422, statusText: 'Unprocessable' });
+    await settle(fixture);
+    expect(el.querySelector('.alert')!.textContent).toContain('The selected status is invalid. Unknown branch.');
+  });
+
+  it('review SHOULD 5: account ids from another branch in a bookmark are dropped once and the list reloads', async () => {
+    const req = await open(null, VIEWER, '/reports/reconciliation-statements?account_ids=99');
+    req!.flush({ message: 'x', errors: { account_ids: ['Unknown bank account.'] } }, { status: 422, statusText: 'Unprocessable' });
+    await settle(fixture);
+    const again = http.expectOne(r => r.url === URL);
+    expect(again.request.params.has('account_ids[]')).toBeFalse();
+    again.flush(list());
+    await settle(fixture);
+    expect(rows().length).toBe(3);
+    expect(TestBed.inject(Router).url).not.toContain('account_ids');
+  });
+
+  it('QA D3: deselecting a branch in All mode unticks its accounts', async () => {
+    setup([VIEWER], 'all');
+    TestBed.inject(AuthService).me.set({ ...me([VIEWER]), is_super_admin: true });
+    http = TestBed.inject(HttpTestingController);
+    fixture = TestBed.createComponent(ReconciliationStatementsComponent);
+    el = fixture.nativeElement as HTMLElement;
+    fixture.detectChanges();
+    http.match('/api/v1/branches').forEach(r => r.flush([]));
+    http.expectOne(r => r.url === URL).flush(list({ all_branches: true, accounts: [
+      { id: 5, code: '11002', name: 'KDY Bank', status: 'active', branch: { id: 2, code: 'KDY' }, last_statement_date: null },
+      { id: 7, code: '12002', name: 'GAL Bank', status: 'active', branch: { id: 3, code: 'GAL' }, last_statement_date: null },
+    ] }));
+    await settle(fixture);
+    const c = fixture.componentInstance;
+    c.toggle(5);
+    c.toggle(7);
+    c.onBranches([3]);
+    expect(c.chosen()).toEqual([7]);
+    expect(c.visibleAccounts().map(a => a.id)).toEqual([7]);
+  });
+
+  it('QA D4: a double click on PDF sends one export', async () => {
+    await open(list(), ACCOUNTANT);
+    const pdf = button(el, 'PDF')!;
+    pdf.click();
+    pdf.click();
+    expect(http.match(r => r.url === '/api/v1/reports/reconciliation-statements/export').length).toBe(1);
+  });
+
+  it('QA D5: the phone card reads "Completed by Name (tag), date" without a stray space', async () => {
+    await open(list({ data: [row({ completed_by: { id: 8, name: 'Dilan', tag: 'inactive' } })] }));
+    expect(el.querySelector('.rs-l4')!.textContent!.replace(/\s+/g, ' ').trim()).toMatch(/^Completed by Dilan \(inactive\), \S/);
+  });
+
   it('AC 2: the hub lists the card after "Unreconciled bank entries"', () => {
     setup([VIEWER]);
     const f = TestBed.createComponent(ReportsHubComponent);

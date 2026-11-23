@@ -88,7 +88,9 @@ import { NotificationBellComponent } from './notification-bell.component';
         <main class="content">
           <!-- Re-create the page whenever the active branch changes so it refetches its data (AG-088: except the
                scheduled reports pages, which carry their own branches and keep their state) -->
-          @for (k of [outletKey()]; track k) { <router-outlet /> }
+          <!-- QA D1 (AG-033c AC 19): while the switch redirects away, no page is shown, so a page created for the new
+               branch cannot navigate back over the redirect (report screens write their filters into the URL on load) -->
+          @if (!leaving()) { @for (k of [outletKey()]; track k) { <router-outlet /> } }
         </main>
         <div class="toast" role="status" aria-live="polite">@if (toast.text()) { <span [class.toast-warn]="toast.kind() === 'warning'">{{ toast.text() }}</span> }</div>
       </div>
@@ -106,6 +108,8 @@ export class ShellComponent implements OnInit {
   /** AG-005 F4 / S5: /account/security?required=1 shows no menu, no branch switcher and no bell. */
   required = computed(() => /^\/account\/security\?(.*&)?required=1(&|$)/.test(this.url()));
   menuOpen = signal(false);
+  /** True while switch() redirects away from a page the new branch may not open (QA D1). */
+  leaving = signal(false);
   outletKey = computed(() => (/^\/scheduled-reports(\/|\?|$)/.test(this.url()) ? 'scheduled-reports' : this.auth.activeBranchId()));
 
   ngOnInit() { this.settings.load(); }
@@ -124,25 +128,31 @@ export class ShellComponent implements OnInit {
     this.auth.switchBranch(id);
     // Entry forms and statements need a single branch; send the user back to the dashboard.
     if (this.router.url.includes('/new/') || this.router.url.includes('/statement')) {
-      this.router.navigateByUrl('/dashboard');
+      this.leave('/dashboard');
     } else if (/^\/accounts\/(\d+\/)?reconcile/.test(this.router.url) && !this.auth.can('account.reconcile')) {
       // AG-033: account.reconcile is per branch; leave if the new branch does not grant it.
-      this.router.navigateByUrl('/dashboard');
+      this.leave('/dashboard');
     } else if (this.router.url.startsWith('/audit-log') && !this.auth.can('audit.view')) {
       // audit.view is per branch: leave if the new branch does not grant it.
-      this.router.navigateByUrl('/dashboard');
+      this.leave('/dashboard');
     } else if (this.router.url.startsWith('/expense-templates') && !this.auth.can('expense.create') && !this.auth.can('expense.edit')) {
       // AG-066: the template keys are per branch; leave if the new branch grants neither.
-      this.router.navigateByUrl('/dashboard');
+      this.leave('/dashboard');
     } else if (this.router.url.startsWith('/categories') && !this.auth.can('category.manage')) {
       // category.manage is per branch: leave if the new branch does not grant it.
-      this.router.navigateByUrl('/dashboard');
+      this.leave('/dashboard');
     } else if (this.router.url.startsWith('/reports') && !this.auth.can('report.view')) {
       // Reports are per branch permission (report.view); leave if the new branch does not grant it.
-      this.router.navigateByUrl('/dashboard');
+      this.leave('/dashboard');
     } else if (/^\/(users|roles)\/./.test(this.router.url)) {
       // User/role pages belong to one branch; go back to the list for the new branch.
-      this.router.navigateByUrl(this.router.url.startsWith('/users') ? '/users' : '/roles');
+      this.leave(this.router.url.startsWith('/users') ? '/users' : '/roles');
     }
+  }
+
+  /** Redirect after a branch switch; the outlet stays empty until the navigation settles (QA D1). */
+  private leave(url: string) {
+    this.leaving.set(true);
+    this.router.navigateByUrl(url).finally(() => this.leaving.set(false));
   }
 }

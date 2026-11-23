@@ -3,6 +3,8 @@
 @php($date = fn ($v) => app(\App\Support\Settings::class)->formatDate($v))
 @php($colombo = fn ($v) => $v ? \Carbon\CarbonImmutable::parse($v)->setTimezone('Asia/Colombo')->format('Y-m-d H:i') : '')
 @php($copies = $data['copies_supported'])
+{{-- The Branch column as on S6: All branches mode (or more than one branch) only. --}}
+@php($showBranch = $data['all_branches'] || count($data['branches']) > 1)
 @section('body')
 {{-- AG-033c S6 (accounting review finding 4): the checker's working paper. Filters and the R9 coverage line under the header. --}}
 <p class="note">{{ \App\Services\BankReconciliation::listFilterText($data) }}</p>
@@ -10,7 +12,7 @@
 <p class="note">{{ $data['total'] }} {{ $data['total'] === 1 ? 'statement' : 'statements' }}</p>
 <table>
     <thead><tr>
-        <th>Branch</th><th>Account</th><th>Statement date</th><th class="num">Statement balance</th><th class="num">Lines</th>
+        @if ($showBranch)<th>Branch</th>@endif<th>Account</th><th>Statement date</th><th class="num">Statement balance</th><th class="num">Lines</th>
         <th>Completed by / at</th><th>Status</th><th>Changed</th><th class="num">Late entries</th>
         @if ($copies)<th>Bank statement copy</th>@endif
         <th style="width: 90px">Checked (initials, date)</th>
@@ -18,7 +20,7 @@
     <tbody>
     @forelse ($data['data'] as $r)
         <tr>
-            <td>{{ $r['branch']['code'] }}</td>
+            @if ($showBranch)<td>{{ $r['branch']['code'] }}</td>@endif
             <td>{{ $X::listAccountText($r['account']) }}</td>
             <td>{{ $date($r['statement_date']) }}</td>
             <td class="num">{{ $X::statementBalanceText($r['statement_balance']) }}</td>
@@ -31,7 +33,7 @@
             <td></td>
         </tr>
     @empty
-        <tr><td colspan="{{ $copies ? 11 : 10 }}">No statements match these filters.</td></tr>
+        <tr><td colspan="{{ 9 + ($copies ? 1 : 0) + ($showBranch ? 1 : 0) }}">No statements match these filters.</td></tr>
     @endforelse
     </tbody>
 </table>

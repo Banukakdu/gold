@@ -81,7 +81,7 @@ let lastBranch: string | null = null;
       (click)="panelOpen.set(!panelOpen())">{{ activeFilters() ? 'Filters (' + activeFilters() + ')' : 'Filters' }}</button>
     <form id="rs-panel" class="rs-panel" [class.open]="panelOpen()" (ngSubmit)="apply()" novalidate>
       @if (auth.isAllBranches()) {
-        <div class="rs-field"><span>Branches</span><ag-branch-picker [(selected)]="branches" /></div>
+        <div class="rs-field"><span>Branches</span><ag-branch-picker [selected]="branches()" (selectedChange)="onBranches($event)" /></div>
       }
       <div class="rs-field"><span>Accounts</span>
         <details class="picker">
@@ -109,7 +109,7 @@ let lastBranch: string | null = null;
         <select name="late" [(ngModel)]="f.late">
           <option value="any">Any</option><option value="some">Some</option><option value="none">None</option>
         </select></label>
-      @if (copiesSupported()) {
+      @if (copyShown()) {
         <label>Bank statement copy
           <select name="copy" [(ngModel)]="f.copy">
             <option value="any">Any</option><option value="attached">Attached</option><option value="none">None</option>
@@ -192,7 +192,7 @@ let lastBranch: string | null = null;
                 @if (s.late_entries_count !== null) { <span class="tag">Late entries {{ late(s) }}</span> }
                 @if (copiesSupported() && copy(s)) { <span class="tag" [class.att-late]="copy(s).startsWith('No copy')">{{ copy(s) }}</span> }
               </div>
-              <div class="rs-l4">Completed by {{ s.completed_by?.name ?? '-' }}@if (s.completed_by?.tag) { ({{ s.completed_by?.tag }}) }, {{ s.completed_at | appDateTime }}
+              <div class="rs-l4">Completed by {{ person(s.completed_by) }}, {{ s.completed_at | appDateTime }}
                 @if (s.status === 'undone') { <div>Undone {{ undoneText(s) }}</div> }</div>
             </a>
           </li>
@@ -240,6 +240,9 @@ export class ReconciliationStatementsComponent implements OnInit {
   panelOpen = signal(false);
   /** Copies supported: from the last answer (R6); a bookmarked copy filter is kept until the API says otherwise. */
   copiesSupported = computed(() => this.r()?.copies_supported ?? false);
+  /** Review SHOULD 4 / QA D2: a copy filter from the URL stays visible (and changeable) even when copies are off. */
+  copyShown = computed(() => this.copiesSupported() || this.copyFilter() !== 'any');
+  private copyFilter = signal('any');
   accounts = computed(() => this.r()?.accounts ?? []);
   visibleAccounts = computed(() => {
     const b = this.branches();
@@ -258,6 +261,8 @@ export class ReconciliationStatementsComponent implements OnInit {
     return n;
   });
   private money = new MoneyPipe();
+  /** QA D3 / review SHOULD 5: account ids the API refused (another branch, a bookmark) are dropped once and the list reloads. */
+  private droppedAccounts = false;
 
   ngOnInit() {
     const { q, branches } = readQuery(this.route, this.auth.isAllBranches());
@@ -276,6 +281,7 @@ export class ReconciliationStatementsComponent implements OnInit {
 
   /** Apply: page 1, the filters into the URL (bookmarkable, and Back from the reprint restores them). */
   apply() {
+    this.copyFilter.set(this.f.copy);
     const params: ReportParams = {
       branches: this.branches(), account_ids: this.chosen(), from: this.f.from, to: this.f.to,
       status: this.f.status, changed: this.f.changed, late: this.f.late, copy: this.f.copy === 'any' ? undefined : this.f.copy,
@@ -303,6 +309,9 @@ export class ReconciliationStatementsComponent implements OnInit {
     this.netError.set(false);
     this.http.get<StatementList>('/api/v1/reports/reconciliation-statements', { params: toHttpParams({ ...this.applied(), page }) }).subscribe({
       next: r => {
+        // Keep only accounts the API lists for this scope (as the cash book does).
+        const known = new Set(r.accounts.map(a => a.id));
+        if (this.chosen().some(id => !known.has(id))) this.chosen.update(c => c.filter(id => known.has(id)));
         this.r.set(r);
         this.rows.set(append ? [...this.rows(), ...r.data] : r.data);
         this.page.set(r.page);
@@ -315,8 +324,23 @@ export class ReconciliationStatementsComponent implements OnInit {
         if (!append) { this.r.set(null); this.rows.set([]); }
         if (e.status === 0) { this.netError.set(true); return; }
         const fields = fieldErrors(e);
-        this.errs.set(fields);
-        this.msg.set(Object.keys(fields).length ? '' : reportError(e));
+        if (fields['account_ids'] && this.chosen().length && !this.droppedAccounts) {
+          this.droppedAccounts = true;
+          this.chosen.set([]);
+          this.apply();
+          return;
+        }
+        // Review SHOULD 4 / QA D2: errors of fields with a place on screen go under the field; any other (branches,
+        // status, page, ...) goes to the alert, so a bad bookmark never leaves a blank page.
+        const onScreen = ['from', 'to', 'account_ids', ...(this.copyShown() ? ['copy'] : [])];
+        const under: Record<string, string> = {};
+        const rest: string[] = [];
+        for (const [k, v] of Object.entries(fields)) {
+          if (onScreen.includes(k)) under[k] = v;
+          else rest.push(v);
+        }
+        this.errs.set(under);
+        this.msg.set(Object.keys(fields).length ? rest.join(' ') : reportError(e));
       },
     });
   }
@@ -324,6 +348,17 @@ export class ReconciliationStatementsComponent implements OnInit {
   open(s: StatementRow) {
     this.router.navigate(['/reports/bank-reconciliation'], { queryParams: { statement_id: s.id } });
   }
+
+  /** QA D3: deselecting a branch also unticks its accounts, so no hidden account stays in the filter. */
+  onBranches(ids: number[]) {
+    this.branches.set(ids);
+    if (ids.length) {
+      const visible = new Set(this.accounts().filter(a => ids.includes(a.branch.id)).map(a => a.id));
+      this.chosen.update(c => c.filter(id => visible.has(id)));
+    }
+  }
+
+  person(p: ListPerson | null) { return p ? `${p.name}${p.tag ? ` (${p.tag})` : ''}` : '-'; }
 
   toggle(id: number) { this.chosen.update(s => (s.includes(id) ? s.filter(x => x !== id) : [...s, id])); }
 

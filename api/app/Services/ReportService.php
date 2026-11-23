@@ -57,7 +57,9 @@ class ReportService
 
     public static function statementCopiesSupported(): bool
     {
-        return self::$statementCopies ??= Schema::hasTable('attachments') && Schema::hasColumn('attachments', 'bank_statement_id');
+        // Per process: a queue worker would keep the old answer after the AG-033b migration until `queue:restart`
+        // (today this list is never queued).
+        return self::$statementCopies ??= Schema::hasColumn('attachments', 'bank_statement_id');
     }
 
     public const NAMES = ['income-expense', 'branch-comparison', 'transfers', 'cash-book', 'trial-balance', 'cash-flow', 'bank-reconciliation',

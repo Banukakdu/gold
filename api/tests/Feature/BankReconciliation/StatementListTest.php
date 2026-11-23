@@ -8,6 +8,7 @@ use App\Models\BankStatement;
 use App\Services\BankReconciliation;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use PhpOffice\PhpSpreadsheet\Cell\DataType;
 use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
 
@@ -51,8 +52,9 @@ class StatementListTest extends StatementListTestCase
         $this->assertSame('2026-10-31', $st1['statement_date']);
         $this->assertStringStartsWith('2026-11-03', $st1['completed_at']);
         $this->assertNull($st1['undone_by']);
-        $this->assertNull($st1['attachments_count']);
-        $this->assertNull($st1['attachments_removed_count']);
+        // Null on main; 0 once AG-033b is merged (no files here).
+        $this->assertSame($this->copiesOn() ? 0 : null, $st1['attachments_count']);
+        $this->assertSame($this->copiesOn() ? 0 : null, $st1['attachments_removed_count']);
 
         $st2 = $this->row($r, $this->st2);
         $this->assertSame(['undone', 'Wrong closing balance typed', false, null, null], [$st2['status'], $st2['undo_reason'],
@@ -105,6 +107,8 @@ class StatementListTest extends StatementListTestCase
         $this->list(['status' => 'undone', 'changed' => 'yes'])->assertOk()->assertJsonPath('total', 0)->assertJsonPath('data', []);
         $this->assertSame([$this->st3->id, $this->st1->id], $this->ids($this->list(['status' => 'completed', 'late' => 'any'])));
         $this->assertSame([$this->st3->id], $this->ids($this->list(['late' => 'none'])));
+        // Changed = No with Status = All also lists the undone statement (never "changed", R8).
+        $this->assertSame([$this->st3->id, $this->st2->id], $this->ids($this->list(['changed' => 'no'])));
         $this->list(['status' => 'open'])->assertStatus(422)->assertJsonValidationErrors('status');
         $this->list(['changed' => 'maybe'])->assertStatus(422)->assertJsonValidationErrors('changed');
         $this->list(['late' => 'all'])->assertStatus(422)->assertJsonValidationErrors('late');
@@ -154,6 +158,10 @@ class StatementListTest extends StatementListTestCase
         $this->assertSame([$this->st3->id, $this->st2->id, $this->st1->id], $this->ids($this->list([], $this->admin, $this->kdy)));
         $this->report(['statement_id' => $this->st4->id], $this->admin, $this->kdy)->assertNotFound();
         $this->list(['account_ids' => [$this->galBank->id]], $this->admin, $this->kdy)->assertStatus(422);
+        // All mode: an account outside the chosen branches is refused too.
+        $this->list(['branches' => [$this->gal->id], 'account_ids' => [$this->kdyBank->id]], $this->admin, 'all')
+            ->assertStatus(422)->assertJsonPath('errors.account_ids.0', 'Unknown bank account.');
+        $this->exportList(['branches' => [$this->gal->id], 'account_ids' => [$this->kdyBank->id]], 'xlsx', $this->admin, 'all')->assertStatus(422);
     }
 
     public function test_ac11_deactivated_preparer_keeps_name_with_tag(): void
@@ -176,8 +184,17 @@ class StatementListTest extends StatementListTestCase
         $this->assertSame('closed', collect($r->json('accounts'))->firstWhere('id', $this->kdyBank->id)['status']);
     }
 
+    /** AG-033b (PR #25) merged: `attachments.bank_statement_id` exists, so the copy column and filter are on. */
+    private function copiesOn(): bool
+    {
+        return Schema::hasColumn('attachments', 'bank_statement_id');
+    }
+
     public function test_ac13_copies_not_supported_on_main(): void
     {
+        if ($this->copiesOn()) {
+            $this->markTestSkipped('AG-033b is merged: copies are supported (AC 14, StatementListCopiesTest).');
+        }
         $r = $this->list()->assertJsonPath('copies_supported', false);
         foreach ($r->json('data') as $row) {
             $this->assertNull($row['attachments_count']);
@@ -206,8 +223,13 @@ class StatementListTest extends StatementListTestCase
             $this->assertStringContainsString($needle, $text);
         }
         $this->assertStringNotContainsString('PROVISIONAL', $text);
-        $this->assertStringNotContainsString('Bank statement copy', $text);
-        $audit = AuditLog::where('event', 'report.exported')->sole();
+        if (! $this->copiesOn()) {
+            $this->assertStringNotContainsString('Bank statement copy', $text);
+        }
+        // Branch mode: no Branch column (S6 shows it in All mode only); All mode has it.
+        $this->assertStringNotContainsString('BRANCH ACCOUNT', $text);
+        $this->assertStringContainsString('BRANCH ACCOUNT', implode(' ', $this->pdfPages($this->exportList([], 'pdf', $this->admin, 'all')->assertOk()->getContent())));
+        $audit = AuditLog::where('event', 'report.exported')->orderBy('id')->first();
         $this->assertSame(['reconciliation-statements', 'pdf', 3], [$audit->new_values['name'], $audit->new_values['format'], $audit->new_values['rows']]);
         $this->assertSame($this->kdy->id, (int) $audit->branch_id);
 
@@ -337,13 +359,14 @@ class StatementListTest extends StatementListTestCase
 
             return $n;
         };
+        $count(); // warms the per-process schema check (copies supported)
         $before = $count();
         $this->insertStatements(30, BankStatement::COMPLETED, '2026-01-01');
         $this->assertSame($before, $count());
     }
 
     /** Statements written directly (test factory): $n rows on KDY Bank, one per day going back from $last. */
-    private function insertStatements(int $n, string $status, string $last, bool $sameDay = false): void
+    private function insertStatements(int $n, string $status, string $last, bool $sameDay = false, int $maxEntryId = 1_000_000_000): void
     {
         $rows = [];
         $day = Carbon::parse($last);
@@ -353,7 +376,7 @@ class StatementListTest extends StatementListTestCase
                 'cleared_booked_later_cents' => 0, 'self_count' => 0, 'lines_count' => 0, 'status' => $status, 'completed_by' => $this->acc->id,
                 'completed_at' => '2026-12-01 10:00:00', 'undone_by' => $status === BankStatement::UNDONE ? $this->ba->id : null,
                 'undone_at' => $status === BankStatement::UNDONE ? '2026-12-01 11:00:00' : null, 'undo_reason' => $status === BankStatement::UNDONE ? 'Test factory row' : null,
-                'max_entry_id' => 1_000_000_000, 'created_at' => now(), 'updated_at' => now()];
+                'max_entry_id' => $maxEntryId, 'created_at' => now(), 'updated_at' => now()];
         }
         foreach (array_chunk($rows, 200) as $chunk) {
             DB::table('bank_statements')->insert($chunk);
@@ -371,7 +394,11 @@ class StatementListTest extends StatementListTestCase
         $this->list(['per_page' => 101])->assertStatus(422)->assertJsonValidationErrors('per_page');
         // The export holds every row, not one page.
         $this->exportList(['per_page' => 50, 'page' => 2], 'xlsx')->assertOk();
-        $this->assertSame(60, AuditLog::where('event', 'report.exported')->sole()->new_values['rows']);
+        $audit = AuditLog::where('event', 'report.exported')->sole()->new_values;
+        $this->assertSame(60, $audit['rows']);
+        // The export has no paging, so the audit params have none.
+        $this->assertArrayNotHasKey('page', $audit['params']);
+        $this->assertArrayNotHasKey('per_page', $audit['params']);
 
         // 2,001 statements matching the SQL filters: a refusal, also when a computed filter would leave fewer.
         $this->insertStatements(2001 - 60, BankStatement::UNDONE, '2026-06-01', true);
@@ -380,6 +407,54 @@ class StatementListTest extends StatementListTestCase
         $this->exportList([], 'xlsx')->assertStatus(422)->assertJsonPath('message', BankReconciliation::LIST_TOO_MANY);
         // Narrowed by a SQL filter: listed again.
         $this->list(['status' => 'completed'])->assertOk()->assertJsonPath('total', 59);
+    }
+
+    public function test_changed_is_batched_per_account_when_statements_have_late_lines(): void
+    {
+        // Review SHOULD 3: statements that all have late lines (max_entry_id 0), with Changed filtered and in the export.
+        $count = function (array $q) {
+            DB::flushQueryLog();
+            DB::enableQueryLog();
+            $this->list($q)->assertOk();
+            $n = count(DB::getQueryLog());
+            DB::disableQueryLog();
+
+            return $n;
+        };
+        // Dated after KDY Bank's first line (2026-10-01), so every one has late lines.
+        $this->insertStatements(10, BankStatement::COMPLETED, '2026-11-29', false, 0);
+        $count([]); // warms the per-process schema check (copies supported)
+        $ten = $count(['changed' => 'yes']);
+        $tenAny = $count(['per_page' => 100]);
+        $this->insertStatements(30, BankStatement::COMPLETED, '2026-10-30', false, 0);
+        $this->assertSame($ten, $count(['changed' => 'yes']));
+        $this->assertSame($tenAny, $count(['per_page' => 100]));
+
+        // The batched figures equal figures() and the flags equal changed(), statement by statement.
+        $recon = app(BankReconciliation::class);
+        $dates = ['2026-07-02', '2026-08-31', '2026-10-25', '2026-10-31', '2026-11-30', '2026-12-10'];
+        $batched = $recon->figuresAt($this->kdyBank->id, $dates);
+        foreach ($dates as $d) {
+            $f = $recon->figures($this->kdyBank->id, $d);
+            unset($f['expected'], $f['reconciled']);
+            $this->assertSame($f, $batched[$d], $d);
+        }
+        $rows = collect($this->list(['per_page' => 100])->json('data'))->keyBy('id');
+        $this->assertCount(43, $rows);
+        foreach (BankStatement::withoutGlobalScopes()->whereIn('id', $rows->keys())->get() as $s) {
+            $this->assertSame($s->status === BankStatement::COMPLETED && $recon->changed($s), $rows[$s->id]['changed_since_completion'], "statement {$s->id}");
+        }
+        $this->assertTrue($rows[$this->st1->id]['changed_since_completion']);
+        $this->assertGreaterThan(35, $rows->where('changed_since_completion', true)->count());
+        $this->assertSame(40, collect($this->list(['per_page' => 100])->json('data'))->where('late_entries_count', '>', 0)->count() - 1);
+    }
+
+    public function test_pdf_over_the_cap_is_refused(): void
+    {
+        $this->insertStatements(1001, BankStatement::UNDONE, '2026-06-01', true);
+        $this->exportList([], 'pdf')->assertStatus(422)
+            ->assertJsonPath('message', 'This export has 1,004 rows; the limit for PDF is 1,000. Use Excel or narrow the date range or branches.');
+        $this->exportList([], 'xlsx')->assertOk();
     }
 
     public function test_inactive_account_label_in_exports_and_overdrawn(): void

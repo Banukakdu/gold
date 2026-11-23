@@ -542,6 +542,8 @@ tr.rc-frozen td, .rc-line.rc-frozen { color: var(--muted); }
   .rs-panel.open { display: flex; }
   .rs-panel > label, .rs-field { min-width: 0; width: 100%; }
   .rs-panel input, .rs-panel select { width: 100%; min-width: 0; min-height: 44px; }
+  .rs-panel .picker input { width: auto; min-height: 0; }
+  .rs-panel .picker label { white-space: normal; overflow-wrap: anywhere; }
   .rs-actions { flex-direction: column; button { width: 100%; min-height: 44px; } }
   .rs-export .export { display: flex; width: 100%; button { flex: 1; min-height: 44px; } }
   .rs-card { overflow-x: visible; padding: 10px; }

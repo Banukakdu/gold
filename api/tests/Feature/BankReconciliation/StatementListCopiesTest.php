@@ -11,20 +11,31 @@ use Illuminate\Support\Str;
 
 /**
  * AG-033c AC 14 (R6): with AG-033b's `attachments.bank_statement_id` (PR #25) the copy column and filter switch on.
- * The column is added here, not by a migration of this story. SQLite: inside the test transaction (rolled back with it).
- * MySQL commits DDL, so the column is added before the test transaction starts and dropped after its rollback.
+ * Works before and after AG-033b is merged:
+ *  - column missing (main): the test adds a plain nullable column for itself and removes it again. SQLite: inside the
+ *    test transaction (rolled back with it). MySQL commits DDL: added before the test transaction, dropped after its
+ *    rollback; the drop is registered right after the column is added, so a failing setUp still removes it;
+ *  - column there (AG-033b migrated, with its one-parent trigger and foreign key): nothing is added or dropped, and the
+ *    files are statement files only (transaction_id null).
  */
 class StatementListCopiesTest extends StatementListTestCase
 {
+    /** The test added the column (so it must remove it); false when AG-033b's migration provides it. */
+    private bool $added = false;
+
+    /** @var (\Closure(): void)|null */
+    private ?\Closure $drop = null;
+
     private static function mysql(): bool
     {
         return DB::connection()->getDriverName() === 'mysql';
     }
 
-    private static function addColumn(): void
+    private function addColumnIfMissing(): void
     {
         if (! Schema::hasColumn('attachments', 'bank_statement_id')) {
             Schema::table('attachments', fn ($t) => $t->unsignedBigInteger('bank_statement_id')->nullable());
+            $this->added = true;
         }
         ReportService::forgetSchemaCache();
     }
@@ -38,29 +49,42 @@ class StatementListCopiesTest extends StatementListTestCase
                 $this->app[Kernel::class]->setArtisan(null);
                 RefreshDatabaseState::$migrated = true;
             }
-            self::addColumn();
+            $this->addColumnIfMissing();
+            if ($this->added) {
+                // Registered now (SHOULD 2), moved behind the test-transaction rollback in setUp() below. If setUp fails
+                // before that, the drop runs first: its DDL commits the open test transaction, RefreshDatabase then
+                // finds no transaction and migrates fresh for the next test, so nothing is left behind either way.
+                $this->drop = function () {
+                    if ($this->added && Schema::hasColumn('attachments', 'bank_statement_id')) {
+                        Schema::table('attachments', fn ($t) => $t->dropColumn('bank_statement_id'));
+                    }
+                    $this->added = false;
+                    ReportService::forgetSchemaCache();
+                };
+                $this->beforeApplicationDestroyed($this->drop);
+            }
         }
     }
 
     protected function setUp(): void
     {
         parent::setUp();
-        if (! self::mysql()) {
-            self::addColumn();
+        if ($this->drop) {
+            // After the RefreshDatabase rollback (callbacks run in the order they were registered).
+            $this->beforeApplicationDestroyedCallbacks = array_values(array_filter($this->beforeApplicationDestroyedCallbacks, fn ($c) => $c !== $this->drop));
+            $this->beforeApplicationDestroyed($this->drop);
         }
-        // Runs after the test transaction is rolled back (registered after it).
-        $this->beforeApplicationDestroyed(function () {
-            if (self::mysql() && Schema::hasColumn('attachments', 'bank_statement_id')) {
-                Schema::table('attachments', fn ($t) => $t->dropColumn('bank_statement_id'));
-            }
-            ReportService::forgetSchemaCache();
-        });
+        if (! self::mysql()) {
+            $this->addColumnIfMissing();
+        }
+        $this->beforeApplicationDestroyed(fn () => ReportService::forgetSchemaCache());
         $this->scenario();
     }
 
     private function file(int $statementId, bool $removed = false): void
     {
-        DB::table('attachments')->insert(['branch_id' => $this->kdy->id, 'transaction_id' => $this->top->id, 'bank_statement_id' => $statementId,
+        // Before AG-033b transaction_id is NOT NULL; after it, a statement file has no transaction (one parent).
+        DB::table('attachments')->insert(['branch_id' => $this->kdy->id, 'transaction_id' => $this->added ? $this->top->id : null, 'bank_statement_id' => $statementId,
             'disk' => 'local', 'path' => 'statements/'.Str::random(20).'.pdf', 'original_name' => 'October.pdf', 'mime' => 'application/pdf',
             'size_bytes' => 1000, 'sha256' => str_repeat('a', 64), 'uploaded_by' => $this->acc->id, 'created_at' => now(), 'updated_at' => now(),
             'removed_at' => $removed ? now() : null, 'removed_by' => $removed ? $this->acc->id : null, 'removal_reason' => $removed ? 'Wrong month uploaded' : null]);

@@ -74,7 +74,7 @@ class ReportController extends Controller
         $params = match ($name) {
             'bank-reconciliation' => app(BankReconciliation::class)->reportParams($request->except('format')),
             // AG-033c: the list filters without paging (every matching row).
-            'reconciliation-statements' => app(BankReconciliation::class)->statementListParams($request->except('format', 'page', 'per_page')),
+            'reconciliation-statements' => app(BankReconciliation::class)->statementListParams($request->except('format'), paging: false),
             default => $this->reports->params($name, $request->except('format')),
         };
 
