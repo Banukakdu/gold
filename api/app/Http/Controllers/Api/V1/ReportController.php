@@ -60,14 +60,23 @@ class ReportController extends Controller
         return $recon->report($recon->reportParams($request->all()), BankReconciliation::SCREEN_ROWS); // review finding 9
     }
 
+    /** AG-033c S6 bank reconciliation statements list (docs/specs/reconciliation-statements-list.md). Read only. */
+    public function reconciliationStatements(Request $request, BankReconciliation $recon)
+    {
+        return $recon->statementList($recon->statementListParams($request->all()));
+    }
+
     /** AG-087 R1: validation first, then the count; a large Excel export is queued (202), anything else downloads. */
     public function export(Request $request, string $name, BackgroundExports $exports)
     {
         abort_unless(in_array($name, ReportService::NAMES, true), 404, 'Unknown report.');
         $format = $request->validate(['format' => 'required|in:pdf,xlsx'])['format'];
-        $params = $name === 'bank-reconciliation'
-            ? app(BankReconciliation::class)->reportParams($request->except('format'))
-            : $this->reports->params($name, $request->except('format'));
+        $params = match ($name) {
+            'bank-reconciliation' => app(BankReconciliation::class)->reportParams($request->except('format')),
+            // AG-033c: the list filters without paging (every matching row).
+            'reconciliation-statements' => app(BankReconciliation::class)->statementListParams($request->except('format', 'page', 'per_page')),
+            default => $this->reports->params($name, $request->except('format')),
+        };
 
         return $this->exporter->download($name, $params, $format, $request->user(),
             fn (int $rows) => $exports->queueReport($request, $name, $params, $rows));

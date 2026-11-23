@@ -34,6 +34,7 @@ class ReportExporter
         'trial-balance' => 'Trial Balance',
         'cash-flow' => 'Cash Flow Summary',
         'bank-reconciliation' => 'Unreconciled bank entries',
+        'reconciliation-statements' => 'Bank reconciliation statements',
     ];
 
     /** AG-033 S3 opened with a statement_id: the printable bank reconciliation statement. */
@@ -81,6 +82,8 @@ class ReportExporter
             // AG-086: one row per month (at most 24, always under the caps).
             'cash-flow' => count(ReportService::monthsBetween($p->from, $p->to)),
             'bank-reconciliation' => BankReconciliation::reportRows($data ?? $this->bankReconciliation($p)),
+            // AG-033c: one row per statement (at most BankReconciliation::LIST_CAP).
+            'reconciliation-statements' => count(($data ?? $this->statementList($p))['data']),
         };
     }
 
@@ -105,7 +108,7 @@ class ReportExporter
                 abort(response()->json(['message' => 'This export has '.number_format($rows).' rows; the limit is '
                     .number_format(ReportService::EXPORT_CAP).'. Narrow the branches or accounts, or use Older than.'], 422));
             }
-            if ($format === 'xlsx' && $rows > BackgroundExports::syncRows() && ! in_array($name, ['cash-flow', 'bank-reconciliation'], true)) {
+            if ($format === 'xlsx' && $rows > BackgroundExports::syncRows() && ! in_array($name, ['cash-flow', 'bank-reconciliation', 'reconciliation-statements'], true)) {
                 if ($rows > BackgroundExports::maxRows() || ! $queue) {
                     $cap = $queue ? BackgroundExports::maxRows() : BackgroundExports::syncRows();
                     abort(response()->json(['message' => 'This export has '.number_format($rows).' rows; the limit is '.number_format($cap).'. Narrow the date range or branches.'], 422));
@@ -162,6 +165,7 @@ class ReportExporter
             'trial-balance' => $this->reports->trialBalanceRows($d),
             'cash-flow' => count($d['months']),
             'bank-reconciliation' => BankReconciliation::reportRows($d),
+            'reconciliation-statements' => count($d['data']),
         };
     }
 
@@ -172,6 +176,7 @@ class ReportExporter
             'income-expense' => $this->reports->incomeExpense($p),
             'trial-balance' => $this->reports->trialBalance($p),
             'bank-reconciliation' => $this->bankReconciliation($p),
+            'reconciliation-statements' => $this->statementList($p),
             default => null,
         };
     }
@@ -186,12 +191,19 @@ class ReportExporter
             'income-expense' => $this->reports->incomeExpense($p),
             'trial-balance' => $this->reports->trialBalance($p),
             'bank-reconciliation' => $this->bankReconciliation($p),
+            'reconciliation-statements' => $this->statementList($p),
         };
     }
 
     private function bankReconciliation(ReportParams $p): array
     {
         return app(BankReconciliation::class)->report($p);
+    }
+
+    /** AG-033c: every matching statement (no paging). */
+    private function statementList(ReportParams $p): array
+    {
+        return app(BankReconciliation::class)->statementList($p, paged: false);
     }
 
     /**
@@ -403,8 +415,19 @@ class ReportExporter
                 }
             }
         }
+        $listLines = [];
+        if ($name === 'reconciliation-statements') {
+            // AG-033c finding 4: statement dates, then the filters used and the R9 coverage line (Excel header; the PDF
+            // prints both under its page header).
+            $periodWord = 'Statement dates';
+            $listLines = [BankReconciliation::listFilterText($data), self::coverageLine($data)];
+        }
         // AG-086 R7: the cash flow sends its own label (a range over two fiscal years names both).
-        $period = $name === 'bank-reconciliation' ? $settings->formatDate($p->to) : ($data['period_label'] ?? self::periodLabel($p->from, $p->to));
+        $period = match ($name) {
+            'bank-reconciliation' => $settings->formatDate($p->to),
+            'reconciliation-statements' => $settings->formatDate($p->from).' to '.$settings->formatDate($p->to),
+            default => $data['period_label'] ?? self::periodLabel($p->from, $p->to),
+        };
         $lines = array_values(array_filter([
             $company,
             $title,
@@ -416,6 +439,7 @@ class ReportExporter
             // AG-087 R3 (finding 1): queued exports only, right after "Printed by".
             $extracted,
             ...$notes,
+            ...$listLines,
             $banner,
             $data['provisional'] ? 'PROVISIONAL - period not locked' : null,
         ]));
@@ -460,6 +484,60 @@ class ReportExporter
     }
 
     public const SUPERSEDED = 'This statement is superseded.';
+
+    /** AG-033c R9 line of an export, as on S6. */
+    public static function coverageLine(array $d): string
+    {
+        return BankReconciliation::coverageText($d['coverage']);
+    }
+
+    /** AG-033c: "Completed" or "Undone by <name> on <date>: <reason>" (the full reason). */
+    public static function statementStatusText(array $r): string
+    {
+        if ($r['status'] !== 'undone') {
+            return 'Completed';
+        }
+        $on = $r['undone_at'] ? app(Settings::class)->formatDate(CarbonImmutable::parse($r['undone_at'])->setTimezone('Asia/Colombo')->format('Y-m-d')) : '-';
+
+        return 'Undone by '.($r['undone_by']['name'] ?? '-')." on {$on}: ".$r['undo_reason'];
+    }
+
+    /** AG-033c: a name with its controls R10 tag, "Name (inactive)". */
+    public static function personText(?array $p): string
+    {
+        return $p ? $p['name'].($p['tag'] ? " ({$p['tag']})" : '') : '-';
+    }
+
+    /** AG-033c: "2 (1 voided)", blank for an undone statement. */
+    public static function lateText(array $r): string
+    {
+        if ($r['late_entries_count'] === null) {
+            return '';
+        }
+
+        return $r['late_voided_count'] ? "{$r['late_entries_count']} ({$r['late_voided_count']} voided)" : (string) $r['late_entries_count'];
+    }
+
+    /** AG-033c: "1 file (1 removed)", "No copy" for a completed statement without an active file, blank otherwise. */
+    public static function copyText(array $r): string
+    {
+        $n = (int) $r['attachments_count'];
+        $removed = (int) $r['attachments_removed_count'];
+        if ($n === 0 && $r['status'] === 'completed') {
+            return 'No copy'.($removed ? " ({$removed} removed)" : '');
+        }
+        if ($n === 0 && $removed === 0) {
+            return '';
+        }
+
+        return $n.' '.($n === 1 ? 'file' : 'files').($removed ? " ({$removed} removed)" : '');
+    }
+
+    /** AG-033c: account label "KDY Bank (11002)", "(inactive)" when not active. */
+    public static function listAccountText(array $a): string
+    {
+        return $a['name'].($a['code'] ? " ({$a['code']})" : '').($a['status'] !== 'active' ? ' (inactive)' : '');
+    }
 
     /** Characters of the undo reason in the PDF page header (the body has the whole reason). */
     public const BANNER_REASON_PDF = 140;
@@ -523,9 +601,10 @@ class ReportExporter
             'trial-balance' => ['reports.pdf.trial-balance', ['data' => $data]],
             'cash-flow' => ['reports.pdf.cash-flow', ['data' => $data, 'notes' => self::cashFlowNotes($data)]],
             'bank-reconciliation' => ['reports.pdf.bank-reconciliation', ['data' => $data]],
+            'reconciliation-statements' => ['reports.pdf.reconciliation-statements', ['data' => $data]],
         };
         $pdf = Pdf::loadView($view[0], $view[1] + ['head' => $head])
-            ->setPaper('a4', in_array($name, ['transfers', 'branch-comparison', 'trial-balance', 'cash-flow'], true) ? 'landscape' : 'portrait');
+            ->setPaper('a4', in_array($name, ['transfers', 'branch-comparison', 'trial-balance', 'cash-flow', 'reconciliation-statements'], true) ? 'landscape' : 'portrait');
         $pdf->render();
         $dompdf = $pdf->getDomPDF();
         $canvas = $dompdf->getCanvas();
@@ -670,6 +749,8 @@ class ReportExporter
 
             'bank-reconciliation' => $this->bankReconciliationSheets($d, $row),
 
+            'reconciliation-statements' => [$this->statementListSheet($d, $row)],
+
             // AG-086: the screen columns (finding 2 order) plus Eliminated; Month is a date cell "mmm yyyy" (finding 7).
             'cash-flow' => [[
                 'title' => 'Cash flow',
@@ -767,6 +848,44 @@ class ReportExporter
         }
 
         return $sheets;
+    }
+
+    /**
+     * AG-033c: one sheet, the S6 columns; dates as dates, the balance as a number, counts as integers, "Changed since
+     * completion" Yes/No. Every text cell (names, undo reason) is written as text with the formula prefix (ReportSheet).
+     */
+    private function statementListSheet(array $d, callable $row): array
+    {
+        $colombo = fn (?string $v) => $v ? CarbonImmutable::parse($v)->setTimezone('Asia/Colombo')->format('Y-m-d H:i') : '';
+        $copies = $d['copies_supported'];
+        $columns = [['Branch', 'text'], ['Account', 'text'], ['Statement date', 'date'], ['Statement balance', 'amount'], ['Overdrawn', 'text'],
+            ['Lines', 'integer'], ['Recorded by the preparer', 'integer'], ['Completed by', 'text'], ['Completed at (Asia/Colombo)', 'text'],
+            ['Status', 'text'], ['Undone by', 'text'], ['Undone at (Asia/Colombo)', 'text'], ['Undo reason', 'text'],
+            ['Changed since completion', 'text'], ['Late entries', 'integer'], ['Late entries voided', 'integer']];
+        if ($copies) {
+            $columns = [...$columns, ['Bank statement files', 'integer'], ['Removed files', 'integer'], ['Bank statement copy', 'text']];
+        }
+        $rows = array_map(function ($r) use ($row, $colombo, $copies) {
+            $undone = $r['status'] === 'undone';
+            $cells = [$r['branch']['code'], self::listAccountText($r['account']), $r['statement_date'], $r['statement_balance'],
+                Money::cmp($r['statement_balance'], 0) < 0 ? 'Overdrawn' : '', $r['lines_count'], $r['self_count'],
+                self::personText($r['completed_by']), $colombo($r['completed_at']), $undone ? 'Undone' : 'Completed',
+                $undone ? self::personText($r['undone_by']) : '', $undone ? $colombo($r['undone_at']) : '', $undone ? (string) $r['undo_reason'] : '',
+                $r['changed_since_completion'] ? 'Yes' : 'No', $r['late_entries_count'], $r['late_voided_count']];
+            if ($copies) {
+                $cells = [...$cells, $r['attachments_count'], $r['attachments_removed_count'], self::copyText($r)];
+            }
+
+            return $row($cells);
+        }, $d['data']);
+
+        return [
+            'title' => 'Statements',
+            'columns' => $columns,
+            'rows' => $rows,
+            'notes' => [$d['total'] ? "{$d['total']} ".($d['total'] === 1 ? 'statement' : 'statements') : 'No statements match these filters.',
+                'Late entries: entries dated on or before the statement date that were recorded or voided after completion (as listed on the statement).'],
+        ];
     }
 
     /** Trial balance sheets: one per branch section (by branch), or one consolidated sheet. */

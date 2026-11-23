@@ -116,6 +116,8 @@ Route::prefix('v1')->group(function () {
             Route::get('reports/trial-balance', [ReportController::class, 'trialBalance'])->middleware('perm:report.view');
             // AG-033 S3 Unreconciled bank entries (export through reports/{name}/export).
             Route::get('reports/bank-reconciliation', [ReportController::class, 'bankReconciliation'])->middleware('perm:report.view');
+            // AG-033c S6 bank reconciliation statements list (export through reports/{name}/export).
+            Route::get('reports/reconciliation-statements', [ReportController::class, 'reconciliationStatements'])->middleware('perm:report.view');
             Route::post('reports/{name}/export', [ReportController::class, 'export'])->middleware('perm:report.view,report.export');
 
             Route::get('branches', [BranchController::class, 'index']);
