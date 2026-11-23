@@ -8,8 +8,10 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
- * AG-062 evidence file of an income or expense entry (docs/specs/attachments.md).
- * Never deleted; the only change allowed is the one-time removal. The database refuses anything else too (triggers).
+ * AG-062 evidence file of an income or expense entry (docs/specs/attachments.md), or (AG-033b) the bank statement copy
+ * of a completed bank reconciliation statement (docs/specs/bank-statement-attachment.md). Exactly one parent is set.
+ * Never deleted; the only change allowed is the one-time removal (with replaced_by_id on a replace). The database
+ * refuses anything else too (triggers).
  */
 class Attachment extends Model
 {
@@ -30,7 +32,7 @@ class Attachment extends Model
         'pdf' => ['application/pdf', 'pdf', 'PDF'],
     ];
 
-    public const REMOVAL_COLUMNS = ['removed_at', 'removed_by', 'removal_reason', 'updated_at'];
+    public const REMOVAL_COLUMNS = ['removed_at', 'removed_by', 'removal_reason', 'replaced_by_id', 'updated_at'];
 
     protected $guarded = ['id'];
 
@@ -41,6 +43,12 @@ class Attachment extends Model
     protected static function booted(): void
     {
         static::deleting(fn () => throw new ImmutableRecordException('Attachments cannot be deleted. Remove them instead.'));
+        // AG-033b: as the attachments_one_parent trigger.
+        static::creating(function (Attachment $a) {
+            if (($a->transaction_id === null) === ($a->bank_statement_id === null)) {
+                throw new ImmutableRecordException('An attachment belongs to exactly one entry or one bank statement.');
+            }
+        });
         static::updating(function (Attachment $a) {
             $extra = array_diff(array_keys($a->getDirty()), self::REMOVAL_COLUMNS);
             if ($extra || $a->getOriginal('removed_at') !== null) {
@@ -52,6 +60,17 @@ class Attachment extends Model
     public function transaction(): BelongsTo
     {
         return $this->belongsTo(Transaction::class);
+    }
+
+    /** AG-033b */
+    public function bankStatement(): BelongsTo
+    {
+        return $this->belongsTo(BankStatement::class);
+    }
+
+    public function replacedBy(): BelongsTo
+    {
+        return $this->belongsTo(Attachment::class, 'replaced_by_id')->withoutGlobalScopes();
     }
 
     public function uploader(): BelongsTo

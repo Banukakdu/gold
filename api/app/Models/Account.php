@@ -83,6 +83,12 @@ class Account extends Model
         return $this->belongsTo(Branch::class, 'counterparty_branch_id');
     }
 
+    /** AG-033 completed / undone reconciliations (AG-033b: scoped route binding of {statement}). */
+    public function statements(): HasMany
+    {
+        return $this->hasMany(BankStatement::class);
+    }
+
     public function entries(): HasMany
     {
         return $this->hasMany(LedgerEntry::class);

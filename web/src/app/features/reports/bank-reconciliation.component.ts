@@ -8,6 +8,8 @@ import { colomboToday } from '../../core/dates';
 import { Account } from '../../core/models';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
 import { dayLabel } from '../../core/reconciliation';
+import { StatementFile, blobErrorText, fetchStoredFile, fileSize, saveFile, statementFilesUrl } from '../../core/attachments';
+import { colomboDateTime } from '../../core/dates';
 import {
   BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, ReportMeta, ReportParams,
   fieldErrors, readQuery, reportError, toHttpParams, writeQuery,
@@ -29,11 +31,13 @@ export interface BankSection {
 export interface BankReport extends ReportMeta {
   as_at: string; older_than: number | null; older_than_ignored: boolean; filter_note: string | null; basis: string; accounts: BankSection[];
   statement: {
-    id: number; status: 'completed' | 'undone'; statement_date: string; statement_balance: string; overdrawn: boolean;
+    id: number; account_id: number; status: 'completed' | 'undone'; statement_date: string; statement_balance: string; overdrawn: boolean;
     expected_bank_balance: string; difference: string; changed_since_completion: boolean;
     late_entries: { ref_no: string; date: string; amount: string; kind: 'recorded' | 'voided'; by: string | null; at: string }[];
     lines_count: number; self_count: number; completed_by: Person | null; completed_at: string;
     undone: { by: Person | null; at: string; reason: string } | null;
+    /** AG-033b S3: the bank statement copy, removed and replaced files included (metadata only). */
+    attachments?: StatementFile[];
   } | null;
 }
 
@@ -136,6 +140,27 @@ export interface BankReport extends ReportMeta {
       } @empty { <div class="card"><p class="muted">No bank accounts in scope.</p></div> }
 
       @if (r.statement; as s) {
+        <!-- AG-033b S3: after the statement balance / difference, before the late entries. -->
+        <h2>Bank statement copy</h2>
+        <div class="card bsc">
+          @for (a of active(s.attachments); track a.id) {
+            <div class="bsc-card">Bank statement attached:
+              <button type="button" class="link bsc-name" [disabled]="busy()" (click)="download(s.account_id, a)">{{ a.original_name }}</button>
+              ({{ a.extension.toUpperCase() }}, {{ size(a.size_bytes) }}), uploaded by {{ a.uploaded_by?.name }} on {{ when(a.created_at) }},
+              sha256 <span class="mono" [title]="a.sha256">{{ a.sha256.slice(0, 12) }}…</span>{{ tags(a) }}
+              @if (a.added_after === 'close') { <span class="tag att-late">Added after close</span> }
+              @if (a.by_preparer) { <span class="tag">Uploaded by the preparer</span> }
+            </div>
+          } @empty {
+            <div class="bsc-card muted">No bank statement copy attached. File the paper bank statement with this printout.</div>
+          }
+          @for (a of removed(s.attachments); track a.id) {
+            <div class="bsc-card att-removed"><span class="att-file" [title]="a.sha256">{{ removedText(a) }}</span>
+              @if (auth.can('audit.view')) { <button type="button" class="link" [disabled]="busy()" (click)="download(s.account_id, a)">Download</button> }
+            </div>
+          }
+          @if (fileMsg()) { <div class="alert">{{ fileMsg() }}</div> }
+        </div>
         @if (s.changed_since_completion) { <p class="warn">Changed since completion</p> }
         @if (s.late_entries.length) {
           <h2>Late entries (added or voided after the statement was completed)</h2>
@@ -214,4 +239,35 @@ export class BankReconciliationReportComponent implements OnInit {
   /** Review finding 3: "Overdrawn 2,500.00" for a negative statement balance. */
   balanceText(v: string) { return v.startsWith('-') ? `Overdrawn ${this.money.transform(v.slice(1))}` : this.money.transform(v); }
   print() { window.print(); }
+
+  // ------------------------------------------------------------------ AG-033b bank statement copy (S3)
+
+  busy = signal(false);
+  fileMsg = signal('');
+  active(rows: StatementFile[] | undefined) { return (rows ?? []).filter(a => !a.removed_at); }
+  removed(rows: StatementFile[] | undefined) { return (rows ?? []).filter(a => !!a.removed_at); }
+  size(n: number) { return fileSize(n); }
+  when(iso: string | null) { return colomboDateTime(iso); }
+  /** The reprint tags (" - added after close", " - uploaded by the preparer", " - also on the <date> statement (<status>)"). */
+  tags(a: StatementFile) {
+    return (a.added_after === 'close' ? ' - added after close' : '') + (a.by_preparer ? ' - uploaded by the preparer' : '')
+      + a.also_on.map(o => ` - also on the ${o.statement_date} statement (${o.status})`).join('');
+  }
+  removedText(a: StatementFile) {
+    const who = `, by ${a.removed_by?.name ?? '-'} on ${colomboDateTime(a.removed_at).slice(0, 10)}: ${a.removal_reason ?? ''}`;
+    return (a.replaced_by_id ? `Replaced by ${a.replaced_by_name ?? 'a new file'}: ` : 'Removed: ') + `${a.original_name}, sha256 ${a.sha256.slice(0, 12)}…${who}`;
+  }
+
+  async download(accountId: number, a: StatementFile) {
+    if (this.busy()) return;
+    this.busy.set(true);
+    this.fileMsg.set('');
+    try {
+      saveFile(await fetchStoredFile(this.http, `${statementFilesUrl(accountId, a.bank_statement_id)}/${a.id}/download`, a.original_name, a.mime));
+    } catch (e) {
+      this.fileMsg.set(await blobErrorText(e));
+    } finally {
+      this.busy.set(false);
+    }
+  }
 }

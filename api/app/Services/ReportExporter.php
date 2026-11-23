@@ -746,6 +746,11 @@ class ReportExporter
                 if ($st['changed_since_completion']) {
                     $notes[] = 'Changed since completion';
                 }
+                // AG-033b S3: the bank statement copy (full sha256), before the late entries.
+                $notes[] = 'Bank statement copy';
+                foreach (StatementAttachments::reprintLines($st['attachments'] ?? []) as $line) {
+                    $notes[] = $line;
+                }
                 foreach ($st['late_entries'] as $l) {
                     $notes[] = "Late entry {$l['ref_no']} dated ".$settings->formatDate($l['date']).' '.Money::format($l['amount']).' '.$l['kind'].' by '.($l['by'] ?? '-')
                         .' at '.CarbonImmutable::parse($l['at'])->setTimezone('Asia/Colombo')->format('Y-m-d H:i');

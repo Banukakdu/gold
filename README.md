@@ -92,6 +92,19 @@ streamed by the API after an access check.
 6. Rolling back the migration is refused once any attachment exists (rows and files are evidence); restore a backup
    taken before the migration instead.
 
+### Deploying the bank statement copy release (AG-033b, docs/specs/bank-statement-attachment.md)
+
+The migration `2026_12_06_000000_bank_statement_attachments` reuses the AG-062 `attachments` table: `transaction_id`
+becomes nullable, `bank_statement_id` and `replaced_by_id` are added, and the triggers are recreated (a new
+`attachments_one_parent` insert check; same MySQL trigger privilege as above). Files go to the same private
+`attachments` disk under `{branch}/bank-statements/{statement}/`, so backups and `attachments:verify` already cover
+them. Run `php artisan migrate --force`, then `php artisan attachments:verify`. Rolling back is refused once a bank
+statement file exists.
+
+**Release note.** Bank statement copy (AG-033b): the attached copy is a filing aid. The person who signs Checked by
+compares the statement balance with the bank's own statement or internet banking, not only with the uploaded file.
+Where possible the Branch Admin or owner downloads the statement from the bank and attaches it.
+
 ### Deploying the double-entry release (chart of accounts, balanced postings, trial balance)
 
 The migrations `2026_11_22_000000_double_entry_schema` and `2026_11_22_000001_double_entry_backfill` add the chart of
@@ -344,6 +357,8 @@ All under `/api/v1`, bearer token from `POST auth/login`, plus `X-Branch-Id`. Pu
 `POST incomes` · `POST expenses` · `POST capital` · `POST allocations` · `POST transfers` ·
 `GET|POST transactions/{id}/attachments` · `GET transactions/{id}/attachments/{attachment}/download` ·
 `POST transactions/{id}/attachments/{attachment}/remove` ·
+`GET|POST accounts/{id}/reconciliation/statements/{statement}/attachments` · `GET …/attachments/{attachment}/download` ·
+`POST …/attachments/{attachment}/remove` ·
 `GET chart-of-accounts` · `GET reports/trial-balance` · `POST reports/trial-balance/export` ·
 `GET backups` (Super Admin) · `GET permissions` · `GET|POST roles` · `PUT roles/{id}` · `GET|POST users` · `PUT users/{id}` · `POST users/{id}/role`
 

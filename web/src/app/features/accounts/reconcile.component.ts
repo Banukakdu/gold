@@ -11,6 +11,8 @@ import { Account } from '../../core/models';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
 import { ToastService } from '../../core/toast.service';
 import { dayLabel } from '../../core/reconciliation';
+import { statementFilesText } from '../../core/attachments';
+import { StatementFilesComponent } from './statement-files.component';
 
 export { dayLabel };
 
@@ -26,6 +28,8 @@ export interface ReconStatement {
   id: number; statement_date: string; statement_balance: string; lines_count: number; self_count: number; status: 'completed' | 'undone';
   completed_by: Person | null; completed_at: string; undone_by: Person | null; undone_at: string | null; undo_reason: string | null;
   changed_since_completion: boolean; can_undo: boolean;
+  /** AG-033b: active bank statement files, and removed ones. */
+  attachments_count?: number; attachments_removed_count?: number;
 }
 export interface Reconciliation {
   account: { id: number; code: string | null; name: string; status: string; branch: { id: number; code: string; name: string } };
@@ -63,7 +67,7 @@ function previousMonthEnd(today: string): string {
  */
 @Component({
   standalone: true,
-  imports: [FormsModule, RouterLink, MoneyPipe, AppDatePipe, AppDateTimePipe],
+  imports: [FormsModule, RouterLink, MoneyPipe, AppDatePipe, AppDateTimePipe, StatementFilesComponent],
   template: `
     <h1>Bank reconciliation @if (r(); as r) { <small class="muted">{{ r.account.branch.code }} · {{ r.account.name }}</small> }</h1>
     <div class="rc-pick">
@@ -204,11 +208,22 @@ function previousMonthEnd(today: string): string {
               @if (s.changed_since_completion) { <span class="tag att-late">Changed since completion</span> }</div>
             <div class="muted">Prepared by {{ s.completed_by?.name }}@if (s.completed_by?.tag; as t) { ({{ t }}) } on {{ s.completed_at | appDateTime }} · {{ s.self_count }} of {{ s.lines_count }} {{ s.lines_count === 1 ? 'line was' : 'lines were' }} recorded by the preparer</div>
             @if (s.status === 'undone') { <div class="muted">Undone by {{ s.undone_by?.name }} on {{ s.undone_at | appDateTime }}: {{ s.undo_reason }}</div> }
+            <!-- AG-033b S1a: the Bank statement column; the cell opens the row's Files panel (one at a time). -->
+            <div class="rc-bs">Bank statement:
+              <button type="button" class="link rc-bs-cell" [attr.aria-expanded]="filesOf() === s.id" (click)="toggleFiles(s)">
+                @if (noCopy(s)) { <span class="tag att-late">No copy</span>@if (s.attachments_removed_count) { ({{ s.attachments_removed_count }} removed) } } @else { {{ filesText(s) }} }
+              </button>
+            </div>
             <div class="rc-hact">
+              <button type="button" class="ghost rc-files-btn" (click)="toggleFiles(s)">Files</button>
               @if (auth.can('report.view')) { <a class="rc-link" [routerLink]="['/reports/bank-reconciliation']" [queryParams]="{ statement_id: s.id }">View</a> }
               @if (auth.can('report.export')) { <button type="button" class="ghost" [disabled]="busy()" (click)="print(s)">Print</button> }
               @if (s.can_undo) { <button type="button" class="ghost" (click)="startUndo(s)">Undo</button> }
             </div>
+            @if (filesOf() === s.id) {
+              <ag-statement-files [accountId]="r.account.id" [accountName]="r.account.name" [statement]="s"
+                (changed)="load()" (closed)="filesOf.set(null)" />
+            }
           </div>
         }
       </details>
@@ -262,6 +277,8 @@ export class ReconcileComponent implements OnInit {
   undoing = signal<ReconStatement | null>(null);
   reason = signal('');
   undoError = signal('');
+  /** AG-033b: the statement whose Files panel is open (one at a time). */
+  filesOf = signal<number | null>(null);
   private money = new MoneyPipe();
 
   lastDate = computed(() => this.r()?.last_statement?.statement_date ?? '');
@@ -461,9 +478,11 @@ export class ReconcileComponent implements OnInit {
     this.busy.set(true);
     try {
       if (!(await this.save(true))) return;
-      await firstValueFrom(this.http.post(`/api/v1/accounts/${this.accountId()}/reconciliation/complete`,
+      const done = await firstValueFrom(this.http.post<{ id: number }>(`/api/v1/accounts/${this.accountId()}/reconciliation/complete`,
         { statement_date: this.statementDate(), statement_balance: this.balance().trim() }));
-      this.toast.show(`${r.account.name} reconciled to ${dayLabel(this.statementDate())}.`);
+      // AG-033b F1: the toast opens the new statement's Files panel.
+      this.toast.show(`${r.account.name} reconciled to ${dayLabel(this.statementDate())}.`, 10_000, 'info',
+        { label: 'Attach bank statement', run: () => this.openFiles(done.id) });
       this.balance.set('');
       await this.load(false);
     } catch (e) {
@@ -512,6 +531,19 @@ export class ReconcileComponent implements OnInit {
       this.busy.set(false);
     }
   }
+
+  // ------------------------------------------------------------------ AG-033b bank statement copy
+
+  toggleFiles(s: ReconStatement) { this.filesOf.set(this.filesOf() === s.id ? null : s.id); }
+
+  /** Opens the Files panel of a statement and brings it into view. */
+  openFiles(id: number) {
+    this.filesOf.set(id);
+    setTimeout(() => document.querySelector('ag-statement-files')?.scrollIntoView?.({ block: 'start' }));
+  }
+
+  noCopy(s: ReconStatement) { return s.status === 'completed' && !(s.attachments_count ?? 0); }
+  filesText(s: ReconStatement) { return statementFilesText(s.attachments_count ?? 0, s.attachments_removed_count ?? 0); }
 
   // ------------------------------------------------------------------ display
 

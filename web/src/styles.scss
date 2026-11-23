@@ -319,6 +319,8 @@ ag-notification-bell { position: relative; display: flex; margin-left: auto; }
   span { display: block; background: var(--ink); color: #fff; padding: 10px 14px; border-radius: 8px; box-shadow: 0 6px 18px rgba(0, 0, 0, .2); } }
 /* AG-064 S2: the R17 over-commitment warning follows the success toast in the warning colour. */
 .toast span.toast-warn { background: #fdf0d5; color: #8a5a00; border: 1px solid #f1d9a6; }
+/* AG-033b F1: "Attach bank statement" on the Complete toast. */
+.toast button.toast-action { pointer-events: auto; margin-left: 10px; padding: 4px 10px; background: #fff; color: var(--ink); min-height: 32px; }
 
 /* AG-094 S2 Notifications page: a list laid out as columns, stacked cards at phone width (no table, no side scroll). */
 .nt-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; h1 { margin: 0; } }
@@ -409,6 +411,49 @@ tr.rc-frozen td, .rc-line.rc-frozen { color: var(--muted); }
   .br-table { display: none; }
   .br-cards { display: block; }
   .br-card-wrap { overflow-x: visible; padding: 10px; }
+}
+
+/* AG-033b S1a bank statement copy (Files panel of a History row) and S3 block (docs/specs/bank-statement-attachment.md). */
+.rc-bs { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.rc-bs-cell { min-height: 32px; }
+.rc-files-btn { display: none; }
+.sf-panel { margin-top: 8px; min-width: 0; }
+.sf-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; h2 { margin: 0; font-size: 16px; overflow-wrap: anywhere; } }
+.sf-close { min-height: 36px; }
+.sf-add { margin: 8px 0; }
+.sf-list { margin-top: 10px; }
+.sf-row { display: grid; grid-template-columns: minmax(0, 1fr) 48px 64px 120px 124px minmax(150px, 220px) 236px; gap: 8px; align-items: start;
+  border-top: 1px solid var(--line); padding: 8px 0; }
+.sf-th { font-weight: 600; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .3px; border-top: 0; }
+.sf-meta { display: contents; }
+.sf-name { min-width: 0; overflow-wrap: anywhere; }
+.sf-sha { min-width: 0; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; overflow-wrap: anywhere; .tag { margin-left: 0; } }
+.sf-sha-btn { font-size: 12px; overflow-wrap: anywhere; text-align: left; padding: 0; }
+.tag.sf-prep { background: #e8eef9; color: #234a8a; }
+.sf-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; button { padding: 4px 10px; } }
+.sf-row.att-removed .att-file { text-decoration: line-through; color: var(--muted); }
+.bsc { display: flex; flex-direction: column; gap: 6px; }
+.bsc-card { overflow-wrap: anywhere; min-width: 0; .tag { margin-left: 4px; } }
+.bsc-card.att-removed .att-file { text-decoration: line-through; color: var(--muted); }
+.bsc-name { padding: 0; }
+@media (max-width: 760px) {
+  .rc-files-btn { display: inline-flex; }
+  .rc-bs-cell { min-height: 44px; }
+  /* Full-screen sheet with a sticky header. */
+  .sf-panel { position: fixed; inset: 0; z-index: 12; margin: 0; border-radius: 0; overflow-y: auto; overflow-x: hidden; padding: 0 16px 16px; }
+  .sf-head { position: sticky; top: 0; background: #fff; z-index: 1; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .sf-close { min-height: 44px; min-width: 44px; }
+  .sf-add .att-add-wrap, .sf-add .att-add { display: block; width: 100%; }
+  .sf-add .att-add { min-height: 44px; }
+  .sf-th { display: none; }
+  .sf-row { grid-template-columns: 1fr; gap: 6px; padding: 10px 0; }
+  .sf-meta { display: flex; flex-wrap: wrap; gap: 0 6px; font-size: 12px; color: var(--muted); }
+  .sf-meta > span + span::before { content: '· '; }
+  .sf-sha-btn { min-height: 44px; }
+  .sf-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; button { min-height: 44px; width: 100%; } }
+  .sf-dialog { left: 16px; right: 16px; width: auto; transform: none; }
+  .sf-dialog .att-dialog-actions button { flex: 1; min-height: 44px; }
+  .bsc-card { border-top: 1px solid var(--line); padding: 8px 0; }
 }
 
 /* AG-066 S1 / S2 / S5 expense templates (docs/specs/recurring-expenses.md, 390px layout). */

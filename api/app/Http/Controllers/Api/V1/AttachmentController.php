@@ -12,6 +12,7 @@ use App\Services\ExpenseApprovals;
 use App\Services\YearEnd;
 use App\Support\AttachmentFile;
 use App\Support\BranchContext;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -154,6 +155,16 @@ class AttachmentController extends Controller
         abort_if($removed && ! $request->user()->canDo('audit.view'), 403, 'Only auditors can download removed files.');
 
         $ids = ['attachment_id' => $attachment->id, 'original_name' => $attachment->original_name];
+
+        return self::stream($attachment, $transaction, $ids, (string) $transaction->ref_no, $removed);
+    }
+
+    /**
+     * R6 download, shared with the AG-033b statement files: the bytes we stream are the bytes we hash (read once, at most
+     * 5 MB); 410 when missing, 409 when changed, each with an audit row against $parent in its own branch.
+     */
+    public static function stream(Attachment $attachment, Model $parent, array $ids, string $label, bool $removed)
+    {
         try {
             $disk = Storage::disk($attachment->disk);
             $bytes = $disk->exists($attachment->path) ? $disk->get($attachment->path) : null;
@@ -163,22 +174,22 @@ class AttachmentController extends Controller
         }
         if ($bytes === null) {
             // Reviewer N6: keep the reason a read failed (permissions, I/O) for the administrator.
-            Log::error("Attachment #{$attachment->id} ({$transaction->ref_no}): file missing from storage.",
+            Log::error("Attachment #{$attachment->id} ({$label}): file missing from storage.",
                 ['path' => $attachment->path, 'error' => $readError ?? 'file does not exist']);
-            AuditLog::record('attachment.missing', $transaction, null, $ids + ['sha256' => $attachment->sha256], $transaction->branch_id);
+            AuditLog::record('attachment.missing', $parent, null, $ids + ['sha256' => $attachment->sha256], $parent->branch_id);
 
             return response()->json(['message' => 'The file is missing from storage. Tell your administrator.'], 410);
         }
         // Finding 2: the bytes we would stream are the bytes we hash (read once, at most 5 MB).
         $actual = hash('sha256', $bytes);
         if (! hash_equals($attachment->sha256, $actual)) {
-            Log::error("Attachment #{$attachment->id} ({$transaction->ref_no}): sha256 mismatch.", ['path' => $attachment->path]);
-            AuditLog::record('attachment.integrity_failed', $transaction, $ids + ['sha256' => $attachment->sha256], $ids + ['sha256' => $actual], $transaction->branch_id);
+            Log::error("Attachment #{$attachment->id} ({$label}): sha256 mismatch.", ['path' => $attachment->path]);
+            AuditLog::record('attachment.integrity_failed', $parent, $ids + ['sha256' => $attachment->sha256], $ids + ['sha256' => $actual], $parent->branch_id);
 
             return response()->json(['message' => 'This file does not match the one uploaded. Tell your administrator.'], 409);
         }
 
-        AuditLog::record('attachment.downloaded', $transaction, null, $ids + ['removed' => $removed], $transaction->branch_id);
+        AuditLog::record('attachment.downloaded', $parent, null, $ids + ['removed' => $removed], $parent->branch_id);
 
         return response($bytes, 200, [
             'Content-Type' => $attachment->mime,
@@ -303,6 +314,7 @@ class AttachmentController extends Controller
 
         return Attachment::query()
             ->join('transactions', 'transactions.id', '=', 'attachments.transaction_id')
+            ->whereNotNull('attachments.transaction_id') // AG-033b: never bank statement files
             ->whereIn('attachments.sha256', $shas->unique()->values())
             ->whereNull('attachments.removed_at')
             ->where('attachments.transaction_id', '!=', $txn->id)
