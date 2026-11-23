@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Account;
+use App\Models\Attachment;
 use App\Models\AuditLog;
 use App\Models\BankReconciliationMark;
 use App\Models\BankStatement;
@@ -360,15 +361,20 @@ class BankReconciliation
         $people = $this->people($statements->pluck('completed_by')->merge($statements->pluck('undone_by'))->filter()->unique()->all(), (int) $account->branch_id);
         $mayUndoLast = $last && $this->mayUndo($last, $user);
         $late = $this->withLateLines($statements->where('status', BankStatement::COMPLETED));
+        $files = StatementAttachments::counts($statements->pluck('id')->all());
 
-        return $statements->map(fn (BankStatement $s) => $this->present($s, $people, $last?->id === $s->id && $mayUndoLast, $late))->values()->all();
+        return $statements->map(fn (BankStatement $s) => $this->present($s, $people, $last?->id === $s->id && $mayUndoLast, $late, $files))->values()->all();
     }
 
-    /** @param  array<int, true>|null  $late  statements with late lines (withLateLines); null: look up this one */
-    public function present(BankStatement $s, ?array $people = null, bool $canUndo = false, ?array $late = null): array
+    /**
+     * @param  array<int, true>|null  $late  statements with late lines (withLateLines); null: look up this one
+     * @param  array<int, array{0: int, 1: int}>|null  $files  AG-033b file counts (StatementAttachments::counts); null: look up
+     */
+    public function present(BankStatement $s, ?array $people = null, bool $canUndo = false, ?array $late = null, ?array $files = null): array
     {
         $people ??= $this->people(array_filter([$s->completed_by, $s->undone_by]), (int) $s->branch_id);
         $late ??= $this->withLateLines(collect([$s]));
+        $files ??= StatementAttachments::counts([$s->id]);
 
         return [
             'id' => $s->id,
@@ -390,6 +396,9 @@ class BankReconciliation
             'undo_reason' => $s->undo_reason,
             'changed_since_completion' => $this->changedFast($s, $late),
             'can_undo' => $canUndo,
+            // AG-033b S1a: the History "Bank statement" column (active files, removed ones).
+            'attachments_count' => $files[$s->id][0] ?? 0,
+            'attachments_removed_count' => $files[$s->id][1] ?? 0,
         ];
     }
 
@@ -781,6 +790,7 @@ class BankReconciliation
             $people = $this->people(array_filter([$s->completed_by, $s->undone_by]), (int) $s->branch_id);
             $statement = [
                 'id' => $s->id,
+                'account_id' => (int) $s->account_id,
                 'status' => $s->status,
                 'statement_date' => $asAt,
                 'statement_balance' => Money::fromCents($s->statement_balance_cents),
@@ -802,6 +812,10 @@ class BankReconciliation
                 'completed_at' => $s->completed_at->toIso8601String(),
                 'undone' => $s->status === BankStatement::UNDONE ? ['by' => $people[(int) $s->undone_by] ?? null,
                     'at' => $s->undone_at?->toIso8601String(), 'reason' => $s->undo_reason] : null,
+                // AG-033b S3: the bank statement copy, removed and replaced files included. File metadata only, no bytes.
+                // Access to the statement was checked in reportParams (also for background exports, which have no request).
+                'attachments' => app(StatementAttachments::class)->present(
+                    Attachment::withoutGlobalScopes()->where('bank_statement_id', $s->id)->orderBy('id')->get(), $s, request()->user()),
             ];
         }
 

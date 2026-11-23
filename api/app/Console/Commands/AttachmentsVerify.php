@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\Attachment;
+use App\Models\BankStatement;
 use App\Models\Transaction;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Storage;
@@ -11,7 +12,8 @@ use Throwable;
 /**
  * AG-062 accounting review finding 9, the counterpart of ledger:verify. Run after every deploy and backup restore.
  * Checks that every attachment row (removed ones included: their files are kept) has its file on disk with the
- * stored sha256. Lists problems by entry ref and attachment id; exits 1 on any problem. Read-only.
+ * stored sha256. Lists problems by entry ref (AG-033b: "KDY Bank 2026-10-31 (statement #12)" for a bank statement file) and
+ * attachment id; exits 1 on any problem. Read-only.
  */
 class AttachmentsVerify extends Command
 {
@@ -24,12 +26,14 @@ class AttachmentsVerify extends Command
         $problems = [];
         $checked = 0;
         Attachment::withoutGlobalScopes()->orderBy('id')->chunkById(200, function ($rows) use (&$problems, &$checked) {
-            $refs = Transaction::withoutGlobalScopes()->whereIn('id', $rows->pluck('transaction_id'))->pluck('ref_no', 'id');
+            $refs = Transaction::withoutGlobalScopes()->whereIn('id', $rows->pluck('transaction_id')->filter())->pluck('ref_no', 'id');
+            $statements = BankStatement::withoutGlobalScopes()->with('account:id,name')->whereIn('id', $rows->pluck('bank_statement_id')->filter())
+                ->get()->keyBy('id');
             foreach ($rows as $a) {
                 $checked++;
                 $problem = $this->check($a);
                 if ($problem !== null) {
-                    $problems[] = [$refs[$a->transaction_id] ?? "#{$a->transaction_id}", $a->id, $a->original_name,
+                    $problems[] = [$this->ref($a, $refs, $statements), $a->id, $a->original_name,
                         $a->removed_at ? 'removed' : 'active', $problem];
                 }
             }
@@ -44,6 +48,17 @@ class AttachmentsVerify extends Command
         $this->info("All {$checked} attachment file(s) are present and match their sha256.");
 
         return self::SUCCESS;
+    }
+
+    private function ref(Attachment $a, $refs, $statements): string
+    {
+        if ($a->bank_statement_id !== null) {
+            $s = $statements[$a->bank_statement_id] ?? null;
+
+            return $s ? trim(($s->account->name ?? '').' '.$s->statement_date->format('Y-m-d'))." (statement #{$s->id})" : "statement #{$a->bank_statement_id}";
+        }
+
+        return $refs[$a->transaction_id] ?? "#{$a->transaction_id}";
     }
 
     private function check(Attachment $a): ?string

@@ -34,9 +34,9 @@ return Application::configure(basePath: dirname(__DIR__))
     })
     ->withExceptions(function (Exceptions $exceptions) {
         // AG-062 R4.1 (QA Q2): a file larger than post_max_size makes PHP drop the whole body and Laravel answer 413
-        // before routing. On the attachment upload route, answer like any other too-large file.
+        // before routing. On the attachment upload routes (AG-033b: the bank statement copy too), answer like any other too-large file.
         $exceptions->render(function (PostTooLargeException $e, Request $request) {
-            if ($request->isMethod('POST') && preg_match('#^api/v1/transactions/\d+/attachments$#', $request->path())) {
+            if ($request->isMethod('POST') && preg_match('#^api/v1/(transactions/\d+|accounts/\d+/reconciliation/statements/\d+)/attachments$#', $request->path())) {
                 return response()->json(['message' => 'Each file may be at most 5 MB.', 'errors' => ['file' => ['Each file may be at most 5 MB.']]], 422);
             }
 

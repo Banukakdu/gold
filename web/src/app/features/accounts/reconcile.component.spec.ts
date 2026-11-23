@@ -209,7 +209,7 @@ describe('AG-033 bank reconciliation (web)', () => {
     const acts = el.querySelector<HTMLElement>('.rc-hact')!;
     const width = acts.getBoundingClientRect().width;
     const items = Array.from(acts.children) as HTMLElement[];
-    expect(items.length).toBe(2); // View, Undo (no report.export)
+    expect(items.length).toBe(3); // Files (AG-033b), View, Undo (no report.export)
     for (const b of items) expect(Math.round(b.getBoundingClientRect().width)).toBe(Math.round(width));
     frame.remove();
   });

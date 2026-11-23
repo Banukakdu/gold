@@ -12,6 +12,7 @@ use App\Models\YearEndClose;
 use App\Services\Backups\BackupStatus;
 use App\Services\BankReconciliation;
 use App\Services\ExpenseApprovals;
+use App\Services\StatementAttachments;
 use App\Services\TransferApprovals;
 use App\Services\TransferReceipts;
 use App\Support\BranchContext;
@@ -117,7 +118,8 @@ class PeriodLockController extends Controller
             'closes_from' => $open->isEmpty() ? $period : ($first === '' ? null : CarbonImmutable::createFromFormat('!Y-m', $first)->addMonth()->format('Y-m')),
             'self_voids' => $rows->where('event', 'transaction.voided')->filter($self)->count(),
             'self_reversals' => $rows->where('event', 'transaction.reversed')->filter($self)->count(),
-            // AG-062 finding 5: evidence removed from entries in the months being closed (information only).
+            // AG-062 finding 5: evidence removed from entries in the months being closed (information only). Entry files
+            // only (AG-033b AC 18): the rows above are limited to auditable_type Transaction.
             'files_removed' => $files->count(),
             'files_removed_self' => $files->filter($self)->count(),
             // AG-093 R15 (backups review F9): information only, it never blocks the lock.
@@ -131,7 +133,9 @@ class PeriodLockController extends Controller
             // AG-064 S8: expense requests dated in the month and still pending; never blocking.
             + app(ExpenseApprovals::class)->pendingSummary(substr($periodEnd, 0, 8).'01', $periodEnd, $branches->pluck('id')->map(fn ($id) => (int) $id)->all())
             // AG-033 S4 (Q8): bank accounts not reconciled through the month end; information only, never blocking.
-            + ['bank_reconciliation' => app(BankReconciliation::class)->lockReview($period, $branches->pluck('id')->map(fn ($id) => (int) $id)->all())];
+            + ['bank_reconciliation' => app(BankReconciliation::class)->lockReview($period, $branches->pluck('id')->map(fn ($id) => (int) $id)->all())]
+            // AG-033b finding 4: bank statement copies of statements dated in the months being closed; information only.
+            + StatementAttachments::lockReview($period, $open->mapWithKeys(fn ($t, $id) => [(int) $id => (string) $t])->all());
     }
 
     public function store(Request $request)

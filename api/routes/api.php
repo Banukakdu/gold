@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\V1\AuditLogController;
 use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\BackupController;
 use App\Http\Controllers\Api\V1\BankReconciliationController;
+use App\Http\Controllers\Api\V1\BankStatementAttachmentController;
 use App\Http\Controllers\Api\V1\BranchController;
 use App\Http\Controllers\Api\V1\CategoryController;
 use App\Http\Controllers\Api\V1\ChartOfAccountsController;
@@ -135,6 +136,17 @@ Route::prefix('v1')->group(function () {
                 Route::post('accounts/{account}/reconciliation/complete', [BankReconciliationController::class, 'complete']);
                 Route::post('accounts/{account}/reconciliation/statements/{statementId}/undo', [BankReconciliationController::class, 'undo'])
                     ->whereNumber('statementId');
+            });
+            // AG-033b bank statement copy (docs/specs/bank-statement-attachment.md): outside the perm:account.reconcile group,
+            // because list and download also accept report.view (the controller checks section 2). Remove is a POST action;
+            // there is deliberately no DELETE route. {statement} must belong to {account}, {attachment} to {statement} (404).
+            Route::scopeBindings()->group(function () {
+                $base = 'accounts/{account}/reconciliation/statements/{statement}/attachments';
+                Route::get($base, [BankStatementAttachmentController::class, 'index']);
+                Route::post($base, [BankStatementAttachmentController::class, 'store'])->middleware('throttle:attachments-upload');
+                Route::get("{$base}/{attachment}/download", [BankStatementAttachmentController::class, 'download'])
+                    ->middleware('throttle:attachments-download');
+                Route::post("{$base}/{attachment}/remove", [BankStatementAttachmentController::class, 'remove']);
             });
             // Double-entry S1: the chart of accounts of one branch (structure only, no balances).
             Route::get('chart-of-accounts', ChartOfAccountsController::class)->middleware('perm:account.view');

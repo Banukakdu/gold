@@ -55,6 +55,11 @@
 
 @if ($st)
     @if ($st['changed_since_completion'])<p class="alert">Changed since completion</p>@endif
+    {{-- AG-033b S3: the bank statement copy, after the statement balance / difference and before the late entries. Full sha256. --}}
+    <h2>Bank statement copy</h2>
+    @foreach (\App\Services\StatementAttachments::reprintLines($st['attachments'] ?? []) as $line)
+        <p class="note">{{ $line }}</p>
+    @endforeach
     @if ($st['late_entries'])
         <h2>Late entries (added or voided after the statement was completed)</h2>
         <table>

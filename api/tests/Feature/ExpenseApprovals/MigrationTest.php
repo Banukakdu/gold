@@ -133,6 +133,8 @@ class MigrationTest extends TestCase
     {
         // AG-033 review 3: account.reconcile is added later too, so roll it back first; AG-051 and AG-064 must not
         // require it of a full copy (their exclusion lists) or they would grant nothing.
+        // AG-033b references bank_statements (MySQL refuses to drop a referenced table): roll it back first.
+        $this->rollback('database/migrations/2026_12_06_000000_bank_statement_attachments.php');
         $this->rollback('database/migrations/2026_12_01_000000_bank_reconciliation.php');
         $this->rollback();
         $this->rollback('database/migrations/2026_11_29_000000_create_notifications_table.php');

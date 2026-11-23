@@ -44,6 +44,9 @@ class MigrationTest extends TestCase
 
     private function rollback(): void
     {
+        // AG-033b (attachments.bank_statement_id) references bank_statements; MySQL refuses to drop a referenced table,
+        // so the later migration is rolled back first, as a normal rollback would.
+        $this->artisan('migrate:rollback', ['--path' => 'database/migrations/2026_12_06_000000_bank_statement_attachments.php', '--force' => true])->assertExitCode(0);
         $this->artisan('migrate:rollback', ['--path' => self::FILE, '--force' => true])->assertExitCode(0);
         app(PermissionRegistrar::class)->forgetCachedPermissions();
     }

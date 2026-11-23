@@ -16,6 +16,8 @@ interface Review extends InTransitInfo, PendingApprovalInfo {
   /** AG-033 S4: bank accounts not reconciled through the month end (information only). */
   bank_reconciliation?: { branch: { id: number; code: string }; account: { id: number; code: string | null; name: string };
     last_statement_date: string | null; changed_since_completion: boolean }[];
+  /** AG-033b finding 4: "1 bank statement file removed", "1 completed bank reconciliation without a statement copy". */
+  statement_copy_lines?: string[];
 }
 interface Person { id: number; name: string; tag: string | null }
 interface Lock {
@@ -227,6 +229,8 @@ export class PeriodLocksComponent implements OnInit {
     if (pendingLine) text += `\n\n${pendingLine}`;
     // AG-033 S4 (Q8): bank accounts not reconciled through the month end; information only, never blocking.
     if (review?.bank_reconciliation?.length) text += `\n\n${bankReconciliationLines(review.bank_reconciliation, branch === null)}`;
+    // AG-033b finding 4: bank statement copies of statements dated in these months; information only, never blocking.
+    if (review?.statement_copy_lines?.length) text += `\n\n${review.statement_copy_lines.join('\n')}`;
     if (!confirm(text) || this.busy()) return;
     this.busy.set(true);
     this.http.post('/api/v1/period-locks', { period: p, branch_id: branch }).subscribe({

@@ -90,7 +90,7 @@ import { NotificationBellComponent } from './notification-bell.component';
                scheduled reports pages, which carry their own branches and keep their state) -->
           @for (k of [outletKey()]; track k) { <router-outlet /> }
         </main>
-        <div class="toast" role="status" aria-live="polite">@if (toast.text()) { <span [class.toast-warn]="toast.kind() === 'warning'">{{ toast.text() }}</span> }</div>
+        <div class="toast" role="status" aria-live="polite">@if (toast.text()) { <span [class.toast-warn]="toast.kind() === 'warning'">{{ toast.text() }}@if (toast.action(); as a) { <button type="button" class="toast-action" (click)="toast.runAction()">{{ a.label }}</button> }</span> }</div>
       </div>
     </div>
   `,
