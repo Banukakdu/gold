@@ -211,3 +211,42 @@ Reviewed against CLAUDE.md, `bank-reconciliation.md` (Accounting review Q3/Q4, f
 5. **SHOULD (product owner) - Independent access for the checker (Q4).** A `report.view`-only checker can reach a reprint only from the preparer's link, so the preparer chooses what the checker sees. This is acceptable for this story, because the Branch Admin or owner can use S1 History. Plan the `report.view` statement list (Q4 story) before relying on a Viewer as the only checker.
 
 Fine as specified: posts nothing and never writes `ledger_entries`, `current_balance`, marks or stored statement figures, and never sets "Changed since completion" (R7, AC 13); nothing is hard-deleted (DB triggers, FK restrict, no DELETE route, AC 16); every add, remove, replace, download, missing file and integrity failure is audited against the statement in its own branch (R6); the lock is taken from the statement date under the cumulative rule and the closed year (R4, AC 11); branch isolation and scoped binding (R1, AC 9); 5 MB, 5 active and 10 total under `lockForUpdate` (R3, AC 3 and 5); the replace reason is required and both rows are linked (R5, AC 6); the reprint lists every file with its full sha256, removed files included (S3, AC 19); backups and `attachments:verify` cover the files.
+
+## Accountant sign-off
+Date 2026-11-23. Build reviewed: `git diff origin/main...HEAD` on `feature/bank-statement-attachment` (55a7445 build, 574cadc merge of main, ff5f98c review and QA fixes). Code read, tests not re-run by me; I rely on the reported results (SQLite 1098 passed, temporary MySQL 1099 passed, pint, ng build, ng test 110/110), QA (AC 22 phone dialogs fixed after the first round) and the reviewer (no security issues).
+
+| # | Finding | Status | Evidence |
+|---|---|---|---|
+| 1 | MUST `by_preparer`, tag, F4 wording, release note | DONE | `StatementAttachments::byPreparer` (uploader = `completed_by`, frozen columns) in `present`, `attachment.added` and `attachment.removed` (`BankStatementAttachmentController::store`, `markRemoved`); S1a tag `statement-files.component.ts:79`; reprint tag `StatementAttachments::tags` (PDF, Excel) and `bank-reconciliation.component.ts` `tags()`; F4 text; `UploadTest::test_ac23_by_preparer` |
+| 2 | SHOULD completed-after-lock gets "Added after close", remedy by audited unlock | DONE | `added_after` set from the same `share: true` locking read in `store`; `StateTest::test_ac24_wrong_file_in_a_locked_month_goes_through_an_audited_unlock` (unlock, added, removed, lock in that order; old row keeps "close") |
+| 3 | SHOULD "also on" printed on the reprint | DONE | `StatementAttachments::alsoOn` (same account only), `tags()` on PDF/Excel/screen; `UploadTest::test_ac25_same_bytes_on_the_september_statement` |
+| 4 | SHOULD Lock confirm information lines | DONE | `StatementAttachments::lockReview` added to `PeriodLockController::review` (per branch, newly closed months only, never blocking); `files_removed` still entry files only (`auditable_type` Transaction); `period-locks.component.ts` shows the lines; `ReviewTest::test_ac26_lock_confirm_lines_for_statement_evidence`, `test_ac18_...` |
+| 5 | SHOULD (product owner) independent checker access | Accepted for this story, carried forward | Q4 story (statement list for `report.view`) remains open; see accepted risks |
+
+Other checks:
+- **Posts nothing.** No `LedgerService`, `ledger_entries`, `current_balance`, marks or stored statement figures are written; `BankReconciliation` only gains read-only counts and file metadata. `StateTest::test_ac13_file_actions_change_no_figure` (figures frozen, `changed_since_completion` false, `ledger:verify` passes). Double entry, balances, inter-branch and report totals unaffected.
+- **Audit.** add (with `by_preparer`, `also_on`, `added_after`, `replaces_id`), remove and replace (one added + one removed row, `replaced_by_id`, `self`), downloaded, missing (410) and integrity_failed (409) are all recorded against the BankStatement in its own branch. Permission refusals (403) and lock refusals (422) write no audit row, as AG-062 and R6; accepted.
+- **No hard deletes.** No DELETE route (`SchemaTest::test_ac16_there_is_no_delete_route`); `attachments_no_delete`, `attachments_no_update` (bank_statement_id, sha256, added_after frozen; one-time removal) and `attachments_one_parent` triggers on SQLite and MySQL; FK restrict on `bank_statement_id`; model guards match; rollback refused once a statement file exists (AC 16, 17).
+- **Locked month / closed year.** Checked on the statement date with cumulative locks and the closed year, inside the transaction; add allowed and tagged "close", remove and replace refused for the Accountant and the Super Admin (`StateTest::test_ac11_*`, incl. November-only cumulative lock and closed fiscal year).
+- **Undone statements** are read-only: add 422, remove and replace 422 "Files of an undone statement cannot be removed.", files still listed, downloadable and on the reprint (`StateTest::test_ac12_...`).
+- **Branch isolation.** `{account}` BranchScoped, `{statement}`/`{attachment}` scoped bindings, row `branch_id` and audit `branch_id` from the statement, never the header (`AccessTest::test_ac9_...`, `test_ac10_...`).
+- **Roles.** No new permission and no template change: add/replace/remove need `account.reconcile`; list/download `account.reconcile` or `report.view`; removed files also `audit.view`; Cashier gets nothing (`AccessTest::test_ac8_...`).
+- Minor, not blocking: on the screen reprint the "Bank statement copy" block sits just before the "Changed since completion" warning, while the PDF and Excel put it after; the order of information is the same in substance.
+
+### Release notes
+- Bank statement copy (AG-033b): on Bank reconciliation, History, each completed statement now has a "Bank statement" column and a Files panel. Attach the bank statement as PDF, JPG or PNG (up to 5 files, 5 MB each, 10 uploads in total per statement). Replace and Remove need a reason; old files are kept for the audit trail and only auditors (`audit.view`) can download removed files.
+- The attached copy is a filing aid. The person who signs Checked by compares the statement balance with the bank's own statement or internet banking, not only with the uploaded file. Where possible the Branch Admin or owner downloads the statement from the bank and attaches it. Files uploaded by the person who completed the reconciliation are marked "uploaded by the preparer" on the screen and the printout.
+- In a locked month or closed fiscal year, files can still be added (marked "Added after close") but cannot be removed or replaced, not even by the Super Admin. To correct a wrong file: the Super Admin unlocks the month with a reason, the Accountant replaces the file with a reason, and the month is locked again.
+- The reprint (screen, PDF, Excel) lists every file with its full sha256, removed and replaced files included, and marks a file that is also attached to another statement of the same account ("also on the <date> statement"). Check that tag: it usually means the wrong month's statement was attached.
+- The Lock confirm now also shows, for information only, bank statement files removed and completed reconciliations without a statement copy in the months being closed. Attaching a copy is optional; "No copy" is visible on History, on the reprint and on the Lock confirm.
+- Undone statements keep their files read-only. Attach the copy to the statement that replaces it.
+- Run `php artisan attachments:verify` after deploy and after any backup restore; it now also checks bank statement files.
+
+### Accepted risks
+- The copy is supplied by the preparer and is not independent evidence (finding 1); mitigated by the preparer tag and the release-note instruction to check against the bank's own record.
+- A `report.view`-only checker reaches a statement reprint only from a link the preparer sends (finding 5 / Q4); acceptable while the Branch Admin or owner, who hold `account.reconcile`, can open History directly. The `report.view` statement list should be planned before a Viewer is relied on as the only checker.
+- Attaching a copy is optional (Q2); the "No copy" tag and the Lock confirm line are the detective control.
+- A file added while the month is unlocked is not tagged; the unlock and relock audit rows show that window (R4).
+- Refused attempts (403/422) are not audited, as for AG-062.
+
+**Verdict: SIGNED OFF.**
