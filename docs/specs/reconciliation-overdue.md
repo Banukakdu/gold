@@ -1,0 +1,297 @@
+# Spec: Bank reconciliation status per account (overdue reconciliations)
+
+## 1. Goal and scope
+**AG-033e** (follow-up to AG-033; not yet a row in `docs/Account-gold_Product_Backlog.xlsx`, Q9): "As an Accountant or checker, I want to see for every bank account when it was last reconciled, how many month-ends it is overdue and whether its last statement is checked, so that month-end close (project document 7.5.1) does not miss an account."
+
+Source: the accountant's request; AG-033c Q3 and accepted risk 2 ("the full overdue list stays out of scope"). AG-033c R9 already prints one sentence on S6: "Not reconciled to 30 Nov 2026: GAL Bank (12002), last statement 31 Oct 2026; ...". That sentence answers "is anything missing?". It does not say how far behind each account is, whether the bank statement is simply not due yet, or whether the last statement was checked (AG-033d).
+
+This story adds **one read-only report**, "Bank reconciliation status", with one row per bank account. It answers "how far behind is each bank account, and is its last statement checked?".
+
+- **It posts nothing and writes nothing.** No `LedgerService` call. It never writes `ledger_entries`, `accounts.current_balance`, `bank_reconciliation_marks`, `bank_statements`, `bank_statement_checks` or settings. The only row it writes is `report.exported` on an export.
+- **It depends on AG-033d (PR #28) and AG-033c (PR #27).** It reads the check status of AG-033d. It merges after both.
+- **No duplicate of the AG-033c line.** The S6 coverage sentence stays exactly as it is (wording, exports, AC 20). S6 gets one link next to it, "Status per account", that opens this report. Both use the same in-scope rule (R3), so on the same day the accounts S6 names are exactly the accounts this report shows as Due or Overdue (AC 14).
+
+**In scope:** the new report (screen, API, PDF and Excel export), a Reports hub card, the S6 link, and a fixed grace period of 10 days.
+
+**Out of scope, and why:**
+- **Configurable grace days.** The grace period is a constant in this story (Q1). A Settings field means a new setting key, validation, a `settings.updated` audit and tests. It can follow in a later story without changing anything here.
+- **Frequency per account** (monthly or quarterly). Every bank account is expected monthly (Q2).
+- **Dashboard tile** (Q3), **bell reminder** (Q4) and **scheduled email** (Q5). Each one needs its own recipients, scheduling or dedupe rules. This report is the base they would all link to. `ReportSchedule::REPORTS` is unchanged.
+- **Lock confirm.** No change. It already shows "KDY Bank: last reconciled to 30 Sep 2026" (AG-033 S4) and the unchecked and re-check lines (AG-033d D4).
+- **Statement-level detail.** "Changed since completion", late entries and earlier unchecked statements stay on S6. This report shows the latest completed statement only.
+- **An "as at" date in the past.** The report is always as at today.
+- **Wallet and cash accounts** (AG-033 Q1). A responsible-person field on accounts (Q7).
+
+## 2. Personas and permissions
+**No new key.** These are the real keys from `PermissionSeeder`. The report uses the same keys as S6, so a row link never leads to a 403.
+
+| Need | Key |
+|---|---|
+| Open the report, use the filters | `report.view` |
+| Export PDF / Excel | `report.view` + `report.export` |
+| "Reconcile" link on a row | `account.reconcile` (the link is hidden without it) |
+
+| Template | `report.view` | `report.export` | `account.reconcile` | Sees | Exports |
+|---|---|---|---|---|---|
+| Branch Admin (`*`) | yes | yes | yes | own branch | yes |
+| Accountant | yes | yes | yes | own branch | yes |
+| Viewer | yes | no | no | own branch | no (prints from the browser) |
+| Cashier | no | no | no | no (403, no hub card) | no |
+| Super Admin | all | all | all | any branch, All mode across branches | yes |
+
+Roles are unchanged. Nobody may grant a key they do not hold.
+
+## 3. User flows
+- **F1 Accountant at month-end (ACC, KDY, 15 Dec 2026).** ACC opens Reports > "Bank reconciliation status". The summary line reads "Overdue 2 · Due 0 · Up to date 1 · Not required 2". The rows are sorted with the worst first:
+  - KDY Bank 5 shows "Overdue 3 months" (last statement 15 Sep 2026).
+  - KDY Bank 2 shows "Never reconciled · overdue 1 month".
+  - KDY Bank shows "Up to date" (last statement 30 Nov 2026 by BA) with the check tag "Not checked".
+  - ACC clicks "Reconcile" on KDY Bank 5, and `/accounts/:id/reconcile` (S1) opens.
+- **F2 Viewer follows up (VW, KDY).** VW sees the same rows, without "Reconcile" links and without export buttons. VW clicks "Statements" on KDY Bank, and S6 opens filtered to that account. There VW records the check (AG-033d).
+- **F3 Within the grace period (10 Dec 2026).** The November bank statement may not have arrived yet. GAL Bank (last 31 Oct 2026) shows "Due by 10 Dec 2026", not "Overdue". On 11 Dec 2026 it shows "Overdue 1 month".
+- **F4 Super Admin, All branches.** The Branches multi-select defaults to every branch (reports R1). Rows show a Branch column. MAIN Main Account appears, for example "Never reconciled · overdue 4 months". A row link opens S1 or S6 for that account's branch, as S6 rows already do in All mode.
+- **F5 Super Admin, branch mode.** With X-Branch-Id KDY, the Super Admin sees KDY only.
+- **F6 From S6.** Next to the coverage sentence, the link "Status per account" opens this report with the same Branches selection.
+- **F7 Export (ACC).** "Export PDF" or "Export Excel" exports every row that matches the filters, with the reports header. `report.exported` is audited.
+- **F8 Branch switch.** Switching branch reloads the report for the new branch. A user without `report.view` there leaves `/reports` (existing shell rule).
+
+## 4. Screens
+### S7 Bank reconciliation status `/reports/reconciliation-status`
+Guard: `permissionGuard('report.view')`.
+
+Hub card, right after "Bank reconciliation statements":
+- title "Bank reconciliation status";
+- question "Which bank accounts are behind with reconciliation, and is the last statement checked?".
+
+**Filters.** There is an Apply button. The values are kept in the URL query.
+
+| Field | Type | Required | Validation / default |
+|---|---|---|---|
+| Branches | multi-select | All mode only | reports R1. Default: every branch. Hidden in branch mode |
+| Status | select | yes | All (default) / Overdue / Due / Up to date / Not required |
+
+"Clear filters" resets the defaults.
+
+**Above the table:**
+- **Basis line:** "As at 15 Dec 2026. A month's bank reconciliation is due within 10 days after month-end. Overdue counts the month-ends after the last completed statement, up to 30 Nov 2026. Undone statements do not count."
+- **Summary line:** "Overdue N · Due N · Up to date N · Not required N". It counts every row in the branch scope. The Status filter does not change it.
+- **Export buttons:** shown only when `auth.can('report.export')`.
+
+**Table** (desktop; the sort order is in R6; no paging):
+
+| Column | Content |
+|---|---|
+| Branch | Branch code. All mode only |
+| Account | "KDY Bank (11002)", plus "(inactive)" when `status = closed` (the S6 label) |
+| Status | Tags:<br>- red "Overdue N month(s)";<br>- red "Never reconciled · overdue N month(s)";<br>- amber "Due by 10 Dec 2026", or "Never reconciled · due by 10 Dec 2026";<br>- green "Up to date";<br>- grey "Not required: no entries up to 30 Nov 2026" or "Not required: inactive, nil balance at 30 Nov 2026" |
+| Months overdue | A number. 0 is shown as "0". Blank when the status is Not required |
+| Last reconciled | The statement date of the latest completed statement, in the date-format setting, with a second line "by <name + controls R10 tag>". "Never" when there is none |
+| Last check | For the latest completed statement (AG-033d texts):<br>- green "Checked by VW, 2026-12-10";<br>- amber "Re-check needed (N since check)";<br>- amber "Not checked";<br>- blank when there is no completed statement |
+| (actions) | "Statements" links to `/reports/reconciliation-statements?account_ids=<id>` (in All mode, also `branches=<branch id>`). "Reconcile" links to `/accounts/<id>/reconcile`, only with `account.reconcile`; in All mode it is shown only for MAIN accounts, because S1 is a branch-mode screen (Q8) |
+
+**States**
+- Loading: skeleton rows.
+- Empty because there is no bank account in scope: "No bank accounts in this branch."
+- Empty because of the Status filter: "No bank accounts with this status." and "Clear filters".
+- Errors: 403 shows the API `message` in `.alert`. A 422 shows the message under the Status field. A network error shows "Could not load the reconciliation status. Try again." with Retry.
+
+**390px layout.**
+- Filters fold into a "Filters (n)" button. It opens a full-width sheet with Apply and Clear at the bottom, each at least 44px tall.
+- The summary line wraps.
+- Each row becomes a card:
+  - line 1: Account (with the branch code in All mode) and the Status tag, right-aligned, wrapping under the account when it does not fit;
+  - line 2: "Last reconciled 30 Nov 2026 by BA" or "Never reconciled";
+  - line 3: the Last check tag;
+  - line 4: "Statements" and "Reconcile" as buttons, each at least 44px tall.
+- Export buttons are full width. There is no horizontal page scroll at 360px or 390px.
+
+### S6 Bank reconciliation statements (AG-033c, one change)
+After the coverage sentence, add the link "Status per account". It goes to `/reports/reconciliation-status` and carries the current `branches` in All mode. It is shown whether or not the sentence names any account. Nothing else on S6 changes, and S6 exports are unchanged.
+
+## 5. API
+**New:** `GET /v1/reports/reconciliation-status`
+- Middleware `perm:report.view`, inside the `branch` group next to `reports/reconciliation-statements`.
+- `ReportController::reconciliationStatus` calls the new `BankReconciliation::statusParams(array $input)` and `BankReconciliation::status(ReportParams $p)`.
+- `ReportParams` gets `from = to = as_at = BusinessDate::today()`.
+
+Request (query):
+
+| Param | Rule |
+|---|---|
+| `branches[]` | `ReportService::branchScope`. In branch mode: absent or the active branch, otherwise 403 "You do not have access to branch GAL.". In All mode: any branch ids, default all. An unknown id gives 422 "Unknown branch." |
+| `status` | `in:all,overdue,due,up_to_date,not_required`, default `all`. Otherwise 422 "Choose a valid status." |
+
+Any other parameter (for example `as_at`, `from` or `to`) is ignored.
+
+Response 200:
+```
+{ meta: {…as other reports: branches, generated_at, generated_by…},
+  as_at: 'Y-m-d', grace_days: 10,
+  due_month_end: 'Y-m-d',        // L, R2
+  overdue_through: 'Y-m-d',      // E, R2
+  summary: { overdue, due, up_to_date, not_required },   // whole scope, ignores `status`
+  data: [{ account:{id,code,name,status}, branch:{id,code},
+           status: 'overdue'|'due'|'up_to_date'|'not_required',
+           not_required_reason: 'no_entries'|'closed_nil'|null,
+           never_reconciled: bool,
+           months_overdue: int|null,          // null when not_required
+           due_by: 'Y-m-d'|null,              // only when status = due
+           last_statement: { id, statement_date, completed_by:{id,name,tag}, completed_at } | null,
+           check_status: 'checked'|'recheck'|'not_checked'|null,
+           check: { id, checked_by:{id,name,tag}, checked_at, late_since_check } | null,
+           recheck_needed: bool }] }
+```
+There are no money fields.
+
+Errors:
+- 401.
+- 403 "Missing permission: report.view".
+- 403 for a foreign branch (above).
+- 422 for an unknown branch or an invalid status (above).
+
+**Export (reuse):** `POST /v1/reports/reconciliation-status/export` through the existing `reports/{name}/export` route (`perm:report.view,report.export`). The body is the same filters plus `format` (`pdf|xlsx`).
+- `ReportService::NAMES` gains `reconciliation-status`.
+- `ReportController::export` routes it to `BankReconciliation::statusParams`.
+- `ReportExporter` gains the title "Bank reconciliation status". The export is always synchronous: add the name to the existing `in_array($name, ['cash-flow', 'bank-reconciliation', 'reconciliation-statements'])` exclusion, because there is one row per bank account.
+- **PDF:** blade `reports.pdf.reconciliation-status`, landscape, with the S7 columns except the actions.
+- **Excel:** one sheet with the columns Branch, Account code, Account, Account status, Status (the S7 tag text), Months overdue (number), Due by (date cell), Last statement date (date cell), Last completed by, Check status (Checked / Re-check needed / Not checked / blank), Checked by, Checked at (date-time cell), Re-check needed (Yes/No).
+- **Header** (PDF and Excel): the reports header (company, title, branches, period "As at <as_at>", printed by/at), the basis line, the summary line and "Filters: Status: <label>". There is no "Amounts in LKR" line and no PROVISIONAL marker.
+- Free text (account names, user names) goes through the existing Excel formula-injection prefix.
+- File name: `reconciliation-status_<as_at>.<ext>`.
+- Audit `report.exported` (name, format, rows), as for the other reports.
+
+**Unchanged:**
+- `GET /v1/reports/reconciliation-statements`, including `coverage`;
+- `GET /v1/period-locks/review`;
+- `ReportSchedule::REPORTS`, so a schedule with `reconciliation-status` is refused by the existing validation.
+
+## 6. Business rules
+- **R1 Branch isolation.**
+  - `Account` is `BranchScoped`. In branch mode the query uses the scope, plus an explicit `branch_id IN (active branch)`.
+  - In All mode, `withoutGlobalScopes()` is used only after `branchScope()` has resolved the allowed set. Then `accounts.branch_id IN set` is applied explicitly. This is the same as AG-033c R1 and `listAccounts`.
+  - Statements, checks and `people()` are read only for accounts in that set (`people()` is called per branch).
+  - A branch user can never see another branch's account, even through the other side of a transfer.
+- **R2 Dates.**
+  - T = `BusinessDate::today()` (Asia/Colombo).
+  - G = `BankReconciliation::RECONCILE_GRACE_DAYS` = 10.
+  - **L (due month-end)** = `reconciledTo(T)`: the last month-end on or before T. This is the same cut-off S6 uses with its default To = today.
+  - **E (overdue through)** = `reconciledTo(T − (G + 1) days)`. A month-end M becomes overdue on day M + G + 1. November 2026 is due by 10 Dec 2026 and overdue from 11 Dec 2026.
+    - T = 2026-12-10 gives E = 2026-10-31.
+    - T = 2026-12-11 gives E = 2026-11-30.
+  - **due_by** = L + G days.
+- **R3 In scope (the same rule as AG-033c R9, cut-off L).** Every `type = bank` account in the branch set is a row, whatever its status. A row is **required** when it has at least one `ledger_entries` line dated on or before L (`whereDate`), and it is either `active` or has a non-zero book balance at L (`bookCents`). Otherwise the row is `not_required`:
+  - `no_entries`: no line dated on or before L. This covers a new account with no opening funds yet, and an account whose first entry is after L.
+  - `closed_nil`: `status = closed` and the book balance at L is 0.00.
+  - An account with entries but no recent activity is still required. The bank still issues a statement, and charges or interest may be on it.
+- **R4 Months overdue (required rows).**
+  - `last` = the latest `completed` statement date of the account (`lastReconciledDates`). Undone statements never count.
+  - `start` = `last`, or, when the account was never reconciled, the day before its first ledger line (`MIN(entry_date)`, voided lines included).
+  - `months_overdue` = the number of month-ends M with `start` < M ≤ E. It is 0 when E ≤ `start`.
+  - A statement dated mid-month covers only the month-ends up to its date. For example, `last` 2026-09-15 with E 2026-11-30 gives 3 (30 Sep, 31 Oct, 30 Nov).
+- **R5 Status** (first match wins):
+  1. `not_required` (R3);
+  2. `up_to_date` when `last` ≥ L;
+  3. `overdue` when `months_overdue` ≥ 1;
+  4. `due` otherwise, with `due_by` set.
+
+  `never_reconciled` = `last` is null. Statuses 3 and 4 are exactly the accounts S6's default coverage sentence names.
+- **R6 Sort order.**
+  1. Status: overdue (by `months_overdue`, highest first), then due, then up to date, then not required.
+  2. MAIN first, then branch code.
+  3. Account code, then name.
+- **R7 Last check.**
+  - Taken from the latest completed statement only: `ReconciliationChecks::statusMap` and `lateSinceMap`, batched over the rows, never one query per row.
+  - `recheck_needed` = (`check_status` = `recheck`).
+  - A "Re-check needed" or "Not checked" status does not change the row's Status. The two are shown separately.
+  - Older unchecked statements of the same account are not shown here. They are on S6 with Checked = Not checked.
+- **R8 Volume.** The report has one row per bank account (about 5 per branch), so there is no paging and no cap. It runs a fixed number of queries whatever the number of accounts:
+  - bank accounts;
+  - last completed statement per account;
+  - first line date and book balance at L per account (one grouped query);
+  - statements with their checks.
+
+  The PDF cap (`PDF_EXPORT_CAP`, 1,000) applies as for other reports.
+- **R9 Read only, no audit on view.** Viewing writes nothing. An export writes only `report.exported`. Nothing is posted, so `ledger:verify` is unaffected.
+- **R10 Edge cases.**
+  - **Closed account with a balance at L** (it was emptied and closed after L): required until a statement on or after L is completed.
+  - **Closed account reopened** (`status` back to active): it is required again under R3.
+  - **Latest statement undone:** `last` falls back to the previous completed statement. The row can turn from Up to date to Overdue. The Last check shows that earlier statement's check.
+  - **Statement completed after the month was locked** (AG-033 Q3): it counts normally. Locks never hide anything here.
+  - **Deactivated or removed preparer or checker:** the name gets the controls R10 tag.
+  - **T is itself a month-end** (31 Dec): L = 31 Dec. Every account not yet reconciled to that day shows "Due by 10 Jan 2027", which is the same as S6 that day (Q10).
+  - **Super Admin in All mode** sees MAIN Main Account (a `type = bank` account) like any other bank account. "Never reconciled" is expected until it is reconciled (AG-033c accepted risk 1).
+
+## 7. Acceptance criteria
+**Setup** (as AG-033c and AG-033d, section 7). Unless an AC says otherwise:
+- `BusinessDate` is frozen at 2026-12-15, so L = E = 2026-11-30.
+- KDY Bank: ST1 (2026-10-31, completed by ACC, checked by VW on 2026-12-10) and ST3 (2026-11-30, completed by BA, not checked).
+- GAL Bank: ST4 (2026-10-31, completed by GACC, not checked).
+- MAIN Main Account: only line is a capital line dated 2026-08-01; no statement.
+- KDY Bank 2 (11003): first line 2026-11-05; no statement.
+- KDY Bank 3 (11004): active; no lines.
+- KDY Bank 4 (11005): lines in June 2026, nil balance since 2026-06-30, statement 2026-06-30 completed, `status = closed`.
+- KDY Bank 5 (11006): active, with lines; last completed statement 2026-09-15, completed by ACC.
+- KDY Cash: no change (a cash account).
+- Users: ACC (Accountant KDY), VW (Viewer KDY), CSH (Cashier KDY), BA (Branch Admin KDY), GACC (Accountant GAL), SA.
+
+1. Given ACC (KDY), when ACC opens `/reports/reconciliation-status`, then the response is 200 with `as_at` 2026-12-15, `grace_days` 10, `due_month_end` 2026-11-30 and `overdue_through` 2026-11-30. The rows, in this order, are:
+   - KDY Bank 5: overdue, 3;
+   - KDY Bank 2: overdue, 1, `never_reconciled` true;
+   - KDY Bank: up_to_date, 0;
+   - KDY Bank 3: not_required, `no_entries`;
+   - KDY Bank 4: not_required, `closed_nil`.
+
+   KDY Cash, GAL Bank and MAIN Main Account are not listed. The summary reads "Overdue 2 · Due 0 · Up to date 1 · Not required 2".
+2. Given AC 1, then the screen shows:
+   - KDY Bank 5: "Overdue 3 months", Last reconciled "15 Sep 2026";
+   - KDY Bank 2: "Never reconciled · overdue 1 month", Last reconciled "Never", Last check blank;
+   - KDY Bank: "Up to date", Last reconciled "30 Nov 2026" by BA, Last check "Not checked";
+   - KDY Bank 3: "Not required: no entries up to 30 Nov 2026";
+   - KDY Bank 4: "KDY Bank 4 (11005) (inactive)" with "Not required: inactive, nil balance at 30 Nov 2026" and a blank Months overdue.
+3. Given `BusinessDate` 2026-12-10 (E = 2026-10-31), then:
+   - in All mode for SA, GAL Bank is due with `due_by` 2026-12-10 and the tag "Due by 10 Dec 2026";
+   - for ACC, KDY Bank 2 is due ("Never reconciled · due by 10 Dec 2026", months 0) and KDY Bank 5 is overdue 2.
+
+   Given 2026-12-11, then GAL Bank is "Overdue 1 month".
+4. Given `BusinessDate` 2026-12-31, then L = 2026-12-31, and KDY Bank is due with "Due by 10 Jan 2027".
+5. Given BA undoes ST3, when ACC reloads, then KDY Bank is "Overdue 1 month", Last reconciled is 31 Oct 2026 by ACC, and Last check is "Checked by VW, 2026-12-10" (ST1).
+6. Given VW checks ST3, and then ACC records an expense of 2,000.00 from KDY Bank dated 2026-11-20 (not ticked), then KDY Bank stays "Up to date", `check_status` is `recheck`, `recheck_needed` is true, and Last check shows "Re-check needed (1 since check)".
+7. Given KDY Bank 4 is reopened (`status = active`) with a nil balance, then it is overdue with months 5 (Jul to Nov). Given KDY Bank 3 receives an allocation dated 2026-12-02, then on 2026-12-15 it is still not_required `no_entries`. On 2027-01-11 it is "Never reconciled · overdue 1 month".
+8. Given `status=overdue`, then only KDY Bank 5 and KDY Bank 2 are listed, and `summary` is the same as in AC 1. Given `status=late`, then the response is 422 "Choose a valid status.". Given `status=due` on 2026-12-15, then there are no rows and the screen shows "No bank accounts with this status.".
+9. Given SA in All mode with no `branches[]`, then MAIN Main Account is listed first among the overdue rows: overdue 4 (Aug to Nov), `never_reconciled` true. GAL Bank is overdue 1, and the Branch column is shown. With `branches[]=<GAL>`, only GAL Bank is listed. Given SA with X-Branch-Id KDY, then only KDY accounts are listed.
+10. Given ACC (KDY) with `branches[]=<GAL>`, then the response is 403 "You do not have access to branch GAL.". Given GACC (GAL), then only GAL Bank is listed.
+11. Given CSH, when CSH calls the API, then the response is 403 "Missing permission: report.view", and the hub has no "Bank reconciliation status" card.
+12. Given VW, then the report loads, no "Reconcile" link and no export buttons are shown, and "Statements" on KDY Bank opens S6 with `account_ids=<KDY Bank>`, listing ST3, ST2 and ST1. Given ACC, then "Reconcile" on KDY Bank 5 opens `/accounts/<id>/reconcile`.
+13. Given ACC is deactivated, when VW opens the report, then KDY Bank 5's Last reconciled shows "by ACC" with the deactivated tag, and the row is unchanged otherwise.
+14. Given the same day and branch scope, then the accounts named in S6's default coverage sentence are exactly the rows with status due or overdue here (checked on 2026-12-10, 2026-12-15 and 2026-12-31, in branch and All mode). S6 shows the link "Status per account", which opens S7 with the same branches. The S6 coverage text and S6 exports are unchanged.
+15. Given ACC exports to PDF and to Excel with default filters, then:
+    - both files have the reports header with "As at 15 Dec 2026", the basis line, the summary line and "Filters: Status: All", with no "Amounts in LKR" line and no PROVISIONAL marker;
+    - the rows and texts are the same as on the screen, in the same order;
+    - Excel has Months overdue as a number, Due by, Last statement date and Checked at as date cells, and Re-check needed as Yes/No;
+    - the file name is `reconciliation-status_2026-12-15.<ext>`;
+    - one `report.exported` row is written;
+    - an account named "=SUM(A1)" is written to Excel as text.
+
+    Given VW, the export returns 403.
+16. Given any call to the report or its export, then `ledger_entries`, `accounts.current_balance`, `bank_reconciliation_marks`, `bank_statements`, `bank_statement_checks` and `settings` are unchanged, no audit row except `report.exported` is written, and `ledger:verify` exits 0.
+17. Given 20 branches with 5 bank accounts each, when SA loads All mode, then the number of SQL queries is the same as for 1 branch with 1 account (query-count test), and every account has a row.
+18. Given a 390px viewport with 12 rows, then:
+    - there is no horizontal page scroll at 360px or 390px;
+    - each row is a card with the Status tag, the last reconciled line and the Last check tag;
+    - the action buttons and the filter sheet's Apply / Clear are at least 44px tall;
+    - the summary and the tags wrap.
+19. Given VW in KDY switches to GAL, where VW has `report.view`, then the report reloads with GAL accounts. Given a branch where VW has no `report.view`, then the app leaves `/reports`.
+20. Given a schedule create request with report `reconciliation-status`, then the existing validation refuses it (the report is not in `ReportSchedule::REPORTS`).
+
+## 8. Open questions (assumption in bold; work proceeds on it)
+- **Q1 (product owner)** Should the grace days be configurable? **No, not in this story. The grace period is a fixed 10 days, `BankReconciliation::RECONCILE_GRACE_DAYS`, shown in the basis line.** It could later be a company-wide Settings field (Super Admin, 0 to 31, audited by `settings.updated`) that changes only G.
+- **Q2 (accountant / product owner)** Do some bank accounts need reconciling only quarterly? **No. Every bank account is expected monthly (project document 7.5.1).** A frequency per account would be a separate story.
+- **Q3 (product owner)** Should there be a dashboard tile ("Bank reconciliations overdue: N")? **Out. It is the natural next story, as a count from R5 that links to S7, for holders of `report.dashboard` + `report.view`.**
+- **Q4 (product owner)** Should there be a bell reminder when an account becomes overdue? **Out. It needs a daily command, recipients (holders of `account.reconcile` in the branch?) and dedupe per account and month.**
+- **Q5 (product owner)** Should this report be added to scheduled reports (for example a monthly email on the 11th)? **Out. `ReportSchedule::REPORTS` is unchanged (AC 20).**
+- **Q6 (accountant)** Must a closed account with a nil balance at L still have its final month (the month it was emptied) reconciled? **This story reuses the AG-033c R9 rule (`closed_nil` is not required), so S6 and S7 never disagree.** If the accountant wants the closing month required, R3 and S6 R9 must change together in one story.
+- **Q7 (product owner)** Who is the "owner" of an account? **There is no owner field. The branch owns the account, and the row shows the branch and the user who completed the last statement.** A responsible-person field on accounts is out of scope.
+- **Q8** In All mode, can "Reconcile" open S1 for a branch account? **No. S1 is a branch-mode screen, so the link is shown only for MAIN accounts in All mode. The Super Admin switches to the branch to reconcile.** "Statements" works in every mode.
+- **Q9 (product owner)** A backlog row is needed. **The product owner adds AG-033e to the backlog sheet. This spec does not edit the xlsx.**
+- **Q10 (accountant)** On the last day of a month, every account becomes "Due" for that same day. **Accepted, to match S6's coverage cut-off for To = today.** The alternative (L = the last month-end strictly before today) would make S6 and S7 differ on that one day.
+- **Q11 (product owner)** The account status is `closed`, but S6 labels it "(inactive)". **S7 uses "(inactive)" too, so the two screens match.** Renaming the label on both screens is a separate change.
