@@ -382,10 +382,12 @@ class ExpenseApprovals extends ApprovalRequests
         $approver = $this->isApprover($user, $ctx);
 
         $pending = fn () => Transaction::withoutGlobalScopes()->where('approval_status', self::PENDING)->where('type', Transaction::EXPENSE);
-        $page = fn ($q) => $q->with(['account:id,name,branch_id,current_balance', 'branch:id,code', 'category:id,name,parent_id', 'category.parent:id,name',
+        $page = fn ($q) => $q->with(['account:id,name,branch_id,type,current_balance', 'branch:id,code', 'category:id,name,parent_id', 'category.parent:id,name',
             'creator:id,name,status,is_super_admin'])
             ->withCount(['attachments as files_count' => fn ($a) => $a->whereNull('removed_at')])
-            ->orderBy('requested_on')->orderBy('id')->limit(self::WIDGET_ROWS)->get();
+            ->orderBy('requested_on')->orderBy('id')->limit(self::WIDGET_ROWS)->get()
+            // AG-033 SHOULD 10: the approve dialog warns when today's posting (R6) is a late entry on the bank account.
+            ->tap(fn ($rows) => BankReconciliation::attachLastReconciledDates($user, $rows->pluck('account')->filter()));
 
         $toApprove = ['data' => [], 'total' => 0, 'amount' => '0.00'];
         if ($approver) {
@@ -467,7 +469,8 @@ class ExpenseApprovals extends ApprovalRequests
             'requested_on' => $requestedOn,
             'age_days' => $requestedOn ? TransferReceipts::ageDays($requestedOn, $page['today']) : 0,
             'expires_on' => self::expiresOn($requestedOn),
-            'account' => ['id' => $acc, 'name' => $t->account?->name, 'available' => Money::fromCents(Money::toCents($t->account?->current_balance))],
+            'account' => ['id' => $acc, 'name' => $t->account?->name, 'available' => Money::fromCents(Money::toCents($t->account?->current_balance))]
+                + BankReconciliation::lastReconciledOf($t->account),
             'category_path' => self::categoryPath($t->category),
             'payee_payer' => $t->payee_payer,
             'amount' => Money::fromCents(Money::toCents($t->amount)),

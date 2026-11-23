@@ -10,7 +10,7 @@ import { TemplateFacts, TemplateLine, approvalTemplateLines } from '../../core/e
 
 export interface ExpenseRow {
   id: number; ref_no: string; branch: { id: number; code: string | null }; requested_date: string | null; requested_on: string | null;
-  age_days: number; expires_on: string | null; account: { id: number; name: string | null; available: string }; category_path: string;
+  age_days: number; expires_on: string | null; account: { id: number; name: string | null; available: string; last_reconciled_date?: string | null }; category_path: string;
   payee_payer: string | null; amount: string; other_pending_from_account: string; files_count: number;
   below_threshold_7d: { count: number; amount: string }; requested_by: { id: number; name: string } | null; requested_by_you: boolean;
   requester_inactive: boolean; requester_left_branch: boolean; super_admin_only: boolean; approver_onboarded_requester: boolean;
@@ -212,6 +212,7 @@ export class ExpenseApprovalsComponent implements OnInit {
       below_zero_line: warn && this.short(t) ? `This will take ${t.branch.code} ${t.account.name} below zero.` : null,
       approver_onboarded_requester: t.approver_onboarded_requester, requested_period_locked: t.requested_period_locked,
       template_lines: this.lines(t),
+      accounts: [{ id: t.account.id, name: t.account.name ?? '', last_reconciled_date: t.account.last_reconciled_date }],
     } });
   }
 

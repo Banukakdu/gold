@@ -20,9 +20,10 @@ interface Detail extends TemplateFacts {
   id: number; ref_no: string; type: string; status: string; txn_date: string; amount: string;
   payee_payer?: string | null; payment_method?: string | null; reference?: string | null; description?: string | null;
   branch?: { code: string; name: string };
-  account?: { name: string } | null;
-  from_account?: { name: string; branch?: { code: string } } | null;
-  to_account?: { name: string; branch?: { code: string } } | null;
+  /** `last_reconciled_date` only on a pending request's bank accounts the user may see (AG-033 review finding 10). */
+  account?: { id?: number; name: string; type?: string; last_reconciled_date?: string | null } | null;
+  from_account?: { id?: number; name: string; type?: string; branch?: { code: string }; last_reconciled_date?: string | null } | null;
+  to_account?: { id?: number; name: string; type?: string; branch?: { code: string }; last_reconciled_date?: string | null } | null;
   category?: { name: string; parent?: { name: string } | null } | null;
   creator?: { name: string } | null;
   creator_tag?: string | null;
@@ -346,9 +347,9 @@ export class TransactionDetailComponent implements OnInit {
       return { ...base, kind: 'expense', from: `${t.branch?.code ?? ''} ${t.account?.name ?? ''}`.trim(),
         to: c ? (c.parent ? c.parent.name + ' > ' : '') + c.name : '', files_count: t.attachments_count ?? 0,
         approver_onboarded_requester: !!t.approver_onboarded_requester, requested_period_locked: !!t.requested_period_locked,
-        template_lines: approvalTemplateLines(t) };
+        template_lines: approvalTemplateLines(t), accounts: [t.account] };
     }
-    return { ...base, from: (t.from_account?.branch?.code ?? '') + ' · ' + (t.from_account?.name ?? ''), to: (t.to_account?.branch?.code ?? '') + ' · ' + (t.to_account?.name ?? '') };
+    return { ...base, accounts: [t.from_account, t.to_account], from: (t.from_account?.branch?.code ?? '') + ' · ' + (t.from_account?.name ?? ''), to: (t.to_account?.branch?.code ?? '') + ' · ' + (t.to_account?.name ?? '') };
   }
 
   cancelRequest(t: Detail) {

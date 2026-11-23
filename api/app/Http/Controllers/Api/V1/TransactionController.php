@@ -129,6 +129,10 @@ class TransactionController extends Controller
                 ->where('auditable_id', $transaction->id)->whereIn('event', ['transaction.updated', 'transaction.reclassified'])
                 ->where('new_values->after_approval', true)->exists());
         }
+        if ($transaction->approval_status === TransferApprovals::PENDING) {
+            // AG-033 SHOULD 10: the approve dialog warns when today's posting (R6) is a late entry on a bank account.
+            BankReconciliation::attachLastReconciledDates($user, [$transaction->account, $transaction->fromAccount, $transaction->toAccount]);
+        }
         // QA B2: the approve dialog says "Requester is inactive" here too (S5 "buttons as S3").
         $transaction->setAttribute('requester_inactive', $transaction->approval_status !== null && $transaction->creator !== null
             && $transaction->creator->status !== 'active');
