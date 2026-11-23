@@ -345,6 +345,8 @@ class ScheduledReports
             $s->forceFill([
                 'status' => ReportSchedule::ACTIVE, 'paused_reason' => null, 'consecutive_failures' => 0, 'updated_by' => $actor->id,
                 'next_run_at' => self::nextRunAt($s->frequency, $s->weekday, $s->send_time, now()),
+                // R15: the streak boundary. A run planned before it that settles `not_delivered` later is not counted.
+                'resumed_at' => now(),
             ])->save();
             AuditLog::record('report_schedule.resumed', $s, $old, ['status' => $s->status, 'next_run_at' => $s->next_run_at->toIso8601ZuluString(),
                 'consecutive_failures' => 0, 'name' => $s->name], $s->auditBranchId());

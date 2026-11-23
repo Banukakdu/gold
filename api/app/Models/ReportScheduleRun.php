@@ -29,13 +29,20 @@ class ReportScheduleRun extends Model
 
     public const ACTIVE = [self::QUEUED, self::RUNNING];
 
+    /** R15 delivery outcome of a settled run (every delivery sent, skipped or failed). */
+    public const DELIVERED = 'delivered';
+
+    public const NOT_DELIVERED = 'not_delivered';
+
+    public const NOTHING_SENT = 'nothing_sent';
+
     protected $guarded = [];
 
     protected $casts = [
         'params' => 'array', 'branch_ids' => 'array', 'schedule_id' => 'integer', 'owner_id' => 'integer', 'branch_id' => 'integer',
         'rows' => 'integer', 'attached' => 'boolean', 'size_bytes' => 'integer', 'attempts' => 'integer', 'missed_count' => 'integer',
         'planned_at' => 'datetime', 'file_removed_at' => 'datetime', 'data_as_at' => 'datetime', 'started_at' => 'datetime',
-        'finished_at' => 'datetime',
+        'finished_at' => 'datetime', 'settled_at' => 'datetime',
     ];
 
     protected static function booted(): void
