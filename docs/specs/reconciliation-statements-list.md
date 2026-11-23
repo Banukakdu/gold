@@ -161,6 +161,7 @@ Errors: 401; 403 "Missing permission: report.view"; 403 for a foreign branch in 
   - Listed in `not_reconciled` when its latest `completed` statement date is before `reconciled_to`, or it has none ("never reconciled"). Undone statements do not count.
   - Not affected by `from`, `status`, `changed`, `late`, `copy` or paging. Sorted by branch code, then account code. One query (`lastReconciledDates` plus a grouped book balance), branch isolation as R1.
   - Information only: it blocks nothing and posts nothing. Shown on S6 and in both exports.
+  - **Amended by AG-033e (`reconciliation-overdue.md` R3, Accounting review finding 1):** an inactive account with 0.00 at `reconciled_to` is left out only when its latest completed statement is on or after the month-end of its last line dated on or before `reconciled_to`. Until its final month is reconciled it is listed as above.
 
 ## 7. Acceptance criteria
 Setup: as AG-033 section 8 (MAIN, KDY, GAL; KDY Bank, GAL Bank, KDY Cash; SA, ACC, BA, VW, CSH, GACC). Today 2026-12-10.

@@ -9,9 +9,10 @@ This story adds **one read-only report**, "Bank reconciliation status", with one
 
 - **It posts nothing and writes nothing.** No `LedgerService` call. It never writes `ledger_entries`, `accounts.current_balance`, `bank_reconciliation_marks`, `bank_statements`, `bank_statement_checks` or settings. The only row it writes is `report.exported` on an export.
 - **It depends on AG-033d (PR #28) and AG-033c (PR #27).** It reads the check status of AG-033d. It merges after both.
-- **No duplicate of the AG-033c line.** The S6 coverage sentence stays exactly as it is (wording, exports, AC 20). S6 gets one link next to it, "Status per account", that opens this report. Both use the same in-scope rule (R3), so on the same day the accounts S6 names are exactly the accounts this report shows as Due or Overdue (AC 14).
+- **No duplicate of the AG-033c line.** The S6 coverage sentence keeps its wording and exports. S6 gets one link next to it, "Status per account", that opens this report. Both use the same in-scope rule (R3), so on the same day the accounts S6 names are exactly the accounts this report shows as Due or Overdue (AC 14).
+- **One rule change on S6 (Accounting review finding 1).** A closed account with a nil balance is no longer dropped until its final month is reconciled. AG-033c R9 and R3 here change together in this story (S6 section below, AC 21).
 
-**In scope:** the new report (screen, API, PDF and Excel export), a Reports hub card, the S6 link, and a fixed grace period of 10 days.
+**In scope:** the new report (screen, API, PDF and Excel export), a Reports hub card, the S6 link, the closed-account change to the AG-033c R9 in-scope rule (finding 1), and a fixed grace period of 10 days.
 
 **Out of scope, and why:**
 - **Configurable grace days.** The grace period is a constant in this story (Q1). A Settings field means a new setting key, validation, a `settings.updated` audit and tests. It can follow in a later story without changing anything here.
@@ -75,6 +76,7 @@ Hub card, right after "Bank reconciliation statements":
 **Above the table:**
 - **Basis line:** "As at 15 Dec 2026. A month's bank reconciliation is due within 10 days after month-end. Overdue counts the month-ends after the last completed statement, up to 30 Nov 2026. Undone statements do not count."
 - **Summary line:** "Overdue N · Due N · Up to date N · Not required N". It counts every row in the branch scope. The Status filter does not change it.
+- **Check line** (Accounting review finding 3): "Latest statement not checked N · Re-check needed N", counted over the same rows (latest completed statement only, R7), shown in amber when either is above 0. The Status filter does not change it.
 - **Export buttons:** shown only when `auth.can('report.export')`.
 
 **Table** (desktop; the sort order is in R6; no paging):
@@ -83,7 +85,7 @@ Hub card, right after "Bank reconciliation statements":
 |---|---|
 | Branch | Branch code. All mode only |
 | Account | "KDY Bank (11002)", plus "(inactive)" when `status = closed` (the S6 label) |
-| Status | Tags:<br>- red "Overdue N month(s)";<br>- red "Never reconciled · overdue N month(s)";<br>- amber "Due by 10 Dec 2026", or "Never reconciled · due by 10 Dec 2026";<br>- green "Up to date";<br>- grey "Not required: no entries up to 30 Nov 2026" or "Not required: inactive, nil balance at 30 Nov 2026" |
+| Status | Tags:<br>- red "Overdue N month(s)";<br>- red "Never reconciled · overdue N month(s)";<br>- amber "Due by 10 Dec 2026", or "Never reconciled · due by 10 Dec 2026";<br>- green "Up to date";<br>- grey "Not required: no entries up to 30 Nov 2026" or "Not required: inactive, nil balance, reconciled to its last month (30 Jun 2026)" (the date is F, R2) |
 | Months overdue | A number. 0 is shown as "0". Blank when the status is Not required |
 | Last reconciled | The statement date of the latest completed statement, in the date-format setting, with a second line "by <name + controls R10 tag>". "Never" when there is none |
 | Last check | For the latest completed statement (AG-033d texts):<br>- green "Checked by VW, 2026-12-10";<br>- amber "Re-check needed (N since check)";<br>- amber "Not checked";<br>- blank when there is no completed statement |
@@ -106,7 +108,9 @@ Hub card, right after "Bank reconciliation statements":
 - Export buttons are full width. There is no horizontal page scroll at 360px or 390px.
 
 ### S6 Bank reconciliation statements (AG-033c, one change)
-After the coverage sentence, add the link "Status per account". It goes to `/reports/reconciliation-status` and carries the current `branches` in All mode. It is shown whether or not the sentence names any account. Nothing else on S6 changes, and S6 exports are unchanged.
+After the coverage sentence, add the link "Status per account". It goes to `/reports/reconciliation-status` and carries the current `branches` in All mode. It is shown whether or not the sentence names any account.
+
+**AG-033c R9 in-scope rule (Accounting review finding 1).** `BankReconciliation::coverage` uses the R3 rule below with `reconciled_to` as the cut-off: an account that is not active and has a 0.00 book balance at the cut-off is left out only when its latest completed statement is on or after F (the month-end of its last line dated on or before the cut-off). Otherwise it is named as today. The sentence wording and the S6 exports are unchanged. AG-033c AC 20's last case changes: the new inactive account with lines and no statement is now named "never reconciled" until a statement to the month-end of its last line is completed; update `test_ac20_coverage_line`. A note under AG-033c R9 records the amendment.
 
 ## 5. API
 **New:** `GET /v1/reports/reconciliation-status`
@@ -129,12 +133,14 @@ Response 200:
   as_at: 'Y-m-d', grace_days: 10,
   due_month_end: 'Y-m-d',        // L, R2
   overdue_through: 'Y-m-d',      // E, R2
-  summary: { overdue, due, up_to_date, not_required },   // whole scope, ignores `status`
+  summary: { overdue, due, up_to_date, not_required,
+             not_checked, recheck },                // whole scope, ignores `status`; check counts per R7
   data: [{ account:{id,code,name,status}, branch:{id,code},
            status: 'overdue'|'due'|'up_to_date'|'not_required',
            not_required_reason: 'no_entries'|'closed_nil'|null,
            never_reconciled: bool,
            months_overdue: int|null,          // null when not_required
+           final_month_end: 'Y-m-d'|null,     // F (R2), only when status = closed
            due_by: 'Y-m-d'|null,              // only when status = due
            last_statement: { id, statement_date, completed_by:{id,name,tag}, completed_at } | null,
            check_status: 'checked'|'recheck'|'not_checked'|null,
@@ -155,7 +161,7 @@ Errors:
 - `ReportExporter` gains the title "Bank reconciliation status". The export is always synchronous: add the name to the existing `in_array($name, ['cash-flow', 'bank-reconciliation', 'reconciliation-statements'])` exclusion, because there is one row per bank account.
 - **PDF:** blade `reports.pdf.reconciliation-status`, landscape, with the S7 columns except the actions.
 - **Excel:** one sheet with the columns Branch, Account code, Account, Account status, Status (the S7 tag text), Months overdue (number), Due by (date cell), Last statement date (date cell), Last completed by, Check status (Checked / Re-check needed / Not checked / blank), Checked by, Checked at (date-time cell), Re-check needed (Yes/No).
-- **Header** (PDF and Excel): the reports header (company, title, branches, period "As at <as_at>", printed by/at), the basis line, the summary line and "Filters: Status: <label>". There is no "Amounts in LKR" line and no PROVISIONAL marker.
+- **Header** (PDF and Excel): the reports header (company, title, branches, period "As at <as_at>", printed by/at), the basis line, the summary line, the check line and "Filters: Status: <label>". There is no "Amounts in LKR" line and no PROVISIONAL marker.
 - Free text (account names, user names) goes through the existing Excel formula-injection prefix.
 - File name: `reconciliation-status_<as_at>.<ext>`.
 - Audit `report.exported` (name, format, rows), as for the other reports.
@@ -179,18 +185,20 @@ Errors:
     - T = 2026-12-10 gives E = 2026-10-31.
     - T = 2026-12-11 gives E = 2026-11-30.
   - **due_by** = L + G days.
+  - **F (final month-end)**, for an account with `status = closed` only: the month-end on or after its last `ledger_entries` line dated on or before L (voided lines and contras included). F ≤ L always. It is null for other accounts.
 - **R3 In scope (the same rule as AG-033c R9, cut-off L).** Every `type = bank` account in the branch set is a row, whatever its status. A row is **required** when it has at least one `ledger_entries` line dated on or before L (`whereDate`), and it is either `active` or has a non-zero book balance at L (`bookCents`). Otherwise the row is `not_required`:
   - `no_entries`: no line dated on or before L. This covers a new account with no opening funds yet, and an account whose first entry is after L.
-  - `closed_nil`: `status = closed` and the book balance at L is 0.00.
+  - `closed_nil`: `status = closed`, the book balance at L is 0.00, **and** the latest completed statement is on or after F (the final month is reconciled; Accounting review finding 1). A closed nil-balance account whose final month is not reconciled stays required, so the movements that emptied it are agreed to the bank before it leaves the report and S6.
   - An account with entries but no recent activity is still required. The bank still issues a statement, and charges or interest may be on it.
 - **R4 Months overdue (required rows).**
   - `last` = the latest `completed` statement date of the account (`lastReconciledDates`). Undone statements never count.
   - `start` = `last`, or, when the account was never reconciled, the day before its first ledger line (`MIN(entry_date)`, voided lines included).
-  - `months_overdue` = the number of month-ends M with `start` < M ≤ E. It is 0 when E ≤ `start`.
+  - `stop` = E, or for a closed account with a 0.00 book balance at L, the earlier of E and F (no month after the final one is expected).
+  - `months_overdue` = the number of month-ends M with `start` < M ≤ `stop`. It is 0 when `stop` ≤ `start`.
   - A statement dated mid-month covers only the month-ends up to its date. For example, `last` 2026-09-15 with E 2026-11-30 gives 3 (30 Sep, 31 Oct, 30 Nov).
 - **R5 Status** (first match wins):
   1. `not_required` (R3);
-  2. `up_to_date` when `last` ≥ L;
+  2. `up_to_date` when `last` ≥ L (a closed nil-balance row with `last` ≥ F is already `not_required`);
   3. `overdue` when `months_overdue` ≥ 1;
   4. `due` otherwise, with `due_by` set.
 
@@ -207,13 +215,13 @@ Errors:
 - **R8 Volume.** The report has one row per bank account (about 5 per branch), so there is no paging and no cap. It runs a fixed number of queries whatever the number of accounts:
   - bank accounts;
   - last completed statement per account;
-  - first line date and book balance at L per account (one grouped query);
+  - first line date, last line date on or before L, and book balance at L per account (one grouped query);
   - statements with their checks.
 
   The PDF cap (`PDF_EXPORT_CAP`, 1,000) applies as for other reports.
 - **R9 Read only, no audit on view.** Viewing writes nothing. An export writes only `report.exported`. Nothing is posted, so `ledger:verify` is unaffected.
 - **R10 Edge cases.**
-  - **Closed account with a balance at L** (it was emptied and closed after L): required until a statement on or after L is completed.
+  - **Closed account with a balance at L** (it was emptied and closed after L; closing needs a zero balance, `AccountController` "Only accounts with a zero balance can be closed."): required at this L like an active account. From the next month-end its balance is 0.00, and it stays required until it is reconciled to F, the month in which it was emptied (R3).
   - **Closed account reopened** (`status` back to active): it is required again under R3.
   - **Latest statement undone:** `last` falls back to the previous completed statement. The row can turn from Up to date to Overdue. The Last check shows that earlier statement's check.
   - **Statement completed after the month was locked** (AG-033 Q3): it counts normally. Locks never hide anything here.
@@ -229,8 +237,8 @@ Errors:
 - MAIN Main Account: only line is a capital line dated 2026-08-01; no statement.
 - KDY Bank 2 (11003): first line 2026-11-05; no statement.
 - KDY Bank 3 (11004): active; no lines.
-- KDY Bank 4 (11005): lines in June 2026, nil balance since 2026-06-30, statement 2026-06-30 completed, `status = closed`.
-- KDY Bank 5 (11006): active, with lines; last completed statement 2026-09-15, completed by ACC.
+- KDY Bank 4 (11005): lines in June 2026, nil balance since 2026-06-30, statement 2026-06-30 completed and checked by VW, `status = closed`.
+- KDY Bank 5 (11006): active, with lines; last completed statement 2026-09-15, completed by ACC, not checked.
 - KDY Cash: no change (a cash account).
 - Users: ACC (Accountant KDY), VW (Viewer KDY), CSH (Cashier KDY), BA (Branch Admin KDY), GACC (Accountant GAL), SA.
 
@@ -241,13 +249,13 @@ Errors:
    - KDY Bank 3: not_required, `no_entries`;
    - KDY Bank 4: not_required, `closed_nil`.
 
-   KDY Cash, GAL Bank and MAIN Main Account are not listed. The summary reads "Overdue 2 · Due 0 · Up to date 1 · Not required 2".
+   KDY Cash, GAL Bank and MAIN Main Account are not listed. The summary reads "Overdue 2 · Due 0 · Up to date 1 · Not required 2". The check line reads "Latest statement not checked 2 · Re-check needed 0" (KDY Bank ST3 and KDY Bank 5's statement of 2026-09-15; KDY Bank 4's statement of 2026-06-30 is checked by VW in the setup, so not_required rows add nothing here).
 2. Given AC 1, then the screen shows:
    - KDY Bank 5: "Overdue 3 months", Last reconciled "15 Sep 2026";
    - KDY Bank 2: "Never reconciled · overdue 1 month", Last reconciled "Never", Last check blank;
    - KDY Bank: "Up to date", Last reconciled "30 Nov 2026" by BA, Last check "Not checked";
    - KDY Bank 3: "Not required: no entries up to 30 Nov 2026";
-   - KDY Bank 4: "KDY Bank 4 (11005) (inactive)" with "Not required: inactive, nil balance at 30 Nov 2026" and a blank Months overdue.
+   - KDY Bank 4: "KDY Bank 4 (11005) (inactive)" with "Not required: inactive, nil balance, reconciled to its last month (30 Jun 2026)" and a blank Months overdue.
 3. Given `BusinessDate` 2026-12-10 (E = 2026-10-31), then:
    - in All mode for SA, GAL Bank is due with `due_by` 2026-12-10 and the tag "Due by 10 Dec 2026";
    - for ACC, KDY Bank 2 is due ("Never reconciled · due by 10 Dec 2026", months 0) and KDY Bank 5 is overdue 2.
@@ -282,6 +290,12 @@ Errors:
     - the summary and the tags wrap.
 19. Given VW in KDY switches to GAL, where VW has `report.view`, then the report reloads with GAL accounts. Given a branch where VW has no `report.view`, then the app leaves `/reports`.
 20. Given a schedule create request with report `reconciliation-status`, then the existing validation refuses it (the report is not in `ReportSchedule::REPORTS`).
+21. (Accounting review finding 1) Given KDY Bank 6 (11007): last completed statement 2026-10-31; on 2026-11-20 its whole balance is transferred to KDY Bank and the account is closed (`status = closed`, 0.00). Then:
+    - on 2026-12-15 it is overdue 1 (November), `final_month_end` 2026-11-30, and S6's default coverage sentence names it ("last statement 31 Oct 2026");
+    - on 2026-12-05 it is "Due by 10 Dec 2026";
+    - after a statement dated 2026-11-30 (balance 0.00) is completed, it is not_required `closed_nil` with "reconciled to its last month (30 Nov 2026)", and S6 no longer names it; on 2027-02-15 it is still not_required;
+    - if that statement is then undone, on 2027-01-15 it is overdue 1, not 2 (November only, because `stop` = F = 2026-11-30).
+    Given the same account but emptied on 2026-12-03 instead (balance at 2026-11-30 non-zero), then on 2026-12-15 it is required as an active account would be, and on 2027-01-15 (L = 2026-12-31, balance 0.00, F = 2026-12-31) it is still required until reconciled to 2026-12-31.
 
 ## 8. Open questions (assumption in bold; work proceeds on it)
 - **Q1 (product owner)** Should the grace days be configurable? **No, not in this story. The grace period is a fixed 10 days, `BankReconciliation::RECONCILE_GRACE_DAYS`, shown in the basis line.** It could later be a company-wide Settings field (Super Admin, 0 to 31, audited by `settings.updated`) that changes only G.
@@ -289,9 +303,39 @@ Errors:
 - **Q3 (product owner)** Should there be a dashboard tile ("Bank reconciliations overdue: N")? **Out. It is the natural next story, as a count from R5 that links to S7, for holders of `report.dashboard` + `report.view`.**
 - **Q4 (product owner)** Should there be a bell reminder when an account becomes overdue? **Out. It needs a daily command, recipients (holders of `account.reconcile` in the branch?) and dedupe per account and month.**
 - **Q5 (product owner)** Should this report be added to scheduled reports (for example a monthly email on the 11th)? **Out. `ReportSchedule::REPORTS` is unchanged (AC 20).**
-- **Q6 (accountant)** Must a closed account with a nil balance at L still have its final month (the month it was emptied) reconciled? **This story reuses the AG-033c R9 rule (`closed_nil` is not required), so S6 and S7 never disagree.** If the accountant wants the closing month required, R3 and S6 R9 must change together in one story.
+- **Q6 (accountant, decided)** Must a closed account with a nil balance at L still have its final month (the month it was emptied) reconciled? ~~This story reuses the AG-033c R9 rule.~~ **Accountant: yes. R3 and AG-033c R9 change together in this story (Accounting review finding 1, AC 21).**
 - **Q7 (product owner)** Who is the "owner" of an account? **There is no owner field. The branch owns the account, and the row shows the branch and the user who completed the last statement.** A responsible-person field on accounts is out of scope.
 - **Q8** In All mode, can "Reconcile" open S1 for a branch account? **No. S1 is a branch-mode screen, so the link is shown only for MAIN accounts in All mode. The Super Admin switches to the branch to reconcile.** "Statements" works in every mode.
 - **Q9 (product owner)** A backlog row is needed. **The product owner adds AG-033e to the backlog sheet. This spec does not edit the xlsx.**
-- **Q10 (accountant)** On the last day of a month, every account becomes "Due" for that same day. **Accepted, to match S6's coverage cut-off for To = today.** The alternative (L = the last month-end strictly before today) would make S6 and S7 differ on that one day.
+- **Q10 (accountant, decided: accepted)** On the last day of a month, every account becomes "Due" for that same day. **Accepted, to match S6's coverage cut-off for To = today.** The alternative (L = the last month-end strictly before today) would make S6 and S7 differ on that one day.
 - **Q11 (product owner)** The account status is `closed`, but S6 labels it "(inactive)". **S7 uses "(inactive)" too, so the two screens match.** Renaming the label on both screens is a separate change.
+
+## Accounting review
+Reviewed against CLAUDE.md, `reconciliation-statements-list.md` (R9, AC 20, sign-off and accepted risks), `reconciliation-checked-by.md` (D2, R4, R5), `bank-reconciliation.md`, `controls.md` (R10), `PermissionSeeder::TEMPLATES`, and the code on 3e67b55: `BankReconciliation::reconciledTo`, `coverage`, `lastReconciledDates`, `ReconciliationChecks::statusMap`, `lateSinceMap`, and the zero-balance rule for closing an account (`AccountController`, "Only accounts with a zero balance can be closed."). The report posts nothing, has no money fields and adds no permission. Double entry, balances, period locks, inter-branch elimination and report totals are not affected.
+
+**Verdict: approved for development, subject to MUST finding 1. The text for all findings is already folded into the body (section 1, S7, S6, section 5, R2, R3, R4, R5, R8, R10, AC setup, AC 1, 2, 21, Q6, Q10).**
+
+### Answers to the BA's questions
+- **Q6: yes, the final month must be reconciled.** The month in which a bank account is emptied and closed is the month with the most risk: the closing transfer or cheque, the last bank charges and interest, and any amounts still in transit. If the account drops out when its book balance reaches 0.00, then someone can move the balance out, close the account, and the movements of that last month (and of any earlier unreconciled months) are never agreed to the bank. Under the current AG-033c R9 rule this already happens a month after closing: an account emptied in December and closed is, on 15 January (L = 31 Dec, nil, closed), "not required", although December was never reconciled. The rule is now: a closed nil-balance account leaves the report and S6 only once its latest completed statement is on or after F, the month-end of its last line. S6 and S7 change together, so they never disagree (finding 1).
+- **Q10: acceptable.** On the last day of a month the statement for that day cannot exist yet, so "Due by 10 <next month>" is the honest answer. It is amber (information), not red, it does not count as overdue, and it matches S6's coverage sentence on that day. No change.
+
+### Other points checked
+- **Grace period, 10 days fixed: fine.** Bank statements and internet banking extracts are available within the first few working days in Sri Lanka, and 10 calendar days fits a normal month-end close. A constant shown in the basis line is better than a setting nobody audits. Configurable grace (Q1) can follow.
+- **Months-overdue counting: correct.** Counting month-ends after the latest completed statement up to E gives the number of unreconciled month-ends. A mid-month statement covers only up to its date (R4 example). Undone statements never count. For a never-reconciled account, starting the day before the first line means the month of the first line is the first one due, which is right. Counting from the latest statement only is acceptable: a bank reconciliation agrees the cumulative balance, so a reconciliation to 30 Nov also covers an earlier skipped month (AG-033c accepted risk 2 still stands for evidence per month).
+- **Account cases: fine apart from finding 1.** New with no lines: not required, but still listed as a grey row, so it is visible. Dormant with entries: required, correct, because the bank still charges and credits interest and an inactive account is where an unnoticed movement sits. Reopened: required again, counted from its last statement; "overdue 5 months" for KDY Bank 4 overstates the work (one reconciliation to 30 Nov clears it), but reopening a closed bank account is an event a reviewer should see, so accepted. Closed with a balance at L: required (R10 text clarified). Never reconciled: correctly red once the first month-end passes the grace period. MAIN Main Account "never reconciled" in All mode is the intended control (AG-033c accepted risk 1).
+- **Match with AG-033c R9: yes, with the finding 1 change applied to both.** E, L and the in-scope rule are the same as S6's coverage for To = today, and AC 14 tests it on three days in both modes.
+- **AG-033d check status: correct use.** The check is the compensating control for self-reconciliation, so it is right to show it next to the status and not to fold it into the status (an unchecked statement is still a reconciliation). Using the latest completed statement only is acceptable, because a check of the latest statement covers the cumulative balance and S6 keeps the "Checked = Not checked" filter for older statements. The summary should also count them (finding 3).
+- **Permissions: fine.** `report.view` to see it and `report.view` + `report.export` to export, the same as S6, so no row link gives a 403. The report shows no amounts. Viewer sees and follows up through S6 (where it can record the check), Cashier has no access, and "Reconcile" needs `account.reconcile`. No template change.
+- **Out of scope: fine.** Quarterly frequency, configurable grace, past "as at" date (the export is the dated evidence), wallet and cash accounts, and the responsible-person field can all wait. See finding 4 on reminders.
+
+### Findings
+1. **MUST - A closed account with a nil balance stays required until its final month is reconciled (R3, AG-033c R9, Q6).**
+   - Rule: `closed_nil` (not required) needs `status = closed`, a 0.00 book balance at L, **and** a latest completed statement on or after F, where F = the month-end on or after the account's last line dated on or before L. Until then the row is required, and `months_overdue` counts month-ends up to the earlier of E and F.
+   - The same rule applies in `BankReconciliation::coverage` (S6), so AC 14 still holds. AG-033c AC 20's last case and `test_ac20_coverage_line` change accordingly.
+   - F comes from the same grouped query as the first line date and the balance (R8), so the query count does not grow.
+   - Acceptance criteria: AC 21, AC 2 (KDY Bank 4 text), AC 14.
+2. **SHOULD - Clarify the "closed with a balance at L" case (R10).** Closing needs a zero balance, so this is only an account emptied and closed after L. The old text ("until a statement on or after L") would have let it drop out the next month. The R10 text now points to R3 and F. AC 21 second part.
+3. **SHOULD - Count unchecked latest statements in the summary.** Add the check line "Latest statement not checked N · Re-check needed N" (screen, PDF, Excel, `summary.not_checked`, `summary.recheck`), so a checker sees at a glance how much is waiting. Status is still not changed by the check. AC 1.
+4. **SHOULD (product owner) - A reminder is the next story.** A report is a detective control only if someone opens it. I recommend the bell reminder (Q4) or the monthly email on the 11th (Q5) next, to holders of `account.reconcile` and of `account.reconcile_check` in the branch, deduplicated per account and month. Not blocking for this story.
+
+Fine as specified: read only with `report.exported` as the only write (R9, AC 16), branch isolation (R1), the sort order, the batched check status (R7, AC 17), the export header without "Amounts in LKR" or PROVISIONAL, and the formula-injection prefix.
