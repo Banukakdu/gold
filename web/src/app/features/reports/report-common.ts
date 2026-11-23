@@ -241,6 +241,8 @@ export class ExportButtonsComponent {
   }
 
   async download(format: 'pdf' | 'xlsx') {
+    // QA D4: a double click must not send a second export (the disabled state lands only after change detection).
+    if (this.busy()) return;
     this.busy.set(format);
     this.error.set('');
     this.queued.set(null);

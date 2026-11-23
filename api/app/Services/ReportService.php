@@ -46,12 +46,24 @@ class ReportService
      */
     private static ?bool $receiptColumns = null;
 
+    /** AG-033c R6: `attachments.bank_statement_id` exists (AG-033b merged). Cached and forgotten like $receiptColumns. */
+    private static ?bool $statementCopies = null;
+
     public static function forgetSchemaCache(): void
     {
         self::$receiptColumns = null;
+        self::$statementCopies = null;
     }
 
-    public const NAMES = ['income-expense', 'branch-comparison', 'transfers', 'cash-book', 'trial-balance', 'cash-flow', 'bank-reconciliation'];
+    public static function statementCopiesSupported(): bool
+    {
+        // Per process: a queue worker would keep the old answer after the AG-033b migration until `queue:restart`
+        // (today this list is never queued).
+        return self::$statementCopies ??= Schema::hasColumn('attachments', 'bank_statement_id');
+    }
+
+    public const NAMES = ['income-expense', 'branch-comparison', 'transfers', 'cash-book', 'trial-balance', 'cash-flow', 'bank-reconciliation',
+        'reconciliation-statements'];
 
     /** Excel export and cash book screen cap (detail rows). */
     public const EXPORT_CAP = 5000;

@@ -207,10 +207,75 @@ class BankReconciliation
             ->pluck('s.id')->mapWithKeys(fn ($id) => [(int) $id => true])->all();
     }
 
-    /** R8 for a completed statement; an undone statement is superseded and never flagged. */
-    private function changedFast(BankStatement $s, array $late): bool
+    /** R8 for a completed statement; an undone statement is superseded and never flagged. $now: figures at S, if known. */
+    private function changedFast(BankStatement $s, array $late, ?array $now = null): bool
     {
-        return $s->status === BankStatement::COMPLETED && isset($late[$s->id]) && $this->changed($s);
+        return self::mayHaveChanged($s, $late) && $this->changed($s, $now);
+    }
+
+    /** Only a completed statement with a late line can have changed (withLateLines). */
+    private static function mayHaveChanged(BankStatement $s, array $late): bool
+    {
+        return $s->status === BankStatement::COMPLETED && isset($late[$s->id]);
+    }
+
+    /**
+     * AG-033c review SHOULD 3: changedFast() for many statements, with the figures of each account worked out for all
+     * its statement dates at once (figuresAt), not four queries per statement.
+     *
+     * @param  Collection<int, BankStatement>  $statements
+     * @param  array<int, true>  $late  statements with late lines
+     * @return array<int, bool> statement id => changed since completion
+     */
+    public function changedMap(Collection $statements, array $late): array
+    {
+        $out = [];
+        $candidates = $statements->filter(fn (BankStatement $s) => self::mayHaveChanged($s, $late));
+        foreach ($candidates->groupBy('account_id') as $accountId => $group) {
+            $figures = $this->figuresAt((int) $accountId, $group->map(fn (BankStatement $s) => $s->statement_date->format('Y-m-d'))->unique()->values()->all());
+            foreach ($group as $s) {
+                $out[$s->id] = $this->changedFast($s, $late, $figures[$s->statement_date->format('Y-m-d')]);
+            }
+        }
+
+        return $out;
+    }
+
+    /** Dates per figuresAt() query (four sums per date; keeps the select list and the bindings small). */
+    private const FIGURES_CHUNK = 50;
+
+    /**
+     * The R3 figures of figures() (book, uncleared receipts / payments, cleared booked later) at several dates of one
+     * account, one query per FIGURES_CHUNK dates. The lines are joined to their active mark (at most one per line),
+     * so each sum is the figures() query with the date as a condition.
+     *
+     * @param  string[]  $dates  Y-m-d
+     * @return array<string, array{book: int, uncleared_receipts: int, uncleared_payments: int, cleared_booked_later: int}>
+     */
+    public function figuresAt(int $accountId, array $dates): array
+    {
+        $out = [];
+        $dr = $this->dr();
+        $cr = $this->cr();
+        foreach (array_chunk(array_values(array_unique($dates)), self::FIGURES_CHUNK) as $chunk) {
+            $q = DB::table('ledger_entries as le')->join('transactions as t', 't.id', '=', 'le.transaction_id')
+                ->leftJoin('bank_reconciliation_marks as m', fn ($j) => $j->on('m.ledger_entry_id', '=', 'le.id')->whereNull('m.unmarked_at'))
+                ->where('le.account_id', $accountId);
+            $uncleared = "DATE(le.entry_date) <= ? AND t.status <> 'void' AND (m.id IS NULL OR DATE(m.cleared_date) > ?)";
+            foreach ($chunk as $i => $d) {
+                $q->selectRaw("COALESCE(SUM(CASE WHEN DATE(le.entry_date) <= ? THEN {$dr} - {$cr} ELSE 0 END), 0) as b{$i}", [$d])
+                    ->selectRaw("COALESCE(SUM(CASE WHEN {$uncleared} THEN {$dr} ELSE 0 END), 0) as ur{$i}", [$d, $d])
+                    ->selectRaw("COALESCE(SUM(CASE WHEN {$uncleared} THEN {$cr} ELSE 0 END), 0) as up{$i}", [$d, $d])
+                    ->selectRaw("COALESCE(SUM(CASE WHEN DATE(le.entry_date) > ? AND m.id IS NOT NULL AND m.account_id = le.account_id AND DATE(m.cleared_date) <= ? THEN {$dr} - {$cr} ELSE 0 END), 0) as cl{$i}", [$d, $d]);
+            }
+            $r = (array) $q->first();
+            foreach ($chunk as $i => $d) {
+                $out[$d] = ['book' => (int) $r["b{$i}"], 'uncleared_receipts' => (int) $r["ur{$i}"], 'uncleared_payments' => (int) $r["up{$i}"],
+                    'cleared_booked_later' => (int) $r["cl{$i}"]];
+            }
+        }
+
+        return $out;
     }
 
     /** The late entries of a statement for the reprint: ref, date, amount, recorded by/at, or voided by/at. */
@@ -849,6 +914,320 @@ class BankReconciliation
     {
         return (int) array_sum(array_map(fn ($a) => count($a['rows']) + count($a['cleared_booked_later_rows']), $d['accounts']))
             + count($d['statement']['late_entries'] ?? []);
+    }
+
+    // ------------------------------------------------------------------ AG-033c S6 statements list
+
+    /** R4: at most this many statements may match the SQL filters; more is a refusal, never a silent cut. */
+    public const LIST_CAP = 2000;
+
+    public const LIST_TOO_MANY = 'Too many statements match: narrow the filters (at most 2,000).';
+
+    public const LIST_BASIS = 'Completed and undone bank reconciliation statements by statement date. Figures as stored at completion; '
+        ."'Changed since completion' and late entries are worked out now.";
+
+    public const COPIES_UNAVAILABLE = 'Bank statement copies are not available yet.';
+
+    /** The filter labels of the screen and the exports (accounting review finding 4). */
+    public const LIST_FILTER_LABELS = [
+        'status' => ['all' => 'All', 'completed' => 'Completed', 'undone' => 'Undone'],
+        'changed' => ['any' => 'All', 'yes' => 'Yes', 'no' => 'No'],
+        'late' => ['any' => 'All', 'some' => 'Some', 'none' => 'None'],
+        'copy' => ['any' => 'All', 'attached' => 'Attached', 'none' => 'None'],
+    ];
+
+    /**
+     * Validate the S6 filters (section 5); branches as reports R1, accounts must be bank accounts in that set. $paging
+     * false (the exports): page and per_page are not accepted and not kept, so the export audit has no paging.
+     */
+    public function statementListParams(array $input, bool $paging = true): ReportParams
+    {
+        if (! $paging) {
+            unset($input['page'], $input['per_page']);
+        }
+        $d = validator($input, [
+            'branches' => 'nullable|array',
+            'branches.*' => 'integer|distinct',
+            'account_ids' => 'nullable|array',
+            'account_ids.*' => 'integer|distinct',
+            'from' => 'nullable|date_format:Y-m-d',
+            'to' => 'nullable|date_format:Y-m-d',
+            'status' => 'nullable|in:all,completed,undone',
+            'changed' => 'nullable|in:any,yes,no',
+            'late' => 'nullable|in:any,some,none',
+            'copy' => 'nullable|in:any,attached,none',
+            'page' => 'nullable|integer|min:1',
+            'per_page' => 'nullable|integer|min:1|max:100',
+        ])->validate();
+        $today = BusinessDate::today();
+        $to = $d['to'] ?? $today;
+        $from = $d['from'] ?? CarbonImmutable::parse($today)->subMonthsNoOverflow(12)->format('Y-m-d');
+        if ($to > $today) {
+            throw ValidationException::withMessages(['to' => 'The To date cannot be in the future.']);
+        }
+        if ($from > $to) {
+            throw ValidationException::withMessages(['from' => 'From must be on or before To.']);
+        }
+        $copy = $d['copy'] ?? 'any';
+        if ($copy !== 'any' && ! ReportService::statementCopiesSupported()) {
+            throw ValidationException::withMessages(['copy' => self::COPIES_UNAVAILABLE]);
+        }
+        [$branches, $all, $subset] = app(ReportService::class)->branchScope(array_map('intval', $d['branches'] ?? []));
+        $accountIds = array_map('intval', $d['account_ids'] ?? []);
+        if ($accountIds) {
+            $ok = DB::table('accounts')->where('type', 'bank')->whereIn('id', $accountIds)->whereIn('branch_id', $branches->pluck('id'))->count();
+            if ($ok !== count($accountIds)) {
+                throw ValidationException::withMessages(['account_ids' => 'Unknown bank account.']);
+            }
+        }
+
+        return new ReportParams($from, $to, $branches, $all, $subset, [
+            'account_ids' => $accountIds,
+            'status' => $d['status'] ?? 'all',
+            'changed' => $d['changed'] ?? 'any',
+            'late' => $d['late'] ?? 'any',
+            'copy' => $copy,
+        ] + ($paging ? ['page' => (int) ($d['page'] ?? 1), 'per_page' => (int) ($d['per_page'] ?? 50)] : []));
+    }
+
+    /**
+     * S6 data (section 5). Read only. $paged false: every matching row (the exports). The SQL filters (branch, account,
+     * statement date, status, copy) are capped at LIST_CAP before the computed ones (changed, late), so the same SQL
+     * filters always give the same answer (R4).
+     */
+    public function statementList(ReportParams $p, bool $paged = true): array
+    {
+        $x = $p->extra;
+        $copies = ReportService::statementCopiesSupported();
+        $ctx = app(BranchContext::class);
+        // R1: the branch scope in branch mode; in All mode the set resolved by branchScope(), filtered explicitly.
+        $q = ($ctx->isScoped() ? BankStatement::query() : BankStatement::withoutGlobalScopes())
+            ->whereIn('bank_statements.branch_id', $p->branchIds())
+            ->when($x['account_ids'], fn ($q, $ids) => $q->whereIn('bank_statements.account_id', $ids))
+            ->whereDate('bank_statements.statement_date', '>=', $p->from)
+            ->whereDate('bank_statements.statement_date', '<=', $p->to)
+            ->when($x['status'] !== 'all', fn ($q) => $q->where('bank_statements.status', $x['status']));
+        if ($copies && $x['copy'] !== 'any') {
+            $active = fn ($s) => $s->selectRaw('1')->from('attachments as att')->whereColumn('att.bank_statement_id', 'bank_statements.id')->whereNull('att.removed_at');
+            $x['copy'] === 'attached'
+                ? $q->whereExists($active)
+                : $q->where('bank_statements.status', BankStatement::COMPLETED)->whereNotExists($active);
+        }
+        if ((clone $q)->count() > self::LIST_CAP) {
+            self::fail(self::LIST_TOO_MANY);
+        }
+        $statements = $q->with(['account:id,code,name,status,branch_id', 'branch:id,code,name,is_main'])->get();
+
+        // R3: late lines of every completed statement in one grouped query; `changed` only where there is a late line,
+        // with the figures batched per account (changedMap). Changed = Any: worked out for the page rows only.
+        $late = $this->lateCounts($statements->where('status', BankStatement::COMPLETED));
+        $lateIds = array_map(fn () => true, array_filter($late, fn ($c) => $c['n'] > 0));
+        $changed = $x['changed'] === 'any' ? [] : $this->changedMap($statements, $lateIds);
+        $rows = $statements->filter(function (BankStatement $s) use ($x, $late, $changed) {
+            $completed = $s->status === BankStatement::COMPLETED;
+            $n = $late[$s->id]['n'] ?? 0;
+
+            return match ($x['changed']) {
+                'yes' => $changed[$s->id] ?? false,
+                'no' => ! ($changed[$s->id] ?? false),
+                default => true,
+            } && match ($x['late']) {
+                'some' => $completed && $n > 0,
+                'none' => $completed && $n === 0,
+                default => true,
+            };
+        })->sort(fn (BankStatement $a, BankStatement $b) => [$b->statement_date->format('Y-m-d'), $a->branch->is_main ? 0 : 1, $a->branch->code, (string) $a->account->code]
+            <=> [$a->statement_date->format('Y-m-d'), $b->branch->is_main ? 0 : 1, $b->branch->code, (string) $b->account->code]
+            ?: [$b->completed_at?->getTimestamp(), $b->id] <=> [$a->completed_at?->getTimestamp(), $a->id])->values();
+
+        $total = $rows->count();
+        $page = $paged ? ($x['page'] ?? 1) : 1;
+        $perPage = $paged ? ($x['per_page'] ?? 50) : max(1, $total);
+        $rows = $paged ? $rows->forPage($page, $perPage)->values() : $rows;
+        if ($x['changed'] === 'any') {
+            $changed = $this->changedMap($rows, $lateIds);
+        }
+
+        $files = $copies ? $this->statementFiles($rows->pluck('id')->all()) : [];
+        $people = [];
+        foreach ($rows->groupBy('branch_id') as $branchId => $group) {
+            // R2: the controls R10 tag is per branch.
+            $people[(int) $branchId] = $this->people($group->pluck('completed_by')->merge($group->pluck('undone_by'))->filter()->unique()->values()->all(), (int) $branchId);
+        }
+
+        $data = $rows->map(function (BankStatement $s) use ($late, $changed, $files, $copies, $people) {
+            $completed = $s->status === BankStatement::COMPLETED;
+            $who = $people[(int) $s->branch_id] ?? [];
+
+            return [
+                'id' => $s->id,
+                'branch' => ['id' => $s->branch->id, 'code' => $s->branch->code],
+                'account' => ['id' => $s->account->id, 'code' => $s->account->code, 'name' => $s->account->name, 'status' => $s->account->status],
+                'statement_date' => $s->statement_date->format('Y-m-d'),
+                'statement_balance' => Money::fromCents($s->statement_balance_cents),
+                'lines_count' => $s->lines_count,
+                'self_count' => $s->self_count,
+                'status' => $s->status,
+                'completed_by' => $who[(int) $s->completed_by] ?? null,
+                'completed_at' => $s->completed_at?->toIso8601String(),
+                'undone_by' => $s->undone_by ? ($who[(int) $s->undone_by] ?? null) : null,
+                'undone_at' => $s->undone_at?->toIso8601String(),
+                'undo_reason' => $s->undo_reason,
+                'changed_since_completion' => $changed[$s->id] ?? false,
+                'late_entries_count' => $completed ? ($late[$s->id]['n'] ?? 0) : null,
+                'late_voided_count' => $completed ? ($late[$s->id]['v'] ?? 0) : null,
+                'attachments_count' => $copies ? ($files[$s->id]['active'] ?? 0) : null,
+                'attachments_removed_count' => $copies ? ($files[$s->id]['removed'] ?? 0) : null,
+            ];
+        })->values()->all();
+
+        $accounts = $this->listAccounts($p->branchIds());
+        $coverage = $this->coverage($p, $accounts);
+
+        return array_merge(app(ReportService::class)->meta($p), [
+            'provisional' => false, // the stored figures (finding 4)
+            'basis' => self::LIST_BASIS,
+            'filters' => ['status' => $x['status'], 'changed' => $x['changed'], 'late' => $x['late'], 'copy' => $x['copy'], 'account_ids' => $x['account_ids']],
+            'copies_supported' => $copies,
+            'accounts' => $accounts->map(fn (Account $a) => ['id' => $a->id, 'code' => $a->code, 'name' => $a->name,
+                'branch' => ['id' => $a->branch->id, 'code' => $a->branch->code], 'status' => $a->status,
+                'last_statement_date' => $a->getAttribute('last_statement_date')])->values()->all(),
+            'coverage' => $coverage,
+            'total' => $total,
+            'page' => $page,
+            'per_page' => $perPage,
+            'data' => $data,
+        ]);
+    }
+
+    /**
+     * R3: per completed statement, the lines lateEntries() lists (n) and how many of them are void contras (v), in one
+     * grouped query (the same rule as lateQuery: dated on or before S, line id above max_entry_id).
+     *
+     * @param  Collection<int, BankStatement>  $statements
+     * @return array<int, array{n: int, v: int}>
+     */
+    private function lateCounts(Collection $statements): array
+    {
+        if ($statements->isEmpty()) {
+            return [];
+        }
+
+        return DB::table('bank_statements as s')
+            ->join('ledger_entries as le', fn ($j) => $j->on('le.account_id', '=', 's.account_id')->on('le.id', '>', 's.max_entry_id'))
+            ->whereIn('s.id', $statements->pluck('id')->all())
+            ->whereRaw('DATE(le.entry_date) <= DATE(s.statement_date)')
+            ->groupBy('s.id')
+            ->selectRaw('s.id as sid, COUNT(le.id) as n, SUM(CASE WHEN le.contra_of_id IS NULL THEN 0 ELSE 1 END) as v')
+            ->get()->mapWithKeys(fn ($r) => [(int) $r->sid => ['n' => (int) $r->n, 'v' => (int) $r->v]])->all();
+    }
+
+    /**
+     * R6: active and removed bank statement copies per statement (only when AG-033b's column exists).
+     *
+     * @return array<int, array{active: int, removed: int}>
+     */
+    private function statementFiles(array $ids): array
+    {
+        if (! $ids) {
+            return [];
+        }
+
+        return DB::table('attachments')->whereIn('bank_statement_id', $ids)->groupBy('bank_statement_id')
+            ->selectRaw('bank_statement_id as sid, SUM(CASE WHEN removed_at IS NULL THEN 1 ELSE 0 END) as active, '
+                .'SUM(CASE WHEN removed_at IS NULL THEN 0 ELSE 1 END) as removed')
+            ->get()->mapWithKeys(fn ($r) => [(int) $r->sid => ['active' => (int) $r->active, 'removed' => (int) $r->removed]])->all();
+    }
+
+    /**
+     * Bank accounts of the branch set (inactive included), Main first, then branch code, account code, each with
+     * `last_statement_date` (latest completed statement).
+     *
+     * @param  int[]  $branchIds
+     * @return Collection<int, Account>
+     */
+    private function listAccounts(array $branchIds): Collection
+    {
+        $accounts = Account::withoutGlobalScopes()->with('branch:id,code,is_main')->where('type', 'bank')->whereIn('branch_id', $branchIds)
+            ->get(['id', 'code', 'name', 'status', 'branch_id', 'type'])
+            ->sortBy(fn (Account $a) => [$a->branch->is_main ? 0 : 1, $a->branch->code, (string) $a->code, $a->name])->values();
+        $last = self::lastReconciledDates($accounts->pluck('id')->all());
+        foreach ($accounts as $a) {
+            $a->setAttribute('last_statement_date', $last[$a->id] ?? null);
+        }
+
+        return $accounts;
+    }
+
+    /** R9: the last month-end on or before $to. */
+    public static function reconciledTo(string $to): string
+    {
+        $d = CarbonImmutable::parse($to);
+
+        return $d->isLastOfMonth() ? $d->format('Y-m-d') : $d->startOfMonth()->subDay()->format('Y-m-d');
+    }
+
+    /**
+     * R9 coverage line: bank accounts in the branch set and the Accounts filter, with a line dated on or before the cut-off,
+     * active or with a non-zero book balance there, whose latest completed statement is before the cut-off (or none).
+     * Not affected by from, status, changed, late, copy or paging. Information only.
+     *
+     * @param  Collection<int, Account>  $accounts  listAccounts() of the branch set
+     */
+    private function coverage(ReportParams $p, Collection $accounts): array
+    {
+        $cut = self::reconciledTo($p->to);
+        $ids = $p->extra['account_ids'];
+        $scope = $ids ? $accounts->filter(fn (Account $a) => in_array($a->id, $ids, true))->values() : $accounts;
+        $books = $scope->isEmpty() ? collect() : DB::table('ledger_entries as le')->whereIn('le.account_id', $scope->pluck('id')->all())
+            ->whereDate('le.entry_date', '<=', $cut)->groupBy('le.account_id')
+            ->selectRaw("le.account_id as aid, COALESCE(SUM({$this->dr()} - {$this->cr()}), 0) as c")
+            ->get()->mapWithKeys(fn ($r) => [(int) $r->aid => (int) $r->c]);
+        $out = [];
+        foreach ($scope as $a) {
+            if (! $books->has($a->id) || ($a->status !== 'active' && $books[$a->id] === 0)) {
+                continue;
+            }
+            $last = $a->getAttribute('last_statement_date');
+            if ($last !== null && $last >= $cut) {
+                continue;
+            }
+            $out[] = ['account' => ['id' => $a->id, 'code' => $a->code, 'name' => $a->name, 'status' => $a->status],
+                'branch' => ['id' => $a->branch->id, 'code' => $a->branch->code], 'last_statement_date' => $last];
+        }
+
+        return ['reconciled_to' => $cut, 'not_reconciled' => $out];
+    }
+
+    /** R9 text, as on S6: "Not reconciled to 30 Nov 2026: GAL Bank (12002), last statement 31 Oct 2026; ..." */
+    public static function coverageText(array $coverage): string
+    {
+        $to = self::label($coverage['reconciled_to']);
+        if (! $coverage['not_reconciled']) {
+            return "Every bank account in scope is reconciled to {$to}.";
+        }
+
+        return "Not reconciled to {$to}: ".implode('; ', array_map(fn ($n) => $n['account']['name']
+            .($n['account']['code'] ? " ({$n['account']['code']})" : '')
+            .($n['last_statement_date'] ? ', last statement '.self::label($n['last_statement_date']) : ', never reconciled'), $coverage['not_reconciled'])).'.';
+    }
+
+    /** Accounting review finding 4: the filters used, "All" when not filtered. */
+    public static function listFilterText(array $d): string
+    {
+        $f = $d['filters'];
+        $names = collect($d['accounts'])->keyBy('id');
+        $accounts = $f['account_ids']
+            ? implode(', ', array_map(fn ($id) => isset($names[$id]) ? $names[$id]['branch']['code'].' · '.$names[$id]['name'].($names[$id]['code'] ? " ({$names[$id]['code']})" : '') : "#{$id}", $f['account_ids']))
+            : 'All';
+        $parts = ['Status: '.self::LIST_FILTER_LABELS['status'][$f['status']], 'Changed since completion: '.self::LIST_FILTER_LABELS['changed'][$f['changed']],
+            'Late entries: '.self::LIST_FILTER_LABELS['late'][$f['late']]];
+        if ($d['copies_supported']) {
+            $parts[] = 'Bank statement copy: '.self::LIST_FILTER_LABELS['copy'][$f['copy']];
+        }
+        $parts[] = 'Accounts: '.$accounts;
+
+        return 'Filters: '.implode(' · ', $parts);
     }
 
     // ------------------------------------------------------------------ S4 period lock review
