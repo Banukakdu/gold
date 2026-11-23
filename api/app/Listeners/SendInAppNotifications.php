@@ -5,12 +5,16 @@ namespace App\Listeners;
 use App\Events\ExpenseApprovalDecided;
 use App\Events\ExpenseApprovalRequested;
 use App\Events\ExportFinished;
+use App\Events\ReconciliationCheckCancelled;
+use App\Events\ReconciliationChecked;
+use App\Events\ReconciliationCheckWithdrawn;
 use App\Events\TransferApprovalDecided;
 use App\Events\TransferApprovalRequested;
 use App\Events\TransferReceiptChanged;
 use App\Events\TransferReceiptRequested;
 use App\Models\Account;
 use App\Models\AuditLog;
+use App\Models\BankStatementCheck;
 use App\Models\Branch;
 use App\Models\Export;
 use App\Models\Transaction;
@@ -21,6 +25,7 @@ use App\Notifications\TransferApprovalRequestedMail;
 use App\Services\BackgroundExports;
 use App\Services\ExpenseApprovals;
 use App\Services\InAppNotifications;
+use App\Services\ReconciliationChecks;
 use App\Services\TransferApprovals;
 use App\Services\TransferReceipts;
 use App\Support\Money;
@@ -238,6 +243,49 @@ class SendInAppNotifications
         });
     }
 
+    /** AG-033d R10: the preparer (`completed_by`) learns that the statement was checked (or checked again). */
+    public function handleReconciliationChecked(ReconciliationChecked $event): void
+    {
+        $this->guard(function () use ($event) {
+            $c = $this->check($event->checkId);
+            if (! $c) {
+                return;
+            }
+            $again = $c->getAttribute('superseded_count') > 0;
+            $this->inApp->send(User::whereKey($c->statement->completed_by)->get(), $event->userId, N::RECONCILIATION_CHECKED, $this->checkData($c,
+                $this->statementLabel($c).' was checked'.($again ? ' again' : ''),
+                'Checked by '.$this->name((int) $c->checked_by).' against '.(ReconciliationChecks::COMPARED_LABELS[$c->compared_with] ?? $c->compared_with).'.'));
+        });
+    }
+
+    /** AG-033d R10: the preparer, and the checker when someone else (a Super Admin) withdrew the check. */
+    public function handleReconciliationCheckWithdrawn(ReconciliationCheckWithdrawn $event): void
+    {
+        $this->guard(function () use ($event) {
+            $c = $this->check($event->checkId);
+            if (! $c) {
+                return;
+            }
+            $users = User::whereIn('id', array_unique([(int) $c->statement->completed_by, (int) $c->checked_by]))->orderBy('id')->get();
+            $this->inApp->send($users, $event->userId, N::RECONCILIATION_CHECK_WITHDRAWN, $this->checkData($c,
+                'Check withdrawn on '.$this->statementLabel($c), 'Withdrawn by '.$this->name($c->ended_by ? (int) $c->ended_by : $event->userId).'.'));
+        });
+    }
+
+    /** AG-033d R10: the checker learns that the check no longer applies (the statement was undone). */
+    public function handleReconciliationCheckCancelled(ReconciliationCheckCancelled $event): void
+    {
+        $this->guard(function () use ($event) {
+            $c = $this->check($event->checkId);
+            if (! $c) {
+                return;
+            }
+            $this->inApp->send(User::whereKey($c->checked_by)->get(), $event->userId, N::RECONCILIATION_CHECK_CANCELLED, $this->checkData($c,
+                'Your check of '.trim(($c->account->name ?? '').' '.$this->day($c)).' no longer applies',
+                'The statement was undone by '.$this->name($c->ended_by ? (int) $c->ended_by : $event->userId).'.'));
+        });
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private function guard(callable $fn): void
@@ -247,6 +295,31 @@ class SendInAppNotifications
         } catch (Throwable $e) {
             report($e);
         }
+    }
+
+    private function check(int $id): ?BankStatementCheck
+    {
+        $c = BankStatementCheck::withoutGlobalScopes()->with(['statement', 'account:id,name', 'branch:id,code'])->find($id);
+
+        return $c?->setAttribute('superseded_count', BankStatementCheck::withoutGlobalScopes()->where('superseded_by_id', $id)->count());
+    }
+
+    /** "31 Oct 2026" */
+    private function day(BankStatementCheck $c): string
+    {
+        return $c->statement->statement_date->format('j M Y');
+    }
+
+    /** "KDY Bank statement of 31 Oct 2026" (no note or reason: AG-094 R1). */
+    private function statementLabel(BankStatementCheck $c): string
+    {
+        return trim(($c->account->name ?? '').' statement of '.$this->day($c));
+    }
+
+    private function checkData(BankStatementCheck $c, string $title, string $body): array
+    {
+        return ['title' => $title, 'body' => $body, 'branch_id' => (int) $c->branch_id, 'branch_code' => $c->branch?->code,
+            'url' => '/reports/bank-reconciliation?statement_id='.$c->bank_statement_id, 'statement_id' => (int) $c->bank_statement_id];
     }
 
     private function transfer(int $id): ?Transaction

@@ -17,6 +17,8 @@ class PermissionSeeder extends Seeder
         'account.view', 'account.manage',
         // AG-033: tick bank lines, complete and undo bank reconciliations of the role's branch.
         'account.reconcile',
+        // AG-033d: record (and withdraw one's own) check of a completed bank reconciliation statement of the role's branch.
+        'account.reconcile_check',
         'transfer.create', 'transfer.reverse', 'transfer.acknowledge',
         // AG-051: approve or reject held transfers; it only counts in MAIN (R3). "*" templates only by default.
         'transfer.approve',
@@ -42,7 +44,9 @@ class PermissionSeeder extends Seeder
             // AG-033: the Accountant reconciles the bank accounts (new installs; existing branch roles get it on the Roles screen, Q6).
             'account.reconcile'],
         'Cashier' => ['branch.view', 'account.view', 'transaction.view', 'income.create', 'expense.create', 'report.dashboard', 'transfer.acknowledge'],
-        'Viewer' => ['branch.view', 'account.view', 'transaction.view', 'report.dashboard', 'report.view', 'audit.view'],
+        // AG-033d Q1: the Viewer / Auditor is the independent checker; a check changes no accounting record (new installs;
+        // existing Viewer roles get it on the Roles screen).
+        'Viewer' => ['branch.view', 'account.view', 'transaction.view', 'report.dashboard', 'report.view', 'audit.view', 'account.reconcile_check'],
     ];
 
     public function run(): void

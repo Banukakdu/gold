@@ -55,6 +55,11 @@
 
 @if ($st)
     @if ($st['changed_since_completion'])<p class="alert">Changed since completion</p>@endif
+    {{-- AG-033d S3: the Check block, after the statement balance / difference (and the AG-033b copy), before the late entries. --}}
+    <h2>Check</h2>
+    @foreach (\App\Services\ReconciliationChecks::blockLines($st) as $line)
+        <p class="{{ str_starts_with($line, 'Re-check needed') ? 'alert' : 'note' }}">{{ $line }}</p>
+    @endforeach
     @if ($st['late_entries'])
         <h2>Late entries (added or voided after the statement was completed)</h2>
         <table>
@@ -62,26 +67,30 @@
             <tbody>
             @foreach ($st['late_entries'] as $l)
                 <tr><td>{{ $l['ref_no'] }}</td><td>{{ $date($l['date']) }}</td><td class="num">{{ $m($l['amount']) }}</td>
-                    <td>{{ ucfirst($l['kind']) }} by {{ $l['by'] ?? '-' }}</td><td>{{ $colombo($l['at']) }}</td></tr>
+                    <td>{{ ucfirst($l['kind']) }} by {{ $l['by'] ?? '-' }}@if ($l['after_check'] ?? false) <b>[after check]</b>@endif</td><td>{{ $colombo($l['at']) }}</td></tr>
             @endforeach
             </tbody>
         </table>
     @endif
     <p class="note">Prepared by {{ $st['completed_by']['name'] ?? '-' }} on {{ $colombo($st['completed_at']) }}</p>
     <p class="note">{{ $st['self_count'] }} of {{ $st['lines_count'] }} {{ $st['lines_count'] === 1 ? 'line was' : 'lines were' }} recorded by the preparer</p>
-    {{-- Review finding 4: blank Checked by / Approved by lines for the independent review. --}}
-    <table class="sign">
-        <tr>
-            @foreach (['Checked by', 'Approved by'] as $who)
+    {{-- AG-033d S3: the check recorded in the system replaces the blank Checked by line; no Approved by line (D1). --}}
+    @php($signed = \App\Services\ReconciliationChecks::signatureLine($st))
+    @if ($signed)
+        <p class="note"><b>{{ $signed }}</b></p>
+    @else
+        <table class="sign">
+            <tr>
                 <td>
-                    <div><b>{{ $who }}</b></div>
+                    <div><b>Checked by</b></div>
                     <div style="margin-top:18px" class="l">Name</div>
                     <div style="margin-top:18px" class="l">Signature</div>
                     <div style="margin-top:18px" class="l">Date</div>
                 </td>
-            @endforeach
-        </tr>
-    </table>
+                <td><div class="note">Not checked in the system</div></td>
+            </tr>
+        </table>
+    @endif
 @else
     @include('reports.pdf.signatures')
 @endif

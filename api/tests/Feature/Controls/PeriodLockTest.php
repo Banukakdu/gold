@@ -30,7 +30,18 @@ class PeriodLockTest extends ControlsTestCase
 
         $audit = AuditLog::where('event', 'period.locked')->sole();
         $this->assertSame($this->kdy->id, $audit->branch_id);
-        $this->assertSame(['period' => '2026-10', 'branch_id' => $this->kdy->id], $audit->new_values);
+        // AG-033d finding 3: what the lock confirm showed about bank reconciliation checks (nothing here).
+        // MySQL stores JSON with its own key order: compare key-sorted.
+        $sorted = function (mixed $v) use (&$sorted): mixed {
+            if (is_array($v)) {
+                $v = array_map($sorted, $v);
+                ksort($v);
+            }
+
+            return $v;
+        };
+        $this->assertSame($sorted(['period' => '2026-10', 'branch_id' => $this->kdy->id,
+            'bank_reconciliation_checks' => [['branch_id' => $this->kdy->id, 'not_checked' => [], 'recheck' => []]]]), $sorted($audit->new_values));
     }
 
     public function test_ac11_ac13_duplicate_and_future_locks(): void

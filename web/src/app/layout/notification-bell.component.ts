@@ -18,6 +18,10 @@ export const KIND_ICON: Record<string, string> = {
   'export.ready': '↓',
   'export.failed': '!',
   'backup.failed': '!',
+  // AG-033d bank reconciliation checks.
+  'reconciliation.checked': '✓',
+  'reconciliation.check_withdrawn': '!',
+  'reconciliation.check_cancelled': '!',
 };
 
 export function kindIcon(kind: string): string { return KIND_ICON[kind] ?? '•'; }

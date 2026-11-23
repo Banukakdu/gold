@@ -16,6 +16,7 @@ use App\Http\Controllers\Api\V1\ExportController;
 use App\Http\Controllers\Api\V1\FiscalYearController;
 use App\Http\Controllers\Api\V1\NotificationController;
 use App\Http\Controllers\Api\V1\PeriodLockController;
+use App\Http\Controllers\Api\V1\ReconciliationCheckController;
 use App\Http\Controllers\Api\V1\ReportController;
 use App\Http\Controllers\Api\V1\ReportScheduleController;
 use App\Http\Controllers\Api\V1\RoleController;
@@ -137,6 +138,12 @@ Route::prefix('v1')->group(function () {
                 Route::post('accounts/{account}/reconciliation/complete', [BankReconciliationController::class, 'complete']);
                 Route::post('accounts/{account}/reconciliation/statements/{statementId}/undo', [BankReconciliationController::class, 'undo'])
                     ->whereNumber('statementId');
+            });
+            // AG-033d "Checked by" (docs/specs/reconciliation-checked-by.md): outside the account.reconcile group. Withdraw is a
+            // POST action; there is deliberately no DELETE or edit route. {statement} belongs to {account}, {check} to {statement}.
+            Route::scopeBindings()->middleware('perm:report.view,account.reconcile_check')->group(function () {
+                Route::post('accounts/{account}/reconciliation/statements/{statement}/checks', [ReconciliationCheckController::class, 'store']);
+                Route::post('accounts/{account}/reconciliation/statements/{statement}/checks/{check}/withdraw', [ReconciliationCheckController::class, 'withdraw']);
             });
             // Double-entry S1: the chart of accounts of one branch (structure only, no balances).
             Route::get('chart-of-accounts', ChartOfAccountsController::class)->middleware('perm:account.view');

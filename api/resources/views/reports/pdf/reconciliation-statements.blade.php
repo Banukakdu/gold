@@ -14,8 +14,8 @@
     <thead><tr>
         @if ($showBranch)<th>Branch</th>@endif<th>Account</th><th>Statement date</th><th class="num">Statement balance</th><th class="num">Lines</th>
         <th>Completed by / at</th><th>Status</th><th>Changed</th><th class="num">Late entries</th>
+        <th style="width: 110px">Checked</th>
         @if ($copies)<th>Bank statement copy</th>@endif
-        <th style="width: 90px">Checked (initials, date)</th>
     </tr></thead>
     <tbody>
     @forelse ($data['data'] as $r)
@@ -29,8 +29,8 @@
             <td>{{ $X::statementStatusText($r) }}</td>
             <td>{{ $r['changed_since_completion'] ? 'Changed since completion' : '' }}</td>
             <td class="num">{{ $X::lateText($r) }}</td>
+            <td>{{ \App\Services\ReconciliationChecks::listText($r, true) }}</td>
             @if ($copies)<td>{{ $X::copyText($r) }}</td>@endif
-            <td></td>
         </tr>
     @empty
         <tr><td colspan="{{ 9 + ($copies ? 1 : 0) + ($showBranch ? 1 : 0) }}">No statements match these filters.</td></tr>
@@ -38,18 +38,4 @@
     </tbody>
 </table>
 <p class="note">Late entries: entries dated on or before the statement date that were recorded or voided after completion (as listed on the statement).</p>
-<table class="sign">
-    <tr>
-        <td>
-            <div><b>Checked by</b></div>
-            <div style="margin-top:18px" class="l">Name</div>
-            <div style="margin-top:18px" class="l">Signature</div>
-        </td>
-        <td>
-            <div><b>Date</b></div>
-            <div style="margin-top:18px" class="l">&nbsp;</div>
-        </td>
-        <td></td>
-    </tr>
-</table>
 @endsection

@@ -88,6 +88,12 @@ class Account extends Model
         return $this->hasMany(LedgerEntry::class);
     }
 
+    /** AG-033 bank reconciliation statements of this account (AG-033d: the scoped binding of {statement}). */
+    public function statements(): HasMany
+    {
+        return $this->hasMany(BankStatement::class);
+    }
+
     /** Balance recalculated from the ledger (source of truth). */
     public function ledgerBalance(): string
     {

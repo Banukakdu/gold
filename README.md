@@ -305,6 +305,28 @@ email when it is ready or has failed. PDF is never queued (it keeps its 1,000-ro
    Measured: 100,000 transaction rows in about 33 s with a peak of 55 MB (MySQL 8.0, local).
 6. **MySQL privilege.** The migration creates two triggers on `exports` (same trigger privilege as the attachments release).
 
+### Deploying "Checked by" on bank reconciliation statements (AG-033d, docs/specs/reconciliation-checked-by.md)
+
+Release note: Checked by (AG-033d): a user with the new permission 'account.reconcile_check' can record the check of a
+completed bank reconciliation statement. Open it from Reports > Bank reconciliation statements and click Record check.
+The person who completed the statement or ticked its lines cannot check it. Compare the balance at the statement date
+(not today's balance) with the bank's own statement or internet banking, not only with the uploaded copy. Branch Admin
+roles that hold every permission received the key automatically (see the audit log, Roles). Grant it to the Viewer
+template and the branch Viewer roles (or another checker role) on the Roles screen. Entries recorded after a check mark
+the statement 'Re-check needed'. Undoing a statement cancels its check.
+
+1. **MySQL privilege.** The migration `2026_12_07_000000_reconciliation_checks` creates two triggers on
+   `bank_statement_checks` (no delete; only the one-time end or re-check link of an active check). Same trigger privilege
+   as the controls release; the migration checks it before changing anything.
+2. `php artisan migrate --force`. On an existing database it adds `account.reconcile_check` to the Branch Admin template
+   and to every branch Branch Admin copy that still holds every other permission, each with a `role.updated` audit row
+   (source "migration reconciliation_checks (AG-033d)"). The Viewer, Accountant and Cashier roles are not changed.
+3. **After the migration (Super Admin):** on Roles, grant `account.reconcile_check` to the Viewer template and to the
+   branch Viewer roles (or another checker role) that should check statements. Fresh installs already give it to the
+   Viewer template. A checker who finds a difference raises it with the preparer and the Super Admin; the statement stays
+   "Not checked" until it is corrected or checked.
+4. `php artisan ledger:verify` now also runs V11 (check rows consistent with their statements); it must exit 0.
+
 ## How it works
 
 **Branch context.** The app sends the active branch in an `X-Branch-Id` header. Middleware checks the user belongs

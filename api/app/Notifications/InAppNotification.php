@@ -46,6 +46,13 @@ class InAppNotification extends Notification
 
     public const SCHEDULE_PAUSED = 'report_schedule.paused';
 
+    /** AG-033d R10: a bank reconciliation statement was checked, a check withdrawn, a check cancelled by an undo. */
+    public const RECONCILIATION_CHECKED = 'reconciliation.checked';
+
+    public const RECONCILIATION_CHECK_WITHDRAWN = 'reconciliation.check_withdrawn';
+
+    public const RECONCILIATION_CHECK_CANCELLED = 'reconciliation.check_cancelled';
+
     public function __construct(public string $kind, public array $data) {}
 
     public function via(object $notifiable): array

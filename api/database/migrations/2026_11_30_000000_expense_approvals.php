@@ -32,8 +32,12 @@ return new class extends Migration
     /** Keys that only ever counted in MAIN and were granted to MAIN copies only (AG-051): not required of a full copy. */
     public const MAIN_ONLY = ['transfer.approve'];
 
-    /** Keys added to the catalogue after this migration (AG-033): they do not exist yet when both run in one deploy. */
-    public const LATER = ['account.reconcile'];
+    /**
+     * Keys added to the catalogue after this migration (AG-033, AG-033d). On an upgrade from before AG-051 that runs this
+     * and the later migrations in one deploy they do not exist yet, so requiring them would make the catalogue look
+     * incomplete and grant nothing.
+     */
+    public const LATER = ['account.reconcile', 'account.reconcile_check'];
 
     public const SAME_DAY_INDEX = 'transactions_created_by_category_txn_date_index';
 

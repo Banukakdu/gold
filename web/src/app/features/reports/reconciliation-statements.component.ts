@@ -7,7 +7,7 @@ import { SettingsService } from '../../core/settings.service';
 import { AppDatePipe, AppDateTimePipe } from '../../core/app-date.pipe';
 import { colomboToday } from '../../core/dates';
 import { MoneyPipe } from '../../core/money.pipe';
-import { dayLabel } from '../../core/reconciliation';
+import { CheckStatus, CheckSummary, checkStatusText, colomboMinute, dayLabel, personName } from '../../core/reconciliation';
 import {
   BranchPickerComponent, ExportButtonsComponent, ReportMeta, ReportParams, fieldErrors, readQuery, reportError, toHttpParams, writeQuery,
 } from './report-common';
@@ -21,6 +21,8 @@ export interface StatementRow {
   undone_by: ListPerson | null; undone_at: string | null; undo_reason: string | null;
   changed_since_completion: boolean; late_entries_count: number | null; late_voided_count: number | null;
   attachments_count: number | null; attachments_removed_count: number | null;
+  /** AG-033d: the check status and the active check. */
+  check_status?: CheckStatus; check?: CheckSummary | null;
 }
 export interface Coverage {
   reconciled_to: string;
@@ -32,7 +34,7 @@ export interface StatementList extends ReportMeta {
   coverage: Coverage; total: number; page: number; per_page: number; data: StatementRow[];
 }
 
-interface Filters { from: string; to: string; status: string; changed: string; late: string; copy: string }
+interface Filters { from: string; to: string; status: string; changed: string; late: string; copy: string; checked: string }
 
 export const LATE_TOOLTIP = 'Entries dated on or before the statement date that were recorded or voided after completion (as listed on the statement)';
 
@@ -109,6 +111,10 @@ let lastBranch: string | null = null;
         <select name="late" [(ngModel)]="f.late">
           <option value="any">Any</option><option value="some">Some</option><option value="none">None</option>
         </select></label>
+      <label>Checked
+        <select name="checked" [(ngModel)]="f.checked">
+          <option value="any">Any</option><option value="checked">Checked</option><option value="recheck">Re-check needed</option><option value="not_checked">Not checked</option>
+        </select></label>
       @if (copyShown()) {
         <label>Bank statement copy
           <select name="copy" [(ngModel)]="f.copy">
@@ -141,7 +147,7 @@ let lastBranch: string | null = null;
         <thead><tr>
           @if (auth.isAllBranches()) { <th>Branch</th> }
           <th>Account</th><th>Statement date</th><th class="num">Statement balance</th><th class="num">Lines</th><th>Completed by / at</th>
-          <th>Status</th><th>Changed</th><th class="num" [title]="lateTooltip">Late entries</th>
+          <th>Status</th><th>Changed</th><th class="num" [title]="lateTooltip">Late entries</th><th>Checked</th>
           @if (copiesSupported()) { <th>Bank statement copy</th> }
           <th></th>
         </tr></thead>
@@ -167,6 +173,12 @@ let lastBranch: string | null = null;
               </td>
               <td>@if (s.changed_since_completion) { <span class="tag att-late">Changed since completion</span> }</td>
               <td class="num" [title]="lateTooltip">{{ late(s) }}</td>
+              <td>
+                @if (checkText(s); as t) {
+                  <span class="tag" [attr.data-s]="s.check_status === 'checked' ? 'balanced' : null" [class.att-late]="s.check_status === 'recheck' || s.check_status === 'not_checked'">{{ t }}</span>
+                  @if (s.check_status === 'recheck') { <div class="muted rs-undo">{{ checker(s) }}</div> }
+                }
+              </td>
               @if (copiesSupported()) {
                 <td>@if (copy(s).startsWith('No copy')) { <span class="tag att-late">{{ copy(s) }}</span> } @else { {{ copy(s) }} }</td>
               }
@@ -190,6 +202,9 @@ let lastBranch: string | null = null;
               <div class="rs-l3">
                 @if (s.changed_since_completion) { <span class="tag att-late">Changed since completion</span> }
                 @if (s.late_entries_count !== null) { <span class="tag">Late entries {{ late(s) }}</span> }
+                @if (checkText(s); as t) {
+                  <span class="tag" [attr.data-s]="s.check_status === 'checked' ? 'balanced' : null" [class.att-late]="s.check_status === 'recheck' || s.check_status === 'not_checked'">{{ t }}</span>
+                }
                 @if (copiesSupported() && copy(s)) { <span class="tag" [class.att-late]="copy(s).startsWith('No copy')">{{ copy(s) }}</span> }
               </div>
               <div class="rs-l4">Completed by {{ person(s.completed_by) }}, {{ s.completed_at | appDateTime }}
@@ -225,7 +240,7 @@ export class ReconciliationStatementsComponent implements OnInit {
   today = colomboToday();
   readonly lateTooltip = LATE_TOOLTIP;
   readonly skeleton = [1, 2, 3];
-  readonly defaults: Filters = { from: yearBefore(this.today), to: this.today, status: 'all', changed: 'any', late: 'any', copy: 'any' };
+  readonly defaults: Filters = { from: yearBefore(this.today), to: this.today, status: 'all', changed: 'any', late: 'any', copy: 'any', checked: 'any' };
   f: Filters = { ...this.defaults };
   branches = signal<number[]>([]);
   chosen = signal<number[]>([]);
@@ -250,12 +265,12 @@ export class ReconciliationStatementsComponent implements OnInit {
   });
   pages = computed(() => Math.max(1, Math.ceil((this.r()?.total ?? 0) / (this.r()?.per_page ?? 50))));
   coverage = computed(() => (this.r() ? coverageText(this.r()!.coverage) : ''));
-  columns = computed(() => 9 + (this.auth.isAllBranches() ? 1 : 0) + (this.copiesSupported() ? 1 : 0));
+  columns = computed(() => 10 + (this.auth.isAllBranches() ? 1 : 0) + (this.copiesSupported() ? 1 : 0));
   activeFilters = computed(() => {
     const a = this.applied();
     let n = 0;
     if (a['from'] !== this.defaults.from || a['to'] !== this.defaults.to) n++;
-    for (const k of ['status', 'changed', 'late', 'copy'] as const) if (a[k] !== undefined && a[k] !== this.defaults[k]) n++;
+    for (const k of ['status', 'changed', 'late', 'copy', 'checked'] as const) if (a[k] !== undefined && a[k] !== this.defaults[k]) n++;
     if ((a['account_ids'] as number[] | undefined)?.length) n++;
     if ((a['branches'] as number[] | undefined)?.length) n++;
     return n;
@@ -272,6 +287,7 @@ export class ReconciliationStatementsComponent implements OnInit {
     this.f = {
       from: q.get('from') ?? this.defaults.from, to: q.get('to') ?? this.defaults.to,
       status: q.get('status') ?? 'all', changed: q.get('changed') ?? 'any', late: q.get('late') ?? 'any', copy: q.get('copy') ?? 'any',
+      checked: q.get('checked') ?? 'any',
     };
     this.branches.set(branches);
     // F6: a branch switch clears the Account filter (the ids belong to the old branch).
@@ -285,6 +301,7 @@ export class ReconciliationStatementsComponent implements OnInit {
     const params: ReportParams = {
       branches: this.branches(), account_ids: this.chosen(), from: this.f.from, to: this.f.to,
       status: this.f.status, changed: this.f.changed, late: this.f.late, copy: this.f.copy === 'any' ? undefined : this.f.copy,
+      checked: this.f.checked,
     };
     this.applied.set(params);
     writeQuery(this.router, this.route, params);
@@ -377,6 +394,9 @@ export class ReconciliationStatementsComponent implements OnInit {
   balance(v: string) { return v.startsWith('-') ? `Overdrawn ${this.money.transform(v.slice(1))}` : this.money.transform(v); }
   late(s: StatementRow) { return lateText(s); }
   copy(s: StatementRow) { return copyText(s); }
+  /** AG-033d "Checked" column. */
+  checkText(s: StatementRow) { return checkStatusText(s.check_status ?? null, s.check); }
+  checker(s: StatementRow) { return s.check ? `Checked by ${personName(s.check.checked_by)}, ${colomboMinute(s.check.checked_at).slice(0, 10)}` : ''; }
 
   /** "by BA on 3 Dec 2026: <reason>" with the reason cut at 80 characters (full text in the tooltip). */
   undoneText(s: StatementRow) {
