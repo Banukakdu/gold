@@ -33,8 +33,17 @@ class ReconciliationCheckController extends Controller
     public function withdraw(Request $request, Account $account, BankStatement $statement, BankStatementCheck $check)
     {
         $this->recon->assertBank($account);
+        // R7 who first (QA D5): a user who may not withdraw gets the 403, whatever the reason. Re-checked in the transaction.
+        if ((int) $check->checked_by !== (int) $request->user()->id && ! $request->user()->is_super_admin) {
+            BankReconciliation::fail(ReconciliationChecks::WITHDRAW_WHO, 403);
+        }
         $request->merge(['reason' => is_string($request->input('reason')) ? trim($request->input('reason')) : $request->input('reason')]);
-        $reason = $request->validate(['reason' => 'required|string|min:10|max:500'])['reason'];
+        $reason = $request->validate(['reason' => 'required|string|min:10|max:500'], [
+            'reason.required' => ReconciliationChecks::REASON_MESSAGE,
+            'reason.string' => ReconciliationChecks::REASON_MESSAGE,
+            'reason.min' => ReconciliationChecks::REASON_MESSAGE,
+            'reason.max' => ReconciliationChecks::REASON_LONG,
+        ])['reason'];
 
         return $this->checks->present($this->checks->withdraw($account, $statement, $check, $reason, $request->user()));
     }

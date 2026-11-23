@@ -62,7 +62,7 @@ class ViewsTest extends ChecksTestCase
         $this->check($this->st1, $this->vw, ['note' => '=SUM(A1:A9) agreed to the chq book'])->assertCreated();
         $text = implode(' ', $this->pdfPages($this->as($this->acc, $this->kdy)->postJson('/api/v1/reports/reconciliation-statements/export', ['format' => 'pdf'])
             ->assertOk()->getContent()));
-        foreach (['CHECKED', 'Checked by '.$this->vw->name.', 2026-12-10', 'Not checked', 'Checked: All'] as $needle) {
+        foreach (['CHECKED', 'Checked by '.$this->vw->name.', 2026-12-10', 'Not checked', 'Checked: Any'] as $needle) {
             $this->assertStringContainsString($needle, $text);
         }
         foreach (['CHECKED (INITIALS, DATE)', 'Signature'] as $gone) {
@@ -118,9 +118,10 @@ class ViewsTest extends ChecksTestCase
         }
         $this->assertStringNotContainsString('Approved by', $text);
         $cells = $this->sheetText($this->st1);
-        foreach ([$line, 'Note: '.self::NOTE] as $needle) {
+        foreach ([$line, 'Note: '.self::NOTE, 'Checked by '.$this->vw->name.' on 2026-12-10 15:30 (recorded in Account-gold, check #'.$id.')'] as $needle) {
             $this->assertNotEmpty(array_filter($cells, fn ($c) => str_contains($c, $needle)), $needle);
         }
+        $this->assertEmpty(array_filter($cells, fn ($c) => str_contains($c, 'Asia/Colombo') && str_contains($c, 'Checked by')));
 
         // ST3 not checked: the blank Checked by line stays.
         $st3 = $this->reprint($this->st3);

@@ -151,7 +151,7 @@ export interface BankReport extends ReportMeta {
           @if (active(); as c) {
             <div class="ck-checked">
               <span class="ck-l1"><b>Checked by {{ name(c.checked_by) }}</b></span>
-              <span class="ck-l2"> on {{ minute(c.checked_at) }} (Asia/Colombo) against {{ compared(c) }}.</span>
+              <span class="ck-l2"> on {{ minute(c.checked_at) }} against {{ compared(c) }}.</span>
             </div>
             @if (c.note) { <div class="ck-note">Note: {{ c.note }}</div> }
             @if (tags(c).length) {
@@ -165,7 +165,7 @@ export interface BankReport extends ReportMeta {
             <ul class="ck-history">@for (c of ended(); track c.id) { <li>{{ history(c) }}</li> }</ul>
           }
           @if (s.check_actions; as a) {
-            @if (a.can_check || a.blocked_reason || a.can_withdraw) {
+            @if (a.can_check || a.blocked_reason || a.can_withdraw || a.withdraw_blocked_reason) {
               <div class="ck-actions no-print">
                 @if (a.can_check || a.blocked_reason) {
                   <div class="ck-act">
@@ -173,7 +173,12 @@ export interface BankReport extends ReportMeta {
                     @if (a.blocked_reason) { <small class="muted ck-why">{{ a.blocked_reason }}</small> }
                   </div>
                 }
-                @if (a.can_withdraw) { <button type="button" class="ghost" [disabled]="saving()" (click)="openWithdraw()">Withdraw check</button> }
+                @if (a.can_withdraw || a.withdraw_blocked_reason) {
+                  <div class="ck-act">
+                    <button type="button" class="ghost" [disabled]="!a.can_withdraw || saving()" (click)="openWithdraw()">Withdraw check</button>
+                    @if (a.withdraw_blocked_reason) { <small class="muted ck-why">{{ a.withdraw_blocked_reason }}</small> }
+                  </div>
+                }
               </div>
             }
           }

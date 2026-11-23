@@ -136,7 +136,8 @@ return new class extends Migration
             return;
         }
         // Keys added to the catalogue after this migration (AG-064 expense.approve, AG-033 account.reconcile, AG-033d
-        // account.reconcile_check) do not exist yet when they run in one deploy; requiring them would grant nothing.
+        // account.reconcile_check): on an upgrade from before AG-051 that runs the later migrations in the same deploy
+        // they do not exist yet, so requiring them would make the catalogue look incomplete and grant nothing.
         $others = array_values(array_diff(PermissionSeeder::PERMISSIONS, [self::PERMISSION, 'expense.approve', 'account.reconcile', 'account.reconcile_check']));
         $otherIds = DB::table('permissions')->where('guard_name', 'web')->whereIn('name', $others)->pluck('id');
         if ($otherIds->count() !== count($others)) {

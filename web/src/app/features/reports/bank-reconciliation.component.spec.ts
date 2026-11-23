@@ -6,7 +6,7 @@ import { Component } from '@angular/core';
 import { AuthService } from '../../core/auth.service';
 import { me } from '../../core/notifications.service.spec';
 import { phoneFrame } from '../../../testing/phone-frame';
-import { StatementCheck, checkStatusText } from '../../core/reconciliation';
+import { StatementCheck, checkStatusText, recordedOf } from '../../core/reconciliation';
 import { bankCheckLines } from '../period-locks/period-locks.component';
 import { BankReconciliationReportComponent, BankReport } from './bank-reconciliation.component';
 
@@ -121,10 +121,19 @@ describe('AG-033d checked by (web)', () => {
     await open(report({ check_status: 'checked', checks: [check()], late_since_check: 0,
       check_actions: { can_check: false, can_withdraw: true, blocked_reason: 'This statement is already checked.' } }));
     const block = el.querySelector('.ck-block')!.textContent!.replace(/\s+/g, ' ');
-    expect(block).toContain('Checked by VW on 2026-12-10 14:05 (Asia/Colombo) against internet banking.');
+    expect(block).toContain('Checked by VW on 2026-12-10 14:05 against internet banking.'); // one form on screen, PDF and Excel
+    expect(block).not.toContain('Asia/Colombo');
     expect(block).toContain('Note: Late cheque 25 Oct agreed to chq book');
     expect(block).toContain('changed since completion when checked');
     expect(button(el, 'Withdraw check')).toBeDefined();
+    el.remove();
+    TestBed.resetTestingModule();
+
+    // AC 20: a locked month disables Withdraw with the lock message.
+    await open(report({ check_status: 'checked', checks: [check()], late_since_check: 0,
+      check_actions: { can_check: false, can_withdraw: false, blocked_reason: 'This statement is already checked.', withdraw_blocked_reason: 'The period 2026-10 is locked.' } }));
+    expect(button(el, 'Withdraw check')!.disabled).toBeTrue();
+    expect(el.querySelector('.ck-block')!.textContent).toContain('The period 2026-10 is locked.');
   });
 
   it('AC 30: at 390px the dialog is a full-screen sheet with 44px targets and a sticky Save bar; no horizontal scroll', async () => {
@@ -179,6 +188,8 @@ describe('AG-033d checked by (web)', () => {
     expect(checkStatusText('not_checked', null)).toBe('Not checked');
     expect(checkStatusText('cancelled', null)).toBe('Check cancelled');
     expect(checkStatusText(null, null)).toBe('');
+    expect([recordedOf(1, 7), recordedOf(1, 1), recordedOf(3, 3)]).toEqual(['1 of the 7 entries on this statement',
+      'the only entry on this statement', 'all 3 entries on this statement']); // D7
     const item = (id: number, d: string) => ({ statement_id: id, account: { id: 5, code: '11002', name: 'KDY Bank' }, statement_date: d });
     expect(bankCheckLines([{ branch: { id: 2, code: 'KDY' }, not_checked: [item(3, '2026-11-30')], recheck: [item(1, '2026-10-31')] }])).toEqual([
       'KDY: 1 completed bank reconciliation not checked (KDY Bank 30 Nov 2026)',

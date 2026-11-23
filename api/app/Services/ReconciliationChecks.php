@@ -47,6 +47,10 @@ class ReconciliationChecks
 
     public const NOT_ACTIVE = 'This check is no longer active.';
 
+    public const REASON_MESSAGE = 'Give the reason for withdrawing the check (at least 10 characters).';
+
+    public const REASON_LONG = 'The reason may be at most 500 characters.';
+
     public const NOTE_MIN = 10;
 
     public const NOTE_MAX = 500;
@@ -61,10 +65,20 @@ class ReconciliationChecks
 
     public function __construct(private BankReconciliation $recon, private YearEnd $yearEnd) {}
 
-    /** The checks table exists (earlier migrations and rolled-back test databases run without it). Not cached: a rollback is seen. */
+    private static ?bool $installed = null;
+
+    /**
+     * The checks table exists (earlier migrations and rolled-back test databases run without it). Memoised per process
+     * like ReportService::statementCopiesSupported(); a migrate or rollback resets it (MigrationsEnded, forgetInstalled()).
+     */
     public static function installed(): bool
     {
-        return Schema::hasTable('bank_statement_checks');
+        return self::$installed ??= Schema::hasTable('bank_statement_checks');
+    }
+
+    public static function forgetInstalled(): void
+    {
+        self::$installed = null;
     }
 
     // ------------------------------------------------------------------ R2 segregation
@@ -350,7 +364,7 @@ class ReconciliationChecks
     /** S3 actions: can_check, can_withdraw and, for a user holding the keys, why the check button is disabled. */
     private function actions(BankStatement $s, ?BankStatementCheck $active, ?int $lateSince, ?User $user): array
     {
-        $none = ['can_check' => false, 'can_withdraw' => false, 'blocked_reason' => null];
+        $none = ['can_check' => false, 'can_withdraw' => false, 'blocked_reason' => null, 'withdraw_blocked_reason' => null];
         if (! $user || $s->status !== BankStatement::COMPLETED || ! self::installed()) {
             return $none;
         }
@@ -360,10 +374,15 @@ class ReconciliationChecks
         }
         $blocked = $this->preparerReason($s, $user) ?? ($active && $lateSince === 0 ? self::ALREADY : null);
 
+        $mayWithdraw = $active !== null && ((int) $active->checked_by === (int) $user->id || $user->is_super_admin);
+        // R7: refused in a locked month or closed year (the withdraw transaction re-checks it with a locking read).
+        $withdrawBlocked = $mayWithdraw ? $this->yearEnd->closedOrLockedMessage((int) $s->branch_id, $s->statement_date->format('Y-m-d')) : null;
+
         return [
             'can_check' => $blocked === null,
-            'can_withdraw' => $active !== null && ((int) $active->checked_by === (int) $user->id || $user->is_super_admin),
+            'can_withdraw' => $mayWithdraw && $withdrawBlocked === null,
             'blocked_reason' => $blocked,
+            'withdraw_blocked_reason' => $withdrawBlocked,
         ];
     }
 
@@ -424,7 +443,7 @@ class ReconciliationChecks
             $tags[] = ' - checked after close';
         }
         if ($c['checker_recorded_count'] > 0) {
-            $tags[] = " - the checker recorded {$c['checker_recorded_count']} of the {$c['entries_count']} entries on this statement"
+            $tags[] = ' - the checker recorded '.self::recordedOf((int) $c['checker_recorded_count'], (int) $c['entries_count'])
                 .($c['checker_uncleared_count'] > 0 ? ", {$c['checker_uncleared_count']} of them uncleared" : '');
         }
         if ($c['changed_at_check']) {
@@ -432,6 +451,16 @@ class ReconciliationChecks
         }
 
         return $tags;
+    }
+
+    /** "1 of the 7 entries on this statement", "the only entry on this statement", "all 3 entries on this statement". */
+    public static function recordedOf(int $n, int $of): string
+    {
+        return match (true) {
+            $of === 1 && $n === 1 => 'the only entry on this statement',
+            $n === $of => "all {$of} entries on this statement",
+            default => "{$n} of the {$of} entries on this statement",
+        };
     }
 
     /** "Re-check needed: 1 entry was recorded or voided after the check." */

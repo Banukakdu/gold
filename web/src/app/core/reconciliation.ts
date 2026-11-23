@@ -60,7 +60,11 @@ export interface StatementCheck {
   after_close: 'close' | null; status: 'active' | 'superseded' | 'withdrawn' | 'cancelled';
   ended_by: CheckPerson | null; ended_at: string | null; end_reason: string | null; superseded_by_id: number | null;
 }
-export interface CheckActions { can_check: boolean; can_withdraw: boolean; blocked_reason: string | null }
+export interface CheckActions {
+  can_check: boolean; can_withdraw: boolean; blocked_reason: string | null;
+  /** R7: why Withdraw is disabled (locked month or closed year), for the checker or a Super Admin. */
+  withdraw_blocked_reason?: string | null;
+}
 
 export const COMPARED_LABELS: Record<string, string> = { bank_statement: "the bank's statement", internet_banking: 'internet banking' };
 
@@ -88,12 +92,19 @@ export function checkStatusText(status: CheckStatus | undefined, c: CheckSummary
   }
 }
 
+/** "1 of the 7 entries on this statement", "the only entry on this statement", "all 3 entries on this statement". */
+export function recordedOf(n: number, of: number): string {
+  if (of === 1 && n === 1) return 'the only entry on this statement';
+  if (n === of) return `all ${of} entries on this statement`;
+  return `${n} of the ${of} entries on this statement`;
+}
+
 /** S3 tags of the active check (without the leading " - "). */
 export function checkTags(c: StatementCheck): string[] {
   const tags: string[] = [];
   if (c.after_close) tags.push('checked after close');
   if (c.checker_recorded_count > 0) {
-    tags.push(`the checker recorded ${c.checker_recorded_count} of the ${c.entries_count} entries on this statement`
+    tags.push(`the checker recorded ${recordedOf(c.checker_recorded_count, c.entries_count)}`
       + (c.checker_uncleared_count > 0 ? `, ${c.checker_uncleared_count} of them uncleared` : ''));
   }
   if (c.changed_at_check) tags.push('changed since completion when checked');

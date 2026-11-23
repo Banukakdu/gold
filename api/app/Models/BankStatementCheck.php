@@ -45,7 +45,8 @@ class BankStatementCheck extends Model
             $dirty = array_keys($c->getDirty());
             $was = $c->getOriginal('status');
             $end = $was === self::ACTIVE && in_array($c->status, [self::SUPERSEDED, self::WITHDRAWN, self::CANCELLED], true)
-                && $c->ended_by !== null && $c->ended_at !== null && ($c->status === self::SUPERSEDED || $c->superseded_by_id === null);
+                && $c->ended_by !== null && $c->ended_at !== null && ($c->status === self::SUPERSEDED || $c->superseded_by_id === null)
+                && ($c->status === self::SUPERSEDED || ((string) $c->end_reason) !== '');
             $link = $was === self::SUPERSEDED && $c->status === self::SUPERSEDED && $c->getOriginal('superseded_by_id') === null
                 && $c->superseded_by_id !== null && ! array_intersect($dirty, ['ended_by', 'ended_at', 'end_reason']);
             if (array_diff($dirty, self::END_COLUMNS) || ! ($end || $link)) {

@@ -33,7 +33,11 @@ class LifecycleTest extends ChecksTestCase
         $this->assertSame(['recheck', 1], [$st['check_status'], $st['late_since_check']]);
         $this->assertContains('Re-check needed: 1 entry was recorded or voided after the check.', ReconciliationChecks::blockLines($st));
         $this->assertSame([$exp->ref_no => true], collect($st['late_entries'])->mapWithKeys(fn ($l) => [$l['ref_no'] => $l['after_check']])->all());
-        $this->assertSame(['can_check' => true, 'can_withdraw' => true, 'blocked_reason' => null], $st['check_actions']);
+        $this->assertSame(['can_check' => true, 'can_withdraw' => true, 'blocked_reason' => null, 'withdraw_blocked_reason' => null], $st['check_actions']);
+        // QA D2/D3: the Excel reprint tags the late entry and carries the signature line with the re-check suffix.
+        $cells = $this->sheetText($this->st3);
+        $this->assertNotEmpty(array_filter($cells, fn ($c) => str_starts_with($c, "Late entry {$exp->ref_no} ") && str_ends_with($c, ' [after check]')));
+        $this->assertNotEmpty(array_filter($cells, fn ($c) => str_contains($c, "(recorded in Account-gold, check #{$first}) - Re-check needed")));
 
         // A re-check needs a note.
         $this->check($this->st3, $this->vw)->assertStatus(422)->assertJsonPath('message', 'Explain the late entries in the note (at least 10 characters).');
@@ -84,7 +88,10 @@ class LifecycleTest extends ChecksTestCase
     public function test_ac18_checker_withdraws(): void
     {
         $id = $this->check($this->st1, $this->vw, ['note' => self::NOTE])->assertCreated()->json('id');
-        $this->withdraw($this->st1, $id, $this->vw, 'too short')->assertStatus(422)->assertJsonValidationErrors('reason');
+        $this->withdraw($this->st1, $id, $this->vw, 'too short')->assertStatus(422)
+            ->assertJsonValidationErrors(['reason' => 'Give the reason for withdrawing the check (at least 10 characters).']);
+        $this->withdraw($this->st1, $id, $this->vw, str_repeat('x', 501))->assertStatus(422)
+            ->assertJsonValidationErrors(['reason' => 'The reason may be at most 500 characters.']);
         $this->withdraw($this->st1, $id, $this->vw)->assertOk()->assertJsonPath('status', 'withdrawn')
             ->assertJsonPath('end_reason', 'Compared with the September statement by mistake')->assertJsonPath('ended_by.id', $this->vw->id);
         $audit = AuditLog::where('event', 'reconciliation.check_withdrawn')->sole();
@@ -108,6 +115,8 @@ class LifecycleTest extends ChecksTestCase
     {
         $id = $this->check($this->st1, $this->vw, ['note' => self::NOTE])->assertCreated()->json('id');
         $this->withdraw($this->st1, $id, $this->ba)->assertForbidden()->assertJsonPath('message', 'Only the checker or a Super Admin can withdraw this check.');
+        // QA D5: who is decided before the reason is validated.
+        $this->withdraw($this->st1, $id, $this->ba, 'short')->assertForbidden()->assertJsonPath('message', 'Only the checker or a Super Admin can withdraw this check.');
         $this->withdraw($this->st1, $id, $this->admin, branch: 'all')->assertOk()->assertJsonPath('status', 'withdrawn');
         $this->assertFalse(AuditLog::where('event', 'reconciliation.check_withdrawn')->sole()->new_values['self']);
         $this->assertCount(1, $this->notes($this->acc, N::RECONCILIATION_CHECK_WITHDRAWN));
@@ -119,10 +128,15 @@ class LifecycleTest extends ChecksTestCase
         $lock = $this->sa()->postJson('/api/v1/period-locks', ['period' => '2026-10', 'branch_id' => $this->kdy->id])->assertCreated()->json('id');
         $id = $this->check($this->st1, $this->vw, ['note' => self::NOTE])->assertCreated()->assertJsonPath('after_close', 'close')->json('id');
         $this->assertContains(' - checked after close', ReconciliationChecks::tags($this->reprint($this->st1)['checks'][0]));
+        // Review S2: the button is disabled with the lock message; the withdraw transaction still refuses (422).
+        $this->assertSame(['can_withdraw' => false, 'withdraw_blocked_reason' => 'The period 2026-10 is locked.'],
+            array_intersect_key($this->reprint($this->st1, $this->vw)['check_actions'], array_flip(['can_withdraw', 'withdraw_blocked_reason'])));
+        $this->assertFalse($this->reprint($this->st1, $this->admin, 'all')['check_actions']['can_withdraw']);
         $this->withdraw($this->st1, $id, $this->vw)->assertStatus(422)->assertJsonPath('message', 'The period 2026-10 is locked.');
         $this->withdraw($this->st1, $id, $this->admin, branch: 'all')->assertStatus(422)->assertJsonPath('message', 'The period 2026-10 is locked.');
 
         $this->sa()->postJson("/api/v1/period-locks/{$lock}/unlock", ['reason' => 'Withdraw a wrong bank check'])->assertOk();
+        $this->assertSame([true, null], [$this->reprint($this->st1, $this->vw)['check_actions']['can_withdraw'], $this->reprint($this->st1, $this->vw)['check_actions']['withdraw_blocked_reason']]);
         $this->withdraw($this->st1, $id, $this->vw)->assertOk();
         $this->sa()->postJson('/api/v1/period-locks', ['period' => '2026-10', 'branch_id' => $this->kdy->id])->assertCreated();
         $this->assertSame(['period.unlocked', 'reconciliation.check_withdrawn', 'period.locked'],
@@ -141,6 +155,8 @@ class LifecycleTest extends ChecksTestCase
         $msg = $this->withdraw($this->st1, $id, $this->admin, branch: 'all')->assertStatus(422)->json('message');
         $this->assertStringEndsWith(' is closed.', $msg);
         $this->assertStringStartsWith('FY ', $msg);
+        $this->assertSame([false, $msg], [$this->reprint($this->st1, $this->admin, 'all')['check_actions']['can_withdraw'],
+            $this->reprint($this->st1, $this->admin, 'all')['check_actions']['withdraw_blocked_reason']]);
         $this->check($this->st3, $this->vw)->assertCreated()->assertJsonPath('after_close', 'close');
     }
 
@@ -156,6 +172,9 @@ class LifecycleTest extends ChecksTestCase
             // Ending it without ended_by / ended_at, or with another column changed.
             fn () => DB::table('bank_statement_checks')->where('id', $id)->update(['status' => 'withdrawn']),
             fn () => DB::table('bank_statement_checks')->where('id', $id)->update(['status' => 'withdrawn', 'ended_by' => $this->vw->id, 'ended_at' => now(), 'note' => 'x']),
+            // A withdraw or cancel without a reason (review N3).
+            fn () => DB::table('bank_statement_checks')->where('id', $id)->update(['status' => 'withdrawn', 'ended_by' => $this->vw->id, 'ended_at' => now()]),
+            fn () => DB::table('bank_statement_checks')->where('id', $id)->update(['status' => 'cancelled', 'ended_by' => $this->vw->id, 'ended_at' => now(), 'end_reason' => '']),
             fn () => DB::table('bank_statements')->where('id', $this->st1->id)->delete(),
         ] as $i => $change) {
             try {
@@ -185,6 +204,18 @@ class LifecycleTest extends ChecksTestCase
             $this->assertNotNull(BankStatementCheck::withoutGlobalScopes()->find($id));
             $this->assertFalse(collect(Route::getRoutes()->getRoutes())->contains(fn ($r) => str_contains($r->uri(), 'checks') && in_array('DELETE', $r->methods(), true)));
             $this->assertFalse(collect(Route::getRoutes()->getRoutes())->contains(fn ($r) => str_contains($r->uri(), 'checks') && array_intersect(['PUT', 'PATCH'], $r->methods())));
+        }
+    }
+
+    public function test_ac21_model_refuses_a_withdraw_without_a_reason(): void
+    {
+        $id = $this->check($this->st1, $this->vw, ['note' => self::NOTE])->assertCreated()->json('id');
+        $m = BankStatementCheck::withoutGlobalScopes()->find($id);
+        $this->expectException(ImmutableRecordException::class);
+        try {
+            $m->update(['status' => 'withdrawn', 'ended_by' => $this->vw->id, 'ended_at' => now()]);
+        } finally {
+            $this->assertSame('active', DB::table('bank_statement_checks')->where('id', $id)->value('status'));
         }
     }
 

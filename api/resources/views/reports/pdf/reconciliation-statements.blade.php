@@ -14,8 +14,8 @@
     <thead><tr>
         @if ($showBranch)<th>Branch</th>@endif<th>Account</th><th>Statement date</th><th class="num">Statement balance</th><th class="num">Lines</th>
         <th>Completed by / at</th><th>Status</th><th>Changed</th><th class="num">Late entries</th>
-        @if ($copies)<th>Bank statement copy</th>@endif
         <th style="width: 110px">Checked</th>
+        @if ($copies)<th>Bank statement copy</th>@endif
     </tr></thead>
     <tbody>
     @forelse ($data['data'] as $r)
@@ -29,8 +29,8 @@
             <td>{{ $X::statementStatusText($r) }}</td>
             <td>{{ $r['changed_since_completion'] ? 'Changed since completion' : '' }}</td>
             <td class="num">{{ $X::lateText($r) }}</td>
-            @if ($copies)<td>{{ $X::copyText($r) }}</td>@endif
             <td>{{ \App\Services\ReconciliationChecks::listText($r, true) }}</td>
+            @if ($copies)<td>{{ $X::copyText($r) }}</td>@endif
         </tr>
     @empty
         <tr><td colspan="{{ 9 + ($copies ? 1 : 0) + ($showBranch ? 1 : 0) }}">No statements match these filters.</td></tr>

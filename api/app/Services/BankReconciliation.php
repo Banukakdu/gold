@@ -972,7 +972,7 @@ class BankReconciliation
         'changed' => ['any' => 'All', 'yes' => 'Yes', 'no' => 'No'],
         'late' => ['any' => 'All', 'some' => 'Some', 'none' => 'None'],
         'copy' => ['any' => 'All', 'attached' => 'Attached', 'none' => 'None'],
-        'checked' => ['any' => 'All', 'checked' => 'Checked', 'recheck' => 'Re-check needed', 'not_checked' => 'Not checked'],
+        'checked' => ['any' => 'Any', 'checked' => 'Checked', 'recheck' => 'Re-check needed', 'not_checked' => 'Not checked'],
     ];
 
     /**

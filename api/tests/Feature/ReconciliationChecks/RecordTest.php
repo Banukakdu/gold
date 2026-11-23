@@ -18,7 +18,7 @@ class RecordTest extends ChecksTestCase
         $this->check($this->st3, $this->acc)->assertForbidden()->assertJsonPath('message', 'Missing permission: account.reconcile_check');
         $this->check($this->st3, $this->csh)->assertForbidden()->assertJsonPath('message', 'Missing permission: report.view');
         $this->check($this->st3, $this->vw2)->assertForbidden()->assertJsonPath('message', 'Missing permission: account.reconcile_check');
-        $this->assertSame(['can_check' => false, 'can_withdraw' => false, 'blocked_reason' => null], $this->reprint($this->st3, $this->acc)['check_actions']);
+        $this->assertSame(['can_check' => false, 'can_withdraw' => false, 'blocked_reason' => null, 'withdraw_blocked_reason' => null], $this->reprint($this->st3, $this->acc)['check_actions']);
         $this->assertSame(0, BankStatementCheck::withoutGlobalScopes()->count());
     }
 
@@ -81,9 +81,9 @@ class RecordTest extends ChecksTestCase
     public function test_ac7_the_preparer_who_completed_cannot_check(): void
     {
         $this->check($this->st3, $this->ba)->assertForbidden()->assertJsonPath('message', ReconciliationChecks::PREPARER_COMPLETED);
-        $this->assertSame(['can_check' => false, 'can_withdraw' => false, 'blocked_reason' => 'You completed this statement. Someone else must check it.'],
+        $this->assertSame(['can_check' => false, 'can_withdraw' => false, 'blocked_reason' => 'You completed this statement. Someone else must check it.', 'withdraw_blocked_reason' => null],
             $this->reprint($this->st3, $this->ba)['check_actions']);
-        $this->assertSame(['can_check' => true, 'can_withdraw' => false, 'blocked_reason' => null], $this->reprint($this->st3, $this->vw)['check_actions']);
+        $this->assertSame(['can_check' => true, 'can_withdraw' => false, 'blocked_reason' => null, 'withdraw_blocked_reason' => null], $this->reprint($this->st3, $this->vw)['check_actions']);
     }
 
     public function test_ac8_a_user_who_ticked_a_frozen_line_cannot_check(): void
@@ -119,7 +119,7 @@ class RecordTest extends ChecksTestCase
     {
         $this->check($this->st2, $this->vw, ['note' => 'Checked the November statement'])->assertStatus(422)
             ->assertJsonPath('message', 'Only a completed statement can be checked.');
-        $this->assertSame(['can_check' => false, 'can_withdraw' => false, 'blocked_reason' => null], $this->reprint($this->st2)['check_actions']);
+        $this->assertSame(['can_check' => false, 'can_withdraw' => false, 'blocked_reason' => null, 'withdraw_blocked_reason' => null], $this->reprint($this->st2)['check_actions']);
         $this->assertNull($this->reprint($this->st2)['check_status']);
     }
 
@@ -128,13 +128,15 @@ class RecordTest extends ChecksTestCase
         $this->check($this->st3, $this->vw)->assertCreated();
         $this->check($this->st3, $this->admin, [], 'all')->assertStatus(422)->assertJsonPath('message', 'This statement is already checked.');
         // SA may withdraw any check; BA (the preparer) is blocked as the preparer first.
-        $this->assertSame(['can_check' => false, 'can_withdraw' => true, 'blocked_reason' => 'This statement is already checked.'],
+        $this->assertSame(['can_check' => false, 'can_withdraw' => true, 'blocked_reason' => 'This statement is already checked.', 'withdraw_blocked_reason' => null],
             $this->reprint($this->st3, $this->admin, 'all')['check_actions']);
-        $this->assertSame(['can_check' => false, 'can_withdraw' => false, 'blocked_reason' => ReconciliationChecks::PREPARER_COMPLETED],
+        $this->assertSame(['can_check' => false, 'can_withdraw' => false, 'blocked_reason' => ReconciliationChecks::PREPARER_COMPLETED, 'withdraw_blocked_reason' => null],
             $this->reprint($this->st3, $this->ba)['check_actions']);
-        $this->assertSame(['can_check' => false, 'can_withdraw' => true, 'blocked_reason' => 'This statement is already checked.'], $this->reprint($this->st3)['check_actions']);
+        $this->assertSame(['can_check' => false, 'can_withdraw' => true, 'blocked_reason' => 'This statement is already checked.', 'withdraw_blocked_reason' => null], $this->reprint($this->st3)['check_actions']);
 
-        // The database keeps one active check per statement whatever the code does (the race backstop).
+        // Two simultaneous checks are serialised by the account row lock (FOR UPDATE, then the statement row) taken before
+        // the active check is read, so the second sees the first and gets "already checked". The database keeps one active
+        // check per statement whatever the code does (the race backstop, tested here without two real connections).
         $c = $this->activeCheck($this->st3);
         try {
             DB::table('bank_statement_checks')->insert(collect($c->getAttributes())->except(['id', 'active_key'])->all());

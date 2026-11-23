@@ -53,6 +53,7 @@ class ReportService
     {
         self::$receiptColumns = null;
         self::$statementCopies = null;
+        ReconciliationChecks::forgetInstalled();
     }
 
     public static function statementCopiesSupported(): bool

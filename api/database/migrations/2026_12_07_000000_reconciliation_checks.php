@@ -3,7 +3,6 @@
 use App\Models\AuditLog;
 use App\Models\Role;
 use App\Support\MigrationPreflight;
-use Database\Seeders\PermissionSeeder;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
@@ -106,7 +105,7 @@ return new class extends Migration
 
     /**
      * R21 / AC 21: no DELETE; an UPDATE only as the one-time end of an active check (status to superseded, withdrawn or
-     * cancelled with ended_by and ended_at, superseded_by_id only on a supersede), or the one-time link of a superseded
+     * cancelled with ended_by and ended_at, an end_reason on a withdraw or cancel, superseded_by_id only on a supersede), or the one-time link of a superseded
      * check to the check that replaced it (Record writes the new check after ending the old one: the one-active-check
      * index allows no other order). Nothing else ever changes.
      */
@@ -115,7 +114,8 @@ return new class extends Migration
         $same = fn (string $c) => $mysql ? "(NEW.{$c} <=> OLD.{$c})" : "(NEW.{$c} IS OLD.{$c})";
         $frozen = implode(' AND ', array_map($same, self::FROZEN));
         $end = "(OLD.status = 'active' AND NEW.status IN ('superseded', 'withdrawn', 'cancelled') AND NEW.ended_by IS NOT NULL "
-            ."AND NEW.ended_at IS NOT NULL AND (NEW.status = 'superseded' OR NEW.superseded_by_id IS NULL))";
+            ."AND NEW.ended_at IS NOT NULL AND (NEW.status = 'superseded' OR NEW.superseded_by_id IS NULL) "
+            ."AND (NEW.status = 'superseded' OR (NEW.end_reason IS NOT NULL AND NEW.end_reason <> '')))";
         $link = "(OLD.status = 'superseded' AND NEW.status = 'superseded' AND OLD.superseded_by_id IS NULL AND NEW.superseded_by_id IS NOT NULL "
             ."AND {$same('ended_by')} AND {$same('ended_at')} AND {$same('end_reason')})";
         $allowed = "({$frozen} AND ({$end} OR {$link}))";
@@ -153,8 +153,8 @@ return new class extends Migration
         if ($id === null) {
             $now = now();
             $id = DB::table('permissions')->insertGetId(['name' => self::PERMISSION, 'guard_name' => 'web', 'created_at' => $now, 'updated_at' => $now]);
-            $all = collect(PermissionSeeder::TEMPLATES)->filter(fn ($p) => $p === '*')->keys();
-            foreach (DB::table('roles')->whereNull('branch_id')->whereIn('name', $all)->pluck('id') as $roleId) {
+            // Frozen: the templates that held every key ('*') when this migration was written.
+            foreach (DB::table('roles')->whereNull('branch_id')->whereIn('name', ['Branch Admin'])->pluck('id') as $roleId) {
                 DB::table('role_has_permissions')->insertOrIgnore(['permission_id' => $id, 'role_id' => $roleId]);
             }
         }
@@ -162,13 +162,18 @@ return new class extends Migration
         app(PermissionRegistrar::class)->forgetCachedPermissions();
     }
 
-    /** Branch roles (any branch) holding every other catalogue key receive the new one, audited (resumable: holders are skipped). */
+    /**
+     * Branch roles (any branch) holding every other catalogue key receive the new one, audited (resumable: holders are
+     * skipped). "Every other key" is the catalogue in the `permissions` table when this runs, not the live
+     * PermissionSeeder constant, so a key added by a later story never needs an edit here (AG-033d review S1).
+     */
     private function grantFullCopies(int $permissionId): void
     {
-        $others = array_values(array_diff(PermissionSeeder::PERMISSIONS, [self::PERMISSION, ...self::MAIN_ONLY]));
+        $others = DB::table('permissions')->where('guard_name', 'web')->whereNotIn('name', [self::PERMISSION, ...self::MAIN_ONLY])
+            ->orderBy('id')->pluck('name')->all();
         $otherIds = DB::table('permissions')->where('guard_name', 'web')->whereIn('name', $others)->pluck('id');
-        if ($otherIds->count() !== count($others)) {
-            return; // catalogue incomplete: leave roles to the Super Admin
+        if ($otherIds->isEmpty()) {
+            return;
         }
         $roles = DB::table('roles as r')->whereNotNull('r.branch_id')
             ->whereNotExists(fn ($q) => $q->selectRaw('1')->from('role_has_permissions as h')->whereColumn('h.role_id', 'r.id')->where('h.permission_id', $permissionId))

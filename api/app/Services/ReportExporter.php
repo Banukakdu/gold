@@ -829,10 +829,15 @@ class ReportExporter
                 }
                 foreach ($st['late_entries'] as $l) {
                     $notes[] = "Late entry {$l['ref_no']} dated ".$settings->formatDate($l['date']).' '.Money::format($l['amount']).' '.$l['kind'].' by '.($l['by'] ?? '-')
-                        .' at '.CarbonImmutable::parse($l['at'])->setTimezone('Asia/Colombo')->format('Y-m-d H:i');
+                        .' at '.CarbonImmutable::parse($l['at'])->setTimezone('Asia/Colombo')->format('Y-m-d H:i')
+                        .(($l['after_check'] ?? false) ? ' [after check]' : '');
                 }
                 $notes[] = 'Prepared by '.($st['completed_by']['name'] ?? '-').' on '.CarbonImmutable::parse($st['completed_at'])->setTimezone('Asia/Colombo')->format('Y-m-d H:i');
                 $notes[] = "{$st['self_count']} of {$st['lines_count']} ".($st['lines_count'] === 1 ? 'line was' : 'lines were').' recorded by the preparer';
+                // AG-033d S3 signature line, as on the PDF (QA D3).
+                if ($signed = ReconciliationChecks::signatureLine($st)) {
+                    $notes[] = $signed; // unchecked: the Check block already says "Not checked in the system."
+                }
                 // AG-033d S3: the Check block in the header block above the table (each a text cell, so a note is never a formula).
                 $intro[] = 'Check';
                 foreach (ReconciliationChecks::blockLines($st) as $line) {
