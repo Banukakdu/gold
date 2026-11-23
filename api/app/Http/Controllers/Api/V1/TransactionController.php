@@ -9,6 +9,7 @@ use App\Models\RecurringTemplate;
 use App\Models\Transaction;
 use App\Models\User;
 use App\Services\BackgroundExports;
+use App\Services\BankReconciliation;
 use App\Services\ExpenseApprovals;
 use App\Services\ExpenseTemplates;
 use App\Services\LedgerService;
@@ -29,7 +30,7 @@ class TransactionController extends Controller
 {
     /** Eager loads of the list and the export (R13: no N+1). */
     public const LIST_RELATIONS = ['branch:id,code,name', 'category:id,name,parent_id,is_active', 'category.parent:id,name,is_active',
-        'account:id,name,branch_id', 'fromAccount:id,name,branch_id', 'fromAccount.branch:id,code', 'toAccount:id,name,branch_id',
+        'account:id,name,branch_id,type', 'fromAccount:id,name,branch_id,type', 'fromAccount.branch:id,code', 'toAccount:id,name,branch_id,type',
         'toAccount.branch:id,code', 'creator:id,name,status,is_super_admin', 'reversalOf:id,ref_no', 'reversedBy:id,ref_no,reversal_of_id',
         // AG-052: serialises as receipt_by: {id, name}.
         'receiptBy:id,name',
@@ -49,6 +50,11 @@ class TransactionController extends Controller
         $rows = $page->getCollection();
         $this->tagAuthors($rows);
         $this->markLegacyVoids($rows);
+        // AG-033 SHOULD 10: the void / reverse dialogs warn when the contra lands on or before a reconciled bank date.
+        // `type` is loaded for that check only and hidden again, so rows never show another branch's account type.
+        $accounts = $rows->flatMap(fn ($t) => [$t->account, $t->fromAccount, $t->toAccount])->filter();
+        BankReconciliation::attachLastReconciledDates($request->user(), $accounts);
+        $accounts->each(fn ($a) => $a->makeHidden('type'));
         foreach ($rows as $t) {
             // R10 / accounting review finding 5: incoming rows are read-only (actions follow transactions.branch_id).
             $t->setAttribute('in_active_branch', $p->inActiveBranch($t));

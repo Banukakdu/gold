@@ -5,6 +5,7 @@ import { Account } from '../../core/models';
 import { MoneyPipe } from '../../core/money.pipe';
 import { errorText } from '../../core/api.interceptor';
 import { colomboToday } from '../../core/dates';
+import { lateEntryWarnings } from '../../core/reconciliation';
 
 /** Super Admin: give a branch its opening balance or a top-up from a Main account. Also owner capital into Main. */
 @Component({
@@ -31,6 +32,7 @@ import { colomboToday } from '../../core/dates';
       </label>
       <label>Amount <input type="number" name="amount" [(ngModel)]="m.amount" min="0.01" step="0.01" required /></label>
       <label>Date <input type="date" name="txn_date" [(ngModel)]="m.txn_date" [max]="today" required /></label>
+      @for (w of lateWarnings(); track w) { <p class="warn wide">{{ w }}</p> }
       <label>Note <input name="note" [(ngModel)]="m.note" /></label>
       @if (error()) { <div class="alert wide">{{ error() }}</div> }
       @if (saved()) { <div class="ok wide">Posted {{ saved() }}.@if (mustConfirm()) { The branch must confirm receipt. }</div> }
@@ -46,6 +48,7 @@ import { colomboToday } from '../../core/dates';
       </label>
       <label>Amount <input type="number" name="cap_amt" [(ngModel)]="c.amount" min="0.01" step="0.01" required /></label>
       <label>Date <input type="date" name="cap_date" [(ngModel)]="c.txn_date" [max]="today" required /></label>
+      @for (w of capitalWarnings(); track w) { <p class="warn wide">{{ w }}</p> }
       <label>Note <input name="cap_note" [(ngModel)]="c.note" /></label>
       <div class="wide actions"><button type="submit" class="ghost" [disabled]="busy()">Add capital</button></div>
     </form>
@@ -70,6 +73,11 @@ export class AllocationFormComponent implements OnInit {
     this.http.get<{ id: number; is_main: boolean }[]>('/api/v1/branches').subscribe(b => this.mainIds.set(new Set(b.filter(x => x.is_main).map(x => x.id))));
     this.http.get<any[]>('/api/v1/accounts').subscribe(a => this.accounts.set(a.filter(x => x.status !== 'closed')));
   }
+
+  /** AG-033 review finding 10: both sides of the opening balance / top-up (never blocking). */
+  lateWarnings() { return lateEntryWarnings([this.byId(this.m.from_account_id), this.byId(this.m.to_account_id)], this.m.txn_date); }
+  capitalWarnings() { return lateEntryWarnings([this.byId(this.c.account_id)], this.c.txn_date); }
+  private byId(id: number | null) { return this.accounts().find(a => a.id === id); }
 
   save() { this.post('/api/v1/allocations', this.m); }
   capital() { this.post('/api/v1/capital', this.c); }

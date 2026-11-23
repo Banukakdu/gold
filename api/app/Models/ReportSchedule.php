@@ -32,7 +32,7 @@ class ReportSchedule extends Model
     protected $casts = [
         'params' => 'array', 'branch_ids' => 'array', 'weekday' => 'integer', 'owner_id' => 'integer', 'created_by' => 'integer',
         'updated_by' => 'integer', 'archived_by' => 'integer', 'consecutive_failures' => 'integer',
-        'next_run_at' => 'datetime', 'archived_at' => 'datetime',
+        'next_run_at' => 'datetime', 'archived_at' => 'datetime', 'resumed_at' => 'datetime', 'last_failure_planned_at' => 'datetime',
     ];
 
     protected static function booted(): void

@@ -132,6 +132,7 @@ class AuditLogController extends Controller
         'report_schedule.owner_changed' => 'Report schedule owner changed',
         'report_schedule.run_built' => 'Scheduled report built',
         'report_schedule.run_failed' => 'Scheduled report failed',
+        'report_schedule.run_not_delivered' => 'Scheduled report not delivered',
         'report_schedule.run_missed' => 'Scheduled report missed',
         'report_schedule.delivered' => 'Scheduled report emailed',
         'report_schedule.delivery_skipped' => 'Scheduled report not sent',
