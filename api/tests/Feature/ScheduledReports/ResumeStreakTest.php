@@ -9,27 +9,40 @@ use App\Notifications\InAppNotification;
 use App\Services\ScheduledReportRuns;
 use App\Support\ReadSnapshot;
 use Carbon\CarbonImmutable;
+use Illuminate\Queue\TimeoutExceededException;
 use RuntimeException;
+use Throwable;
 
 /**
  * docs/specs/scheduled-reports.md R10 / R15 "Resume is a streak boundary", AC 57: a run planned before the last resume
  * that fails later (stale, job error or timeout, owner lost, nothing sent) is recorded and alerted, but not counted and
- * never pauses the schedule. A run planned after the resume counts as usual.
+ * never causes the R10 pause. Owner lost still pauses when the current owner has lost access too (R6 step 2). A run
+ * planned after the resume counts as usual.
  */
 class ResumeStreakTest extends ScheduledReportsTestCase
 {
-    /** D1 with a run queued at 2026-11-21 07:00; SA pauses at 07:10 and $resumer resumes at 07:30. */
-    private function queuedThenPausedAndResumed(array $over = [], $resumer = null): array
+    /**
+     * D1 with a run queued at $day 07:00; SA pauses at 07:10 and resumes at 07:30. With $priorFailure, the run of the day
+     * before fails first and is counted, so `last_failure_planned_at` is set before the resume (which keeps it).
+     */
+    private function queuedThenPausedAndResumed(array $over = [], string $day = '2026-11-21', bool $priorFailure = false): array
     {
         $d1 = $this->createD1($over);
-        $this->dispatchAt('2026-11-21 07:00');
+        if ($priorFailure) {
+            $this->dispatchAt(CarbonImmutable::parse($day)->subDay()->toDateString().' 07:00');
+            $this->failBuild();
+            $this->assertSame(1, $d1->fresh()->consecutive_failures);
+            $this->assertNotNull($d1->fresh()->last_failure_planned_at);
+        }
+        $this->dispatchAt("{$day} 07:00");
         $run = $this->latestRun($d1);
         $this->assertSame(ReportScheduleRun::QUEUED, $run->status);
-        $this->travelTo(CarbonImmutable::parse('2026-11-21 07:10', 'Asia/Colombo'));
+        $this->travelTo(CarbonImmutable::parse("{$day} 07:10", 'Asia/Colombo'));
         $this->as($this->admin)->postJson("/api/v1/report-schedules/{$d1->id}/pause")->assertOk();
-        $this->travelTo(CarbonImmutable::parse('2026-11-21 07:30', 'Asia/Colombo'));
-        $this->as($resumer ?? $this->admin)->postJson("/api/v1/report-schedules/{$d1->id}/resume")->assertOk();
+        $this->travelTo(CarbonImmutable::parse("{$day} 07:30", 'Asia/Colombo'));
+        $this->as($this->admin)->postJson("/api/v1/report-schedules/{$d1->id}/resume")->assertOk();
         $this->assertTrue($run->planned_at->lt($d1->fresh()->resumed_at));
+        $this->assertSame(0, $d1->fresh()->consecutive_failures);
 
         return [$d1, $run];
     }
@@ -44,39 +57,43 @@ class ResumeStreakTest extends ScheduledReportsTestCase
         return AuditLog::where('event', 'report_schedule.paused')->get()->filter(fn ($a) => $a->new_values['paused_reason'] === $reason)->count();
     }
 
-    private function failBuild(?string $id = null): void
+    private function failBuild(?string $id = null, ?Throwable $e = null): void
     {
-        ReadSnapshot::$hook = fn (string $p) => $p === 'counted' ? throw new RuntimeException('boom') : null;
+        $e ??= new RuntimeException('boom');
+        ReadSnapshot::$hook = fn (string $p) => $p === 'counted' ? throw $e : null;
         $this->work($id);
         ReadSnapshot::$hook = null;
     }
 
     public function test_ac57_a_stale_run_planned_before_the_resume_is_not_counted(): void
     {
-        [$d1, $run] = $this->queuedThenPausedAndResumed();
+        // 21 Nov fails and is counted; 22 Nov is queued at 07:00, SA pauses at 07:10 and resumes at 07:30.
+        [$d1, $run] = $this->queuedThenPausedAndResumed(day: '2026-11-22', priorFailure: true);
+        $lastFailure = $d1->fresh()->last_failure_planned_at;
+        $this->assertTrue($lastFailure->eq(CarbonImmutable::parse('2026-11-21 07:00', 'Asia/Colombo')));
 
         // Never picked up: failed stale at 09:01 (more than 120 minutes after it was queued).
-        $this->travelTo(CarbonImmutable::parse('2026-11-21 09:01', 'Asia/Colombo'));
+        $this->travelTo(CarbonImmutable::parse('2026-11-22 09:01', 'Asia/Colombo'));
         $this->artisan('reports:dispatch-scheduled')->assertExitCode(0);
         $run->refresh();
         $this->assertSame(ReportScheduleRun::FAILED, $run->status);
         $this->assertSame('stale', $run->failure_code);
         $d1->refresh();
         $this->assertSame(0, $d1->consecutive_failures);
-        $this->assertNull($d1->last_failure_planned_at);
+        $this->assertTrue($d1->last_failure_planned_at->eq($lastFailure));
         $this->assertSame(ReportSchedule::ACTIVE, $d1->status);
         $row = $this->failedRow($run);
         $this->assertSame('stale', $row->new_values['code']);
         $this->assertFalse($row->new_values['counted']);
         $this->assertSame('planned_before_resume', $row->new_values['not_counted_reason']);
-        // Still alerted as today.
-        $this->assertCount(1, $this->bell($this->admin, InAppNotification::SCHEDULE_RUN_FAILED));
-        $this->assertCount(1, $this->problemMailsTo($this->admin));
+        // Still alerted as today (the second alert; the first is the counted 21 Nov failure).
+        $this->assertCount(2, $this->bell($this->admin, InAppNotification::SCHEDULE_RUN_FAILED));
+        $this->assertCount(2, $this->problemMailsTo($this->admin));
 
         // A run planned after the resume that fails stale counts.
-        $this->dispatchAt('2026-11-22 07:00');
+        $this->dispatchAt('2026-11-23 07:00');
         $next = $this->latestRun($d1);
-        $this->travelTo(CarbonImmutable::parse('2026-11-22 09:01', 'Asia/Colombo'));
+        $this->travelTo(CarbonImmutable::parse('2026-11-23 09:01', 'Asia/Colombo'));
         $this->artisan('reports:dispatch-scheduled')->assertExitCode(0);
         $this->assertSame('stale', $next->fresh()->failure_code);
         $d1->refresh();
@@ -85,7 +102,7 @@ class ResumeStreakTest extends ScheduledReportsTestCase
         $row = $this->failedRow($next);
         $this->assertTrue($row->new_values['counted']);
         $this->assertNull($row->new_values['not_counted_reason']);
-        $this->assertCount(2, $this->bell($this->admin, InAppNotification::SCHEDULE_RUN_FAILED));
+        $this->assertCount(3, $this->bell($this->admin, InAppNotification::SCHEDULE_RUN_FAILED));
     }
 
     public function test_ac57_a_job_failure_after_the_resume_never_pauses_the_resumed_schedule(): void
@@ -114,6 +131,49 @@ class ResumeStreakTest extends ScheduledReportsTestCase
         $this->assertSame(ReportSchedule::PAUSED, $d1->status);
         $this->assertSame('repeated_failures', $d1->paused_reason);
         $this->assertTrue($this->failedRow($next)->new_values['counted']);
+    }
+
+    public function test_ac57_a_timeout_after_the_resume_is_not_counted(): void
+    {
+        config(['scheduled_reports.failures_before_pause' => 1]);
+        [$d1, $run] = $this->queuedThenPausedAndResumed();
+        $this->travelTo(CarbonImmutable::parse('2026-11-21 07:35', 'Asia/Colombo'));
+        $this->failBuild($run->id, new TimeoutExceededException('timed out'));
+        $this->assertSame('timeout', $run->fresh()->failure_code);
+        $d1->refresh();
+        $this->assertSame(ReportSchedule::ACTIVE, $d1->status);
+        $this->assertSame(0, $d1->consecutive_failures);
+        $row = $this->failedRow($run);
+        $this->assertSame('timeout', $row->new_values['code']);
+        $this->assertFalse($row->new_values['counted']);
+        $this->assertSame('planned_before_resume', $row->new_values['not_counted_reason']);
+    }
+
+    public function test_ac57_owner_lost_on_an_old_run_still_pauses_when_the_current_owner_lost_access_too(): void
+    {
+        // SA stays the owner at the resume (still active), and is deactivated afterwards.
+        [$d1, $run] = $this->queuedThenPausedAndResumed();
+        $this->assertSame($this->admin->id, $d1->fresh()->owner_id);
+        $this->travelTo(CarbonImmutable::parse('2026-11-21 07:40', 'Asia/Colombo'));
+        $this->admin->update(['status' => 'inactive']);
+
+        $this->travelTo(CarbonImmutable::parse('2026-11-21 07:45', 'Asia/Colombo'));
+        $this->work($run->id);
+        $run->refresh();
+        $this->assertSame('owner_lost_access', $run->failure_code);
+        $this->assertSame(ScheduledReportRuns::OWNER_LOST, $run->error);
+        $d1->refresh();
+        $this->assertSame(ReportSchedule::PAUSED, $d1->status);
+        $this->assertSame('owner_lost_access', $d1->paused_reason);
+        $this->assertNull($d1->next_run_at);
+        $this->assertSame(0, $d1->consecutive_failures);
+        $this->assertSame(1, $this->systemPauses('owner_lost_access'));
+        $row = $this->failedRow($run);
+        $this->assertFalse($row->new_values['counted']);
+        $this->assertSame('planned_before_resume', $row->new_values['not_counted_reason']);
+        // The pause alert, as in R6 step 2; no run_failed alert.
+        $this->assertCount(1, $this->bell($this->sa2, InAppNotification::SCHEDULE_PAUSED));
+        $this->assertCount(0, $this->bell($this->sa2, InAppNotification::SCHEDULE_RUN_FAILED));
     }
 
     public function test_ac57_owner_lost_on_a_run_planned_before_the_resume_does_not_pause_again(): void
@@ -149,12 +209,14 @@ class ResumeStreakTest extends ScheduledReportsTestCase
 
     public function test_ac57_nothing_sent_for_a_run_planned_before_the_resume_is_not_counted(): void
     {
-        [$d1, $run] = $this->queuedThenPausedAndResumed(['recipient_ids' => [$this->ak->id]]);
+        [$d1, $run] = $this->queuedThenPausedAndResumed(['recipient_ids' => [$this->ak->id]], '2026-11-22', priorFailure: true);
+        $lastFailure = $d1->fresh()->last_failure_planned_at;
         $this->ak->update(['status' => 'inactive']);
-        $this->travelTo(CarbonImmutable::parse('2026-11-21 07:35', 'Asia/Colombo'));
+        $this->travelTo(CarbonImmutable::parse('2026-11-22 07:35', 'Asia/Colombo'));
         $this->work($run->id);
         $this->assertSame(ReportScheduleRun::NOTHING_SENT, $run->fresh()->delivery_outcome);
         $this->assertSame(0, $d1->fresh()->consecutive_failures);
+        $this->assertTrue($d1->fresh()->last_failure_planned_at->eq($lastFailure));
         $built = AuditLog::where('event', 'report_schedule.run_built')->sole();
         $this->assertTrue($built->new_values['nothing_sent']);
         $this->assertFalse($built->new_values['counted']);
