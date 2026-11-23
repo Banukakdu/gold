@@ -304,6 +304,32 @@ class BankReconciliation
         })->values()->all();
     }
 
+    /**
+     * AG-033d R2: the entries on statement S now: its frozen lines, plus the uncleared lines and the cleared-but-booked-
+     * later lines its reprint lists (at S). Keyed by line id: who recorded the transaction, and whether it is uncleared.
+     *
+     * @return array<int, array{created_by: int, uncleared: bool}>
+     */
+    public function statementEntries(BankStatement $s): array
+    {
+        $accountId = (int) $s->account_id;
+        $date = $s->statement_date->format('Y-m-d');
+        $out = [];
+        $frozen = DB::table('bank_reconciliation_marks as m')->join('ledger_entries as le', 'le.id', '=', 'm.ledger_entry_id')
+            ->join('transactions as t', 't.id', '=', 'le.transaction_id')
+            ->where('m.statement_id', $s->id)->where('m.account_id', $accountId)->whereNull('m.unmarked_at')
+            ->get(['le.id', 't.created_by']);
+        $later = $this->clearedLaterQuery($accountId, $date)->join('transactions as t', 't.id', '=', 'le.transaction_id')->get(['le.id', 't.created_by']);
+        foreach ([...$frozen, ...$later] as $r) {
+            $out[(int) $r->id] = ['created_by' => (int) $r->created_by, 'uncleared' => false];
+        }
+        foreach ($this->unclearedQuery($accountId, $date)->get(['le.id', 't.created_by']) as $r) {
+            $out[(int) $r->id] = ['created_by' => (int) $r->created_by, 'uncleared' => true];
+        }
+
+        return $out;
+    }
+
     // ------------------------------------------------------------------ S1 screen (GET)
 
     public function screen(Account $account, ?string $statementDate, bool $showLater, bool $showReconciled, User $user): array
@@ -425,15 +451,20 @@ class BankReconciliation
         $people = $this->people($statements->pluck('completed_by')->merge($statements->pluck('undone_by'))->filter()->unique()->all(), (int) $account->branch_id);
         $mayUndoLast = $last && $this->mayUndo($last, $user);
         $late = $this->withLateLines($statements->where('status', BankStatement::COMPLETED));
+        $checks = app(ReconciliationChecks::class)->statusMap($statements);
 
-        return $statements->map(fn (BankStatement $s) => $this->present($s, $people, $last?->id === $s->id && $mayUndoLast, $late))->values()->all();
+        return $statements->map(fn (BankStatement $s) => $this->present($s, $people, $last?->id === $s->id && $mayUndoLast, $late, $checks))->values()->all();
     }
 
-    /** @param  array<int, true>|null  $late  statements with late lines (withLateLines); null: look up this one */
-    public function present(BankStatement $s, ?array $people = null, bool $canUndo = false, ?array $late = null): array
+    /**
+     * @param  array<int, true>|null  $late  statements with late lines (withLateLines); null: look up this one
+     * @param  array<int, array>|null  $checks  AG-033d ReconciliationChecks::statusMap(); null: look up this one
+     */
+    public function present(BankStatement $s, ?array $people = null, bool $canUndo = false, ?array $late = null, ?array $checks = null): array
     {
         $people ??= $this->people(array_filter([$s->completed_by, $s->undone_by]), (int) $s->branch_id);
         $late ??= $this->withLateLines(collect([$s]));
+        $checks ??= app(ReconciliationChecks::class)->statusMap(collect([$s]));
 
         return [
             'id' => $s->id,
@@ -455,6 +486,9 @@ class BankReconciliation
             'undo_reason' => $s->undo_reason,
             'changed_since_completion' => $this->changedFast($s, $late),
             'can_undo' => $canUndo,
+            // AG-033d S1 History "Checked" column.
+            'check_status' => $checks[$s->id]['status'] ?? null,
+            'check' => $checks[$s->id]['check'] ?? null,
         ];
     }
 
@@ -687,6 +721,8 @@ class BankReconciliation
             $s->update(['status' => BankStatement::UNDONE, 'undone_by' => $user->id, 'undone_at' => now(), 'undo_reason' => $reason]);
             AuditLog::record('reconciliation.undone', $acc, $old, ['status' => BankStatement::UNDONE, 'statement_id' => $s->id,
                 'statement_date' => $s->statement_date->format('Y-m-d'), 'reason' => $reason]);
+            // AG-033d R6: the statement is superseded, so its active check is cancelled in the same transaction.
+            app(ReconciliationChecks::class)->cancelOnUndo($s, $reason, $user);
 
             return $s->fresh();
         }, LedgerService::ATTEMPTS);
@@ -868,6 +904,8 @@ class BankReconciliation
                 'undone' => $s->status === BankStatement::UNDONE ? ['by' => $people[(int) $s->undone_by] ?? null,
                     'at' => $s->undone_at?->toIso8601String(), 'reason' => $s->undo_reason] : null,
             ];
+            // AG-033d S3: the check block and actions (access to the statement was checked in reportParams).
+            $statement = app(ReconciliationChecks::class)->reprint($s, $statement, auth()->user());
         }
 
         return array_merge(app(ReportService::class)->meta($p), [
@@ -934,6 +972,7 @@ class BankReconciliation
         'changed' => ['any' => 'All', 'yes' => 'Yes', 'no' => 'No'],
         'late' => ['any' => 'All', 'some' => 'Some', 'none' => 'None'],
         'copy' => ['any' => 'All', 'attached' => 'Attached', 'none' => 'None'],
+        'checked' => ['any' => 'All', 'checked' => 'Checked', 'recheck' => 'Re-check needed', 'not_checked' => 'Not checked'],
     ];
 
     /**
@@ -956,6 +995,7 @@ class BankReconciliation
             'changed' => 'nullable|in:any,yes,no',
             'late' => 'nullable|in:any,some,none',
             'copy' => 'nullable|in:any,attached,none',
+            'checked' => 'nullable|in:any,checked,recheck,not_checked',
             'page' => 'nullable|integer|min:1',
             'per_page' => 'nullable|integer|min:1|max:100',
         ])->validate();
@@ -987,6 +1027,7 @@ class BankReconciliation
             'changed' => $d['changed'] ?? 'any',
             'late' => $d['late'] ?? 'any',
             'copy' => $copy,
+            'checked' => $d['checked'] ?? 'any',
         ] + ($paging ? ['page' => (int) ($d['page'] ?? 1), 'per_page' => (int) ($d['per_page'] ?? 50)] : []));
     }
 
@@ -1023,7 +1064,9 @@ class BankReconciliation
         $late = $this->lateCounts($statements->where('status', BankStatement::COMPLETED));
         $lateIds = array_map(fn () => true, array_filter($late, fn ($c) => $c['n'] > 0));
         $changed = $x['changed'] === 'any' ? [] : $this->changedMap($statements, $lateIds);
-        $rows = $statements->filter(function (BankStatement $s) use ($x, $late, $changed) {
+        // AG-033d R4: the check status, worked out after the SQL cap like `changed` and `late`.
+        $checks = app(ReconciliationChecks::class)->statusMap($statements);
+        $rows = $statements->filter(function (BankStatement $s) use ($x, $late, $changed, $checks) {
             $completed = $s->status === BankStatement::COMPLETED;
             $n = $late[$s->id]['n'] ?? 0;
 
@@ -1035,7 +1078,7 @@ class BankReconciliation
                 'some' => $completed && $n > 0,
                 'none' => $completed && $n === 0,
                 default => true,
-            };
+            } && (($x['checked'] ?? 'any') === 'any' || ($completed && $checks[$s->id]['status'] === $x['checked']));
         })->sort(fn (BankStatement $a, BankStatement $b) => [$b->statement_date->format('Y-m-d'), $a->branch->is_main ? 0 : 1, $a->branch->code, (string) $a->account->code]
             <=> [$a->statement_date->format('Y-m-d'), $b->branch->is_main ? 0 : 1, $b->branch->code, (string) $b->account->code]
             ?: [$b->completed_at?->getTimestamp(), $b->id] <=> [$a->completed_at?->getTimestamp(), $a->id])->values();
@@ -1055,7 +1098,7 @@ class BankReconciliation
             $people[(int) $branchId] = $this->people($group->pluck('completed_by')->merge($group->pluck('undone_by'))->filter()->unique()->values()->all(), (int) $branchId);
         }
 
-        $data = $rows->map(function (BankStatement $s) use ($late, $changed, $files, $copies, $people) {
+        $data = $rows->map(function (BankStatement $s) use ($late, $changed, $files, $copies, $people, $checks) {
             $completed = $s->status === BankStatement::COMPLETED;
             $who = $people[(int) $s->branch_id] ?? [];
 
@@ -1078,6 +1121,9 @@ class BankReconciliation
                 'late_voided_count' => $completed ? ($late[$s->id]['v'] ?? 0) : null,
                 'attachments_count' => $copies ? ($files[$s->id]['active'] ?? 0) : null,
                 'attachments_removed_count' => $copies ? ($files[$s->id]['removed'] ?? 0) : null,
+                // AG-033d S6 "Checked" column.
+                'check_status' => $checks[$s->id]['status'] ?? null,
+                'check' => $checks[$s->id]['check'] ?? null,
             ];
         })->values()->all();
 
@@ -1087,7 +1133,8 @@ class BankReconciliation
         return array_merge(app(ReportService::class)->meta($p), [
             'provisional' => false, // the stored figures (finding 4)
             'basis' => self::LIST_BASIS,
-            'filters' => ['status' => $x['status'], 'changed' => $x['changed'], 'late' => $x['late'], 'copy' => $x['copy'], 'account_ids' => $x['account_ids']],
+            'filters' => ['status' => $x['status'], 'changed' => $x['changed'], 'late' => $x['late'], 'copy' => $x['copy'],
+                'checked' => $x['checked'] ?? 'any', 'account_ids' => $x['account_ids']],
             'copies_supported' => $copies,
             'accounts' => $accounts->map(fn (Account $a) => ['id' => $a->id, 'code' => $a->code, 'name' => $a->name,
                 'branch' => ['id' => $a->branch->id, 'code' => $a->branch->code], 'status' => $a->status,
@@ -1225,6 +1272,7 @@ class BankReconciliation
         if ($d['copies_supported']) {
             $parts[] = 'Bank statement copy: '.self::LIST_FILTER_LABELS['copy'][$f['copy']];
         }
+        $parts[] = 'Checked: '.self::LIST_FILTER_LABELS['checked'][$f['checked'] ?? 'any'];
         $parts[] = 'Accounts: '.$accounts;
 
         return 'Filters: '.implode(' · ', $parts);

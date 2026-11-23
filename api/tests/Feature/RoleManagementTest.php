@@ -118,7 +118,9 @@ class RoleManagementTest extends UsersAndRolesTestCase
             'report.dashboard', 'report.view', 'report.export', 'audit.view', 'category.manage', 'transfer.acknowledge', 'account.reconcile'], $tpl['Accountant']->permissionKeys());
         $this->assertEqualsCanonicalizing(['branch.view', 'account.view', 'transaction.view', 'income.create', 'expense.create', 'report.dashboard',
             'transfer.acknowledge'], $tpl['Cashier']->permissionKeys());
-        $this->assertEqualsCanonicalizing(['branch.view', 'account.view', 'transaction.view', 'report.dashboard', 'report.view', 'audit.view'], $tpl['Viewer']->permissionKeys());
+        // AG-033d Q1: the Viewer / Auditor is the independent checker of bank reconciliation statements.
+        $this->assertEqualsCanonicalizing(['branch.view', 'account.view', 'transaction.view', 'report.dashboard', 'report.view', 'audit.view',
+            'account.reconcile_check'], $tpl['Viewer']->permissionKeys());
         foreach (['Accountant', 'Cashier', 'Viewer'] as $n) {
             $this->assertEmpty(array_filter($tpl[$n]->permissionKeys(), fn ($k) => str_starts_with($k, 'user.') || str_starts_with($k, 'role.')));
         }

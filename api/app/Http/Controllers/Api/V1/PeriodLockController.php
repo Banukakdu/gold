@@ -12,6 +12,7 @@ use App\Models\YearEndClose;
 use App\Services\Backups\BackupStatus;
 use App\Services\BankReconciliation;
 use App\Services\ExpenseApprovals;
+use App\Services\ReconciliationChecks;
 use App\Services\TransferApprovals;
 use App\Services\TransferReceipts;
 use App\Support\BranchContext;
@@ -131,7 +132,29 @@ class PeriodLockController extends Controller
             // AG-064 S8: expense requests dated in the month and still pending; never blocking.
             + app(ExpenseApprovals::class)->pendingSummary(substr($periodEnd, 0, 8).'01', $periodEnd, $branches->pluck('id')->map(fn ($id) => (int) $id)->all())
             // AG-033 S4 (Q8): bank accounts not reconciled through the month end; information only, never blocking.
-            + ['bank_reconciliation' => app(BankReconciliation::class)->lockReview($period, $branches->pluck('id')->map(fn ($id) => (int) $id)->all())];
+            + ['bank_reconciliation' => app(BankReconciliation::class)->lockReview($period, $branches->pluck('id')->map(fn ($id) => (int) $id)->all())]
+            // AG-033d S2 (D4): completed statements in the newly closed months not checked, or needing a re-check; never blocking.
+            + ['bank_reconciliation_checks' => app(ReconciliationChecks::class)->lockReview($period, $open->map(fn ($t) => (string) $t)->all())];
+    }
+
+    /**
+     * AG-033d S2 / accounting review finding 3: what the lock confirm showed, for the `period.locked` audit row:
+     * [{branch_id, not_checked: [statement ids], recheck: [statement ids]}] per branch this lock newly closes.
+     */
+    private static function checksShown(string $period, ?int $branchId): array
+    {
+        $through = PeriodLock::closedThrough();
+        $branches = $branchId ? [$branchId] : Branch::pluck('id')->map(fn ($id) => (int) $id)->all();
+        $open = [];
+        foreach ($branches as $id) {
+            $t = PeriodLock::throughFor($through, $id);
+            if ($t < $period) {
+                $open[$id] = $t;
+            }
+        }
+
+        return array_map(fn ($r) => ['branch_id' => $r['branch']['id'], 'not_checked' => array_column($r['not_checked'], 'statement_id'),
+            'recheck' => array_column($r['recheck'], 'statement_id')], app(ReconciliationChecks::class)->lockReview($period, $open));
     }
 
     public function store(Request $request)
@@ -168,8 +191,10 @@ class PeriodLockController extends Controller
                 $unbalanced = LedgerChecks::unbalanced($branchId, $through)->pluck('transaction_id')->unique()->count();
                 abort_if($unbalanced > 0, 422, "{$unbalanced} entries up to {$label} are not balanced. Run ledger:verify.");
 
+                // AG-033d finding 3: computed in the lock transaction, before this lock exists, with the lock confirm's rule.
+                $checks = self::checksShown($period, $branchId);
                 $lock = PeriodLock::create(['branch_id' => $branchId, 'period' => $period, 'locked_by' => $request->user()->id]);
-                AuditLog::record('period.locked', $lock, null, ['period' => $period, 'branch_id' => $branchId], $branchId);
+                AuditLog::record('period.locked', $lock, null, ['period' => $period, 'branch_id' => $branchId, 'bank_reconciliation_checks' => $checks], $branchId);
 
                 return $lock;
             }, self::ATTEMPTS);

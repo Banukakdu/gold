@@ -44,6 +44,9 @@ class MigrationTest extends TestCase
 
     private function rollback(): void
     {
+        // AG-033d (bank_statement_checks) references bank_statements; MySQL refuses to drop a referenced table, so the
+        // later migration is rolled back first, as a normal rollback would.
+        $this->artisan('migrate:rollback', ['--path' => 'database/migrations/2026_12_07_000000_reconciliation_checks.php', '--force' => true])->assertExitCode(0);
         $this->artisan('migrate:rollback', ['--path' => self::FILE, '--force' => true])->assertExitCode(0);
         app(PermissionRegistrar::class)->forgetCachedPermissions();
     }
@@ -94,10 +97,12 @@ class MigrationTest extends TestCase
         $this->assertNotContains('account.reconcile', Role::find($narrowed)->permissionKeys());
         $this->assertNotContains('account.reconcile', Role::find($accountant)->permissionKeys());
         $this->assertNotContains('account.reconcile', $tpl->fresh()->permissionKeys());
-        // No other role gained anything: the two full copies gained one key each.
-        $this->assertSame($before + 2, DB::table('role_has_permissions')->whereNotIn('role_id', Role::whereNull('branch_id')->where('name', 'Branch Admin')->pluck('id'))->count());
+        // No other role gained anything: the two full copies gained one key each (and AG-033d, migrated again after it,
+        // account.reconcile_check each).
+        $this->assertSame($before + 4, DB::table('role_has_permissions')->whereNotIn('role_id', Role::whereNull('branch_id')->where('name', 'Branch Admin')->pluck('id'))->count());
         // Each grant is audited as a Roles-screen change would be.
-        $audits = DB::table('audit_logs')->where('event', 'role.updated')->where('auditable_type', Role::class)->whereIn('auditable_id', [$admin, $kdyAdmin])->get();
+        $audits = DB::table('audit_logs')->where('event', 'role.updated')->where('auditable_type', Role::class)->whereIn('auditable_id', [$admin, $kdyAdmin])
+            ->where('new_values->source', 'migration bank_reconciliation (AG-033)')->get();
         $this->assertCount(2, $audits);
         foreach ($audits as $a) {
             $this->assertSame($kdy, (int) $a->branch_id);
@@ -112,7 +117,7 @@ class MigrationTest extends TestCase
         $this->seed(PermissionSeeder::class);
         $this->assertSame($t, $this->templates());
         $this->assertSame(1, DB::table('permissions')->where('name', 'account.reconcile')->count());
-        $this->assertSame(2, DB::table('audit_logs')->where('event', 'role.updated')->whereIn('auditable_id', [$admin, $kdyAdmin])->count());
+        $this->assertSame(4, DB::table('audit_logs')->where('event', 'role.updated')->whereIn('auditable_id', [$admin, $kdyAdmin])->count());
     }
 
     /** Review finding 5: a run that stopped after the tables were created adds the one-active-row constraints next time. */

@@ -833,6 +833,11 @@ class ReportExporter
                 }
                 $notes[] = 'Prepared by '.($st['completed_by']['name'] ?? '-').' on '.CarbonImmutable::parse($st['completed_at'])->setTimezone('Asia/Colombo')->format('Y-m-d H:i');
                 $notes[] = "{$st['self_count']} of {$st['lines_count']} ".($st['lines_count'] === 1 ? 'line was' : 'lines were').' recorded by the preparer';
+                // AG-033d S3: the Check block in the header block above the table (each a text cell, so a note is never a formula).
+                $intro[] = 'Check';
+                foreach (ReconciliationChecks::blockLines($st) as $line) {
+                    $intro[] = $line;
+                }
             }
             $sheets[] = [
                 'title' => $acc['branch']['code'].' '.$acc['name'],
@@ -865,6 +870,8 @@ class ReportExporter
         if ($copies) {
             $columns = [...$columns, ['Bank statement files', 'integer'], ['Removed files', 'integer'], ['Bank statement copy', 'text']];
         }
+        // AG-033d S6 exports.
+        $columns = [...$columns, ['Check status', 'text'], ['Checked by', 'text'], ['Checked at', 'datetime'], ['Compared with', 'text']];
         $rows = array_map(function ($r) use ($row, $colombo, $copies) {
             $undone = $r['status'] === 'undone';
             $cells = [$r['branch']['code'], self::listAccountText($r['account']), $r['statement_date'], $r['statement_balance'],
@@ -875,6 +882,9 @@ class ReportExporter
             if ($copies) {
                 $cells = [...$cells, $r['attachments_count'], $r['attachments_removed_count'], self::copyText($r)];
             }
+            $c = $r['check'] ?? null;
+            $cells = [...$cells, ReconciliationChecks::STATUS_LABELS[$r['check_status'] ?? ''] ?? '', $c ? self::personText($c['checked_by']) : '',
+                $c ? ReconciliationChecks::at($c['checked_at']) : '', $c ? (ReconciliationChecks::COMPARED_SHORT[$c['compared_with']] ?? $c['compared_with']) : ''];
 
             return $row($cells);
         }, $d['data']);

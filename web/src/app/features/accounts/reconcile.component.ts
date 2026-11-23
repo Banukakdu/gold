@@ -10,7 +10,7 @@ import { colomboToday } from '../../core/dates';
 import { Account } from '../../core/models';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
 import { ToastService } from '../../core/toast.service';
-import { dayLabel } from '../../core/reconciliation';
+import { CheckStatus, CheckSummary, checkStatusText, dayLabel } from '../../core/reconciliation';
 
 export { dayLabel };
 
@@ -26,6 +26,8 @@ export interface ReconStatement {
   id: number; statement_date: string; statement_balance: string; lines_count: number; self_count: number; status: 'completed' | 'undone';
   completed_by: Person | null; completed_at: string; undone_by: Person | null; undone_at: string | null; undo_reason: string | null;
   changed_since_completion: boolean; can_undo: boolean;
+  /** AG-033d S1 History "Checked". */
+  check_status?: CheckStatus; check?: CheckSummary | null;
 }
 export interface Reconciliation {
   account: { id: number; code: string | null; name: string; status: string; branch: { id: number; code: string; name: string } };
@@ -202,6 +204,10 @@ function previousMonthEnd(today: string): string {
             <div><b>{{ label(s.statement_date) }}</b> · {{ balanceText(s.statement_balance) }} · {{ s.lines_count }} {{ s.lines_count === 1 ? 'line' : 'lines' }}
               <span class="tag" [attr.data-s]="s.status === 'undone' ? 'void' : 'balanced'">{{ s.status === 'undone' ? 'Undone' : 'Completed' }}</span>
               @if (s.changed_since_completion) { <span class="tag att-late">Changed since completion</span> }</div>
+            @if (checkText(s); as t) {
+              <div class="rc-checked">Checked: <span class="tag" [attr.data-s]="s.check_status === 'checked' ? 'balanced' : null"
+                [class.att-late]="s.check_status === 'recheck' || s.check_status === 'not_checked'">{{ t }}</span></div>
+            }
             <div class="muted">Prepared by {{ s.completed_by?.name }}@if (s.completed_by?.tag; as t) { ({{ t }}) } on {{ s.completed_at | appDateTime }} · {{ s.self_count }} of {{ s.lines_count }} {{ s.lines_count === 1 ? 'line was' : 'lines were' }} recorded by the preparer</div>
             @if (s.status === 'undone') { <div class="muted">Undone by {{ s.undone_by?.name }} on {{ s.undone_at | appDateTime }}: {{ s.undo_reason }}</div> }
             <div class="rc-hact">
@@ -516,6 +522,8 @@ export class ReconcileComponent implements OnInit {
   // ------------------------------------------------------------------ display
 
   label(d: string | null | undefined) { return dayLabel(d); }
+  /** AG-033d: "Checked by VW, 2026-12-10", "Re-check needed (1 since check)", "Not checked", "Check cancelled". */
+  checkText(s: ReconStatement) { return checkStatusText(s.check_status ?? null, s.check); }
   text(c: number) { return centsText(c); }
   typeLabel(t: string) { return TYPE_LABELS[t] ?? t; }
   /** Review finding 3: a negative statement balance reads "Overdrawn 2,500.00". */

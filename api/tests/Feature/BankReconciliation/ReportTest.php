@@ -113,9 +113,11 @@ class ReportTest extends BankReconciliationTestCase
         $this->assertCount(1, $r->json('accounts'));
         $text = implode(' ', $this->pdfPages($this->export(['statement_id' => $s->id], 'pdf')->assertOk()->getContent()));
         foreach (['Bank reconciliation statement', 'Balance per bank statement', 'Difference', 'Prepared by '.$this->acc->name, '2 of 4 lines were recorded by the preparer',
-            'Checked by', 'Approved by'] as $needle) {
+            'Checked by', 'Not checked in the system'] as $needle) {
             $this->assertStringContainsString($needle, $text);
         }
+        // AG-033d D1: no Approved by line on the statement.
+        $this->assertStringNotContainsString('Approved by', $text);
         // Another branch's statement is not in scope.
         $this->report(['statement_id' => $s->id], $this->gacc, $this->gal)->assertNotFound();
         $this->report(['statement_id' => $s->id], $this->admin, 'all')->assertOk();

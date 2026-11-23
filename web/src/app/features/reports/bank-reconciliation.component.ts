@@ -1,5 +1,5 @@
 import { Component, OnInit, computed, inject, signal } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { AuthService } from '../../core/auth.service';
@@ -7,7 +7,11 @@ import { AppDatePipe, AppDateTimePipe } from '../../core/app-date.pipe';
 import { colomboToday } from '../../core/dates';
 import { Account } from '../../core/models';
 import { MoneyPipe, TYPE_LABELS } from '../../core/money.pipe';
-import { dayLabel } from '../../core/reconciliation';
+import { errorText } from '../../core/api.interceptor';
+import { ToastService } from '../../core/toast.service';
+import {
+  COMPARED_LABELS, CheckActions, CheckStatus, StatementCheck, checkHistoryText, checkTags, colomboMinute, dayLabel, personName, recheckText,
+} from '../../core/reconciliation';
 import {
   BranchPickerComponent, ExportButtonsComponent, ReportHeadComponent, ReportMeta, ReportParams,
   fieldErrors, readQuery, reportError, toHttpParams, writeQuery,
@@ -31,9 +35,13 @@ export interface BankReport extends ReportMeta {
   statement: {
     id: number; status: 'completed' | 'undone'; statement_date: string; statement_balance: string; overdrawn: boolean;
     expected_bank_balance: string; difference: string; changed_since_completion: boolean;
-    late_entries: { ref_no: string; date: string; amount: string; kind: 'recorded' | 'voided'; by: string | null; at: string }[];
+    late_entries: { entry_id: number; ref_no: string; date: string; amount: string; kind: 'recorded' | 'voided'; by: string | null; at: string; after_check?: boolean }[];
     lines_count: number; self_count: number; completed_by: Person | null; completed_at: string;
     undone: { by: Person | null; at: string; reason: string } | null;
+    /** AG-033d: the check block (section 5). */
+    check_status?: CheckStatus; checks?: StatementCheck[]; late_since_check?: number | null; check_actions?: CheckActions;
+    /** AG-033d: statement files (AG-033b) uploaded by the active checker; null when copies are not supported. */
+    checker_attachment_ids?: number[] | null;
   } | null;
 }
 
@@ -137,26 +145,120 @@ export interface BankReport extends ReportMeta {
 
       @if (r.statement; as s) {
         @if (s.changed_since_completion) { <p class="warn">Changed since completion</p> }
+        <!-- AG-033d S3: the Check block, after the balance / difference (and the AG-033b copy), before the late entries. -->
+        <section class="card ck-block" aria-labelledby="ck-title">
+          <h2 id="ck-title">Check</h2>
+          @if (active(); as c) {
+            <div class="ck-checked">
+              <span class="ck-l1"><b>Checked by {{ name(c.checked_by) }}</b></span>
+              <span class="ck-l2"> on {{ minute(c.checked_at) }} (Asia/Colombo) against {{ compared(c) }}.</span>
+            </div>
+            @if (c.note) { <div class="ck-note">Note: {{ c.note }}</div> }
+            @if (tags(c).length) {
+              <div class="ck-tags">@for (t of tags(c); track t) { <span class="tag att-late">{{ t }}</span> }</div>
+            }
+            @if (s.late_since_check) { <p class="warn ck-recheck">{{ recheck(s.late_since_check) }}</p> }
+          } @else {
+            <p class="muted ck-none">Not checked in the system.</p>
+          }
+          @if (ended().length) {
+            <ul class="ck-history">@for (c of ended(); track c.id) { <li>{{ history(c) }}</li> }</ul>
+          }
+          @if (s.check_actions; as a) {
+            @if (a.can_check || a.blocked_reason || a.can_withdraw) {
+              <div class="ck-actions no-print">
+                @if (a.can_check || a.blocked_reason) {
+                  <div class="ck-act">
+                    <button type="button" [disabled]="!a.can_check || saving()" (click)="openCheck()">{{ s.check_status === 'recheck' ? 'Re-check' : 'Record check' }}</button>
+                    @if (a.blocked_reason) { <small class="muted ck-why">{{ a.blocked_reason }}</small> }
+                  </div>
+                }
+                @if (a.can_withdraw) { <button type="button" class="ghost" [disabled]="saving()" (click)="openWithdraw()">Withdraw check</button> }
+              </div>
+            }
+          }
+        </section>
         @if (s.late_entries.length) {
           <h2>Late entries (added or voided after the statement was completed)</h2>
           <div class="card">
             @for (l of s.late_entries; track $index) {
-              <div>{{ l.ref_no }} · {{ l.date | appDate }} · {{ l.amount | money }} · {{ l.kind === 'voided' ? 'Voided' : 'Recorded' }} by {{ l.by ?? '-' }} at {{ l.at | appDateTime }}</div>
+              <div>{{ l.ref_no }} · {{ l.date | appDate }} · {{ l.amount | money }} · {{ l.kind === 'voided' ? 'Voided' : 'Recorded' }} by {{ l.by ?? '-' }} at {{ l.at | appDateTime }}
+                @if (l.after_check) { <span class="tag att-late">after check</span> }</div>
             }
           </div>
         }
         <p>Prepared by {{ s.completed_by?.name }} on {{ s.completed_at | appDateTime }}</p>
         <p>{{ s.self_count }} of {{ s.lines_count }} {{ s.lines_count === 1 ? 'line was' : 'lines were' }} recorded by the preparer</p>
+        <!-- AG-033d D1: the recorded check replaces the blank Checked by line; no Approved by line. -->
         <div class="signatures print-only">
-          @for (who of ['Checked by', 'Approved by']; track who) { <div><b>{{ who }}</b><span>Name</span><span>Signature</span><span>Date</span></div> }
+          @if (active(); as c) {
+            <p><b>Checked by {{ name(c.checked_by) }} on {{ minute(c.checked_at) }} (recorded in Account-gold, check #{{ c.id }})@if (s.late_since_check) { - Re-check needed }</b></p>
+          } @else {
+            <div><b>Checked by</b><span>Name</span><span>Signature</span><span>Date</span></div>
+            <p class="muted">Not checked in the system</p>
+          }
         </div>
       }
+    }
+    @if (loading() && statementId()) { <p class="ck-skel" aria-hidden="true">&nbsp;</p> }
+
+    @if (dialog() === 'check' && r()?.statement; as s) {
+      <div class="att-backdrop" (click)="close()"></div>
+      <div class="card att-dialog ap-dialog ck-sheet" role="dialog" aria-modal="true" aria-labelledby="ck-dlg-title">
+        <div class="ck-sheet-head">
+          <h2 id="ck-dlg-title">{{ s.check_status === 'recheck' ? 'Re-check' : 'Record check' }}</h2>
+          <button type="button" class="ghost ck-close" aria-label="Close" (click)="close()">×</button>
+        </div>
+        <div class="ck-sheet-body">
+          <p class="ck-facts">{{ accountName() }} · statement of {{ label(s.statement_date) }} · balance {{ balanceText(s.statement_balance) }} · late entries {{ s.late_entries.length }}</p>
+          <fieldset class="ck-radios">
+            <legend>Compared with</legend>
+            <label class="ck-opt"><input type="radio" name="compared_with" value="bank_statement" [ngModel]="comparedWith()" (ngModelChange)="comparedWith.set($event)" />
+              <span>The bank's statement (paper or PDF received from the bank)</span></label>
+            <label class="ck-opt"><input type="radio" name="compared_with" value="internet_banking" [ngModel]="comparedWith()" (ngModelChange)="comparedWith.set($event)" />
+              <span>Internet banking</span></label>
+            <small class="muted ck-hint">Not the uploaded copy alone. Use the bank's balance at the end of {{ s.statement_date }}, not today's balance.</small>
+          </fieldset>
+          <label class="ck-opt ck-confirm"><input type="checkbox" name="confirmed" [ngModel]="confirmed()" (ngModelChange)="confirmed.set($event)" />
+            <span>I agreed the statement balance ({{ balanceText(s.statement_balance) }}) to the bank's own record of the balance at the end of {{ s.statement_date }}, and I checked that the uncleared items on this statement are genuine (they appear on the bank's record after {{ s.statement_date }}, or I saw the cheque book or deposit record).</span></label>
+          <label class="ck-note-field">Note {{ noteRequired() ? '(10-500 characters)' : '(optional, up to 500 characters)' }}
+            <textarea rows="3" name="note" maxlength="500" [ngModel]="note()" (ngModelChange)="note.set($event)"></textarea>
+            @if (noteRequired()) { <small class="muted">Explain the late entries you checked.</small> }
+          </label>
+          @if (dlgError()) { <div class="alert">{{ dlgError() }}</div> }
+        </div>
+        <div class="att-dialog-actions ck-sheet-bar">
+          <button type="button" class="ghost" (click)="close()">Cancel</button>
+          <button type="button" [disabled]="saving() || !checkValid()" (click)="saveCheck()">Save</button>
+        </div>
+      </div>
+    }
+
+    @if (dialog() === 'withdraw' && active(); as c) {
+      <div class="att-backdrop" (click)="close()"></div>
+      <div class="card att-dialog ap-dialog ck-sheet" role="dialog" aria-modal="true" aria-labelledby="ck-wd-title">
+        <div class="ck-sheet-head">
+          <h2 id="ck-wd-title">Withdraw check</h2>
+          <button type="button" class="ghost ck-close" aria-label="Close" (click)="close()">×</button>
+        </div>
+        <div class="ck-sheet-body">
+          <p>Withdraw {{ c.checked_by?.id === auth.me()?.id ? 'your check' : 'the check by ' + name(c.checked_by) }} of {{ accountName() }}, {{ label(r()!.statement!.statement_date) }}? The check stays in the history.</p>
+          <label class="ck-note-field">Reason (10-500 characters)
+            <textarea rows="3" name="reason" maxlength="500" [ngModel]="reason()" (ngModelChange)="reason.set($event)"></textarea></label>
+          @if (dlgError()) { <div class="alert">{{ dlgError() }}</div> }
+        </div>
+        <div class="att-dialog-actions ck-sheet-bar">
+          <button type="button" class="ghost" (click)="close()">Cancel</button>
+          <button type="button" [disabled]="saving() || reason().trim().length < 10" (click)="saveWithdraw(c)">Withdraw check</button>
+        </div>
+      </div>
     }
   `,
 })
 export class BankReconciliationReportComponent implements OnInit {
   auth = inject(AuthService);
   private http = inject(HttpClient);
+  private toast = inject(ToastService);
   private router = inject(Router);
   private route = inject(ActivatedRoute);
   today = colomboToday();
@@ -176,6 +278,26 @@ export class BankReconciliationReportComponent implements OnInit {
     return this.auth.isAllBranches() && b.length ? this.banks().filter(a => b.includes(a.branch_id)) : this.banks();
   });
   private money = new MoneyPipe();
+  /** AG-033d dialogs. */
+  dialog = signal<'check' | 'withdraw' | null>(null);
+  saving = signal(false);
+  dlgError = signal('');
+  comparedWith = signal<string>('');
+  confirmed = signal(false);
+  note = signal('');
+  reason = signal('');
+  active = computed(() => this.r()?.statement?.checks?.find(c => c.status === 'active') ?? null);
+  ended = computed(() => (this.r()?.statement?.checks ?? []).filter(c => c.status !== 'active'));
+  accountName = computed(() => this.r()?.accounts[0]?.account.name ?? '');
+  /** R3 rule 5 (the API decides): changed since completion, late entries, or a re-check. */
+  noteRequired = computed(() => {
+    const s = this.r()?.statement;
+    return !!s && (s.changed_since_completion || s.late_entries.length > 0 || !!this.active());
+  });
+  checkValid = computed(() => {
+    const n = this.note().trim();
+    return !!this.comparedWith() && this.confirmed() && n.length <= 500 && (!this.noteRequired() || n.length >= 10);
+  });
 
   errLine() { return Object.values(this.errs()).join(' '); }
 
@@ -214,4 +336,63 @@ export class BankReconciliationReportComponent implements OnInit {
   /** Review finding 3: "Overdrawn 2,500.00" for a negative statement balance. */
   balanceText(v: string) { return v.startsWith('-') ? `Overdrawn ${this.money.transform(v.slice(1))}` : this.money.transform(v); }
   print() { window.print(); }
+
+  // ------------------------------------------------------------------ AG-033d check
+
+  name(p: Person | null | undefined) { return personName(p); }
+  minute(iso: string) { return colomboMinute(iso); }
+  compared(c: StatementCheck) { return COMPARED_LABELS[c.compared_with] ?? c.compared_with; }
+  tags(c: StatementCheck) { return checkTags(c); }
+  history(c: StatementCheck) { return checkHistoryText(c); }
+  recheck(n: number) { return recheckText(n); }
+
+  openCheck() {
+    this.comparedWith.set('');
+    this.confirmed.set(false);
+    this.note.set('');
+    this.dlgError.set('');
+    this.dialog.set('check');
+  }
+
+  openWithdraw() {
+    this.reason.set('');
+    this.dlgError.set('');
+    this.dialog.set('withdraw');
+  }
+
+  close() { if (!this.saving()) this.dialog.set(null); }
+
+  private base(): string | null {
+    const s = this.r()?.statement, a = this.r()?.accounts[0]?.account;
+    return s && a ? `/api/v1/accounts/${a.id}/reconciliation/statements/${s.id}/checks` : null;
+  }
+
+  /** 403 / 422: the API message in the dialog; a network error keeps the values. */
+  private fail(e: unknown) {
+    this.saving.set(false);
+    this.dlgError.set((e as HttpErrorResponse)?.status === 0 ? 'Could not save the check. Try again.' : errorText(e));
+  }
+
+  saveCheck() {
+    const url = this.base();
+    if (!url || this.saving() || !this.checkValid()) return;
+    this.saving.set(true);
+    this.dlgError.set('');
+    const note = this.note().trim();
+    this.http.post(url, { compared_with: this.comparedWith(), confirmed: true, note: note || null }).subscribe({
+      next: () => { this.saving.set(false); this.dialog.set(null); this.toast.show('Check recorded.'); this.load(); },
+      error: e => this.fail(e),
+    });
+  }
+
+  saveWithdraw(c: StatementCheck) {
+    const url = this.base();
+    if (!url || this.saving() || this.reason().trim().length < 10) return;
+    this.saving.set(true);
+    this.dlgError.set('');
+    this.http.post(`${url}/${c.id}/withdraw`, { reason: this.reason().trim() }).subscribe({
+      next: () => { this.saving.set(false); this.dialog.set(null); this.toast.show('Check withdrawn.'); this.load(); },
+      error: e => this.fail(e),
+    });
+  }
 }

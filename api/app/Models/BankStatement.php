@@ -6,6 +6,8 @@ use App\Models\Concerns\BranchScoped;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 /**
  * AG-033: a completed reconciliation of one bank account up to statement_date (docs/specs/bank-reconciliation.md).
@@ -51,5 +53,17 @@ class BankStatement extends Model
     public function undoneBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'undone_by');
+    }
+
+    /** AG-033d: every check of this statement (ended ones included), oldest first. Route binding of {check} (scopeBindings). */
+    public function checks(): HasMany
+    {
+        return $this->hasMany(BankStatementCheck::class)->withoutGlobalScopes()->orderBy('id');
+    }
+
+    /** AG-033d: the active check (at most one, unique active_key). */
+    public function activeCheck(): HasOne
+    {
+        return $this->hasOne(BankStatementCheck::class)->withoutGlobalScopes()->where('status', BankStatementCheck::ACTIVE);
     }
 }

@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Account;
 use App\Models\AuditLog;
 use App\Models\Backup;
+use App\Models\BankStatement;
 use App\Models\Branch;
 use App\Models\Category;
 use App\Models\PeriodLock;
@@ -182,6 +183,10 @@ class AuditLogController extends Controller
         'reconciliation.saved' => 'Bank lines reconciled',
         'reconciliation.completed' => 'Bank statement completed',
         'reconciliation.undone' => 'Bank statement undone',
+        // AG-033d.
+        'reconciliation.checked' => 'Bank statement checked',
+        'reconciliation.check_withdrawn' => 'Bank statement check withdrawn',
+        'reconciliation.check_cancelled' => 'Bank statement check cancelled',
         // AG-066 S4
         'expense_template.created' => 'Expense template created',
         'expense_template.updated' => 'Expense template changed',
@@ -437,6 +442,8 @@ class AuditLogController extends Controller
             'template' => RecurringTemplate::withoutGlobalScopes()->whereIn('id', $ids(RecurringTemplate::class))->pluck('name', 'id'),
             // AG-088: the rows are already limited to the caller's branches; the schedule's current name.
             'schedule' => ReportSchedule::whereIn('id', $ids(ReportSchedule::class))->pluck('name', 'id'),
+            // AG-033b / AG-033d: the rows are already limited to the caller's branches (branchScope), so statements are read unscoped.
+            'statement' => BankStatement::withoutGlobalScopes()->with('account:id,code,name')->whereIn('id', $ids(BankStatement::class))->get()->keyBy('id'),
         ];
     }
 
@@ -458,6 +465,10 @@ class AuditLogController extends Controller
                 ? PeriodLock::label($s['lock'][$id]->period).' ('.($s['lock'][$id]->branch->code ?? 'all branches').')'
                 : "#{$id}",
             Backup::class => (string) ($a->new_values['filename'] ?? "#{$id}"),
+            // AG-033b / AG-033d: "11002 KDY Bank, statement 2026-10-31".
+            BankStatement::class => isset($s['statement'][$id])
+                ? trim(($s['statement'][$id]->account->code ?? '').' '.($s['statement'][$id]->account->name ?? '')).', statement '.$s['statement'][$id]->statement_date->format('Y-m-d')
+                : "#{$id}",
             RecurringTemplate::class => $s['template'][$id] ?? ($a->new_values['name'] ?? "#{$id}"),
             ReportSchedule::class => $s['schedule'][$id] ?? ($a->new_values['name'] ?? "#{$id}"),
             YearEndClose::class => app(Settings::class)->fiscalYearStarting((int) ($a->new_values['fiscal_year'] ?? $a->old_values['fiscal_year'] ?? YearEndClose::find($id)?->fiscal_year ?? 0))->label(),

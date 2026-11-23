@@ -218,11 +218,14 @@ class StatementListTest extends StatementListTestCase
         foreach (['Bank reconciliation statements', 'Branches: KDY Branch KDY', 'Statement dates:', 'Amounts in LKR', 'Printed by '.$this->acc->name,
             'Completed and undone bank reconciliation statements by statement date.',
             'Filters: Status: All', 'Changed since completion: All', 'Late entries: All', 'Accounts: All',
-            'Every bank account in scope is reconciled to 30 Nov 2026.', 'CHECKED (INITIALS, DATE)', 'Checked by', 'Date',
+            'Every bank account in scope is reconciled to 30 Nov 2026.', 'CHECKED', 'Not checked', 'Checked: All',
             '479,500.00', '469,500.00', 'Undone by '.$this->ba->name, 'Wrong closing balance typed', 'Changed since completion', '3 statements'] as $needle) {
             $this->assertStringContainsString($needle, $text);
         }
         $this->assertStringNotContainsString('PROVISIONAL', $text);
+        // AG-033d: the empty initials column and the signature footer are replaced by the recorded check.
+        $this->assertStringNotContainsString('CHECKED (INITIALS, DATE)', $text);
+        $this->assertStringNotContainsString('Signature', $text);
         if (! $this->copiesOn()) {
             $this->assertStringNotContainsString('Bank statement copy', $text);
         }

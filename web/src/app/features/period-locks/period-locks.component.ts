@@ -16,7 +16,11 @@ interface Review extends InTransitInfo, PendingApprovalInfo {
   /** AG-033 S4: bank accounts not reconciled through the month end (information only). */
   bank_reconciliation?: { branch: { id: number; code: string }; account: { id: number; code: string | null; name: string };
     last_statement_date: string | null; changed_since_completion: boolean }[];
+  /** AG-033d S2: completed statements in the newly closed months not checked / needing a re-check (information only). */
+  bank_reconciliation_checks?: CheckReviewRow[];
 }
+interface CheckReviewItem { statement_id: number; account: { id: number; code: string | null; name: string }; statement_date: string }
+interface CheckReviewRow { branch: { id: number; code: string }; not_checked: CheckReviewItem[]; recheck: CheckReviewItem[] }
 interface Person { id: number; name: string; tag: string | null }
 interface Lock {
   id: number; branch_id: number | null; period: string;
@@ -44,6 +48,24 @@ const short = (period: string) => `${MONTHS[+period.slice(5, 7) - 1].slice(0, 3)
 export function bankReconciliationLines(rows: NonNullable<Review['bank_reconciliation']>, allBranches: boolean): string {
   return rows.map(r => `${allBranches ? r.branch.code + ' · ' : ''}${r.account.code ? r.account.code + ' ' : ''}${r.account.name}: last reconciled to `
     + `${r.last_statement_date ? dayLabel(r.last_statement_date) : 'never'}${r.changed_since_completion ? ', changed since completion' : ''}`).join('\n');
+}
+
+/**
+ * AG-033d S2: "KDY: 1 completed bank reconciliation not checked (KDY Bank 30 Nov 2026)" and "KDY: 1 checked bank
+ * reconciliation needs a re-check (...)"; omitted at 0, at most 5 statements then "and N more". Never blocking.
+ */
+export function bankCheckLines(rows: CheckReviewRow[]): string[] {
+  const list = (items: CheckReviewItem[]) => {
+    const shown = items.slice(0, 5).map(i => `${i.account.name} ${dayLabel(i.statement_date)}`).join(', ');
+    return items.length > 5 ? `${shown} and ${items.length - 5} more` : shown;
+  };
+  const out: string[] = [];
+  for (const r of rows) {
+    const n = r.not_checked.length, m = r.recheck.length;
+    if (n) out.push(`${r.branch.code}: ${n} completed bank reconciliation${n === 1 ? '' : 's'} not checked (${list(r.not_checked)})`);
+    if (m) out.push(`${r.branch.code}: ${m} checked bank reconciliation${m === 1 ? ' needs' : 's need'} a re-check (${list(r.recheck)})`);
+  }
+  return out;
 }
 
 /** AG-091 period locks (docs/specs/controls.md S2 + accounting review finding 1, 7). Super Admin only. */
@@ -227,6 +249,9 @@ export class PeriodLocksComponent implements OnInit {
     if (pendingLine) text += `\n\n${pendingLine}`;
     // AG-033 S4 (Q8): bank accounts not reconciled through the month end; information only, never blocking.
     if (review?.bank_reconciliation?.length) text += `\n\n${bankReconciliationLines(review.bank_reconciliation, branch === null)}`;
+    // AG-033d S2 (D4): statements not checked or needing a re-check; information only.
+    const checks = bankCheckLines(review?.bank_reconciliation_checks ?? []);
+    if (checks.length) text += `\n\n${checks.join('\n')}`;
     if (!confirm(text) || this.busy()) return;
     this.busy.set(true);
     this.http.post('/api/v1/period-locks', { period: p, branch_id: branch }).subscribe({

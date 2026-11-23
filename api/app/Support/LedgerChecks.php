@@ -341,4 +341,64 @@ final class LedgerChecks
 
         return $out->values();
     }
+
+    /**
+     * V11 (AG-033d R11): every active check is on a completed statement of its own branch and account; at most one active
+     * check per statement; no checker is a preparer of the statement (completed it or ticked a line frozen in it); every
+     * cancelled check's statement is undone; every ended check has ended_by and ended_at; every superseded check points to
+     * a check on the same statement with a later checked_at. Offenders as [check, account, detail].
+     *
+     * @return Collection<int, array{check: string, account: string, detail: string}>
+     */
+    public static function reconciliationChecks(): Collection
+    {
+        $out = collect();
+        $rows = DB::table('bank_statement_checks as c')
+            ->leftJoin('bank_statements as s', 's.id', '=', 'c.bank_statement_id')
+            ->leftJoin('accounts as a', 'a.id', '=', 'c.account_id')
+            ->leftJoin('branches as b', 'b.id', '=', 'c.branch_id')
+            ->leftJoin('bank_statement_checks as n', 'n.id', '=', 'c.superseded_by_id')
+            ->orderBy('c.id')
+            ->get(['c.id', 'c.status', 'c.branch_id', 'c.account_id', 'c.checked_by', 'c.checked_at', 'c.ended_by', 'c.ended_at', 'c.superseded_by_id',
+                'c.bank_statement_id', 's.status as s_status', 's.branch_id as s_branch', 's.account_id as s_account', 's.completed_by', 's.statement_date',
+                'a.name as account', 'b.code as branch', 'n.bank_statement_id as n_statement', 'n.checked_at as n_checked_at']);
+        $ticked = DB::table('bank_reconciliation_marks')->whereNotNull('statement_id')->select('statement_id', 'marked_by')->distinct()->get()
+            ->map(fn ($m) => $m->statement_id.':'.$m->marked_by)->flip();
+        $label = fn ($r) => trim(($r->branch ?? '').' '.($r->account ?? "#{$r->account_id}"));
+        foreach ($rows as $r) {
+            $problems = [];
+            $on = "check #{$r->id} of statement #{$r->bank_statement_id}".($r->statement_date ? ' ('.substr((string) $r->statement_date, 0, 10).')' : '');
+            if ($r->status === 'active') {
+                if ($r->s_status !== 'completed') {
+                    $problems[] = 'active check on a statement that is not completed';
+                }
+                if ((int) $r->s_branch !== (int) $r->branch_id || (int) $r->s_account !== (int) $r->account_id) {
+                    $problems[] = 'active check in another branch or account than its statement';
+                }
+            }
+            if ((int) $r->checked_by === (int) $r->completed_by || isset($ticked[$r->bank_statement_id.':'.$r->checked_by])) {
+                $problems[] = 'the checker is a preparer of the statement';
+            }
+            if ($r->status === 'cancelled' && $r->s_status !== 'undone') {
+                $problems[] = 'cancelled check on a statement that is not undone';
+            }
+            if ($r->status !== 'active' && ($r->ended_by === null || $r->ended_at === null)) {
+                $problems[] = 'ended check without ended_by / ended_at';
+            }
+            if ($r->status === 'superseded' && ($r->superseded_by_id === null || (int) $r->n_statement !== (int) $r->bank_statement_id
+                || (string) $r->n_checked_at < (string) $r->checked_at)) {
+                $problems[] = 'superseded check not replaced by a later check on the same statement';
+            }
+            foreach ($problems as $p) {
+                $out->push(['check' => 'check', 'account' => $label($r), 'detail' => "{$on}: {$p}"]);
+            }
+        }
+        $dupes = DB::table('bank_statement_checks')->where('status', 'active')->groupBy('bank_statement_id')
+            ->havingRaw('COUNT(*) > 1')->selectRaw('bank_statement_id, COUNT(*) as n')->get();
+        foreach ($dupes as $d) {
+            $out->push(['check' => 'one active check per statement', 'account' => '', 'detail' => "statement #{$d->bank_statement_id}: {$d->n} active checks"]);
+        }
+
+        return $out->values();
+    }
 }

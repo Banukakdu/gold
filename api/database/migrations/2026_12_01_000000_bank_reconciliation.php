@@ -38,6 +38,9 @@ return new class extends Migration
     /** Keys that only ever counted in MAIN (AG-051): not required of a full copy. */
     public const MAIN_ONLY = ['transfer.approve'];
 
+    /** Keys added to the catalogue after this migration (AG-033d): they do not exist yet when both run in one deploy. */
+    public const LATER = ['account.reconcile_check'];
+
     public function up(): void
     {
         $mysql = DB::connection()->getDriverName() === 'mysql';
@@ -154,7 +157,7 @@ return new class extends Migration
     /** Branch roles (any branch) holding every other catalogue key receive the new one, audited (resumable: holders are skipped). */
     private function grantFullCopies(int $permissionId): void
     {
-        $others = array_values(array_diff(PermissionSeeder::PERMISSIONS, [self::PERMISSION, ...self::MAIN_ONLY]));
+        $others = array_values(array_diff(PermissionSeeder::PERMISSIONS, [self::PERMISSION, ...self::MAIN_ONLY, ...self::LATER]));
         $otherIds = DB::table('permissions')->where('guard_name', 'web')->whereIn('name', $others)->pluck('id');
         if ($otherIds->count() !== count($others)) {
             return; // catalogue incomplete: leave roles to the Super Admin
