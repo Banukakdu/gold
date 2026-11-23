@@ -49,6 +49,9 @@ class ScheduledReportRuns
 
     public const OWNER_LOST = 'The owner is no longer an active Super Admin. The schedule was paused.';
 
+    /** R15: the owner check failed for a run planned before the last resume; the resumed schedule is not paused again. */
+    public const OWNER_LOST_BEFORE_RESUME = 'The owner of this run is no longer an active Super Admin. The run was planned before the schedule was resumed, so the schedule was not paused.';
+
     public const FILES_DIR = 'scheduled';
 
     public function __construct(
@@ -415,11 +418,15 @@ class ScheduledReportRuns
             $run->refresh();
             $this->makeDeliveries($run, [], $skipped);
             $s = ReportSchedule::whereKey($run->schedule_id)->lockForUpdate()->first();
+            $notCounted = $this->outsideStreak($s, $run->planned_at);
             $this->systemAudit('report_schedule.run_built', $s, [
                 'run_id' => $run->id, 'period' => ['from' => $run->periodFrom(), 'to' => $run->periodTo()], 'nothing_sent' => true,
                 'queued' => [], 'skipped' => array_map(fn ($x) => $x[1], $skipped),
+                'counted' => $notCounted === null, 'not_counted_reason' => $notCounted,
             ], $run->auditBranchId());
-            $this->countFailure($s, $run->planned_at);
+            if ($notCounted === null) {
+                $this->countFailure($s, $run->planned_at);
+            }
         });
         if ($s) {
             $this->alertSkipped($s, count($skipped));
@@ -429,16 +436,25 @@ class ScheduledReportRuns
     /** R6 step 2: fail without retry, and the system pauses the schedule (S5 `paused` to every active Super Admin). */
     private function ownerLost(ReportScheduleRun $run): void
     {
-        $this->failRun($run, 'owner_lost_access', self::OWNER_LOST, alertOwner: false, pause: 'owner_lost_access');
+        $this->failRun($run, 'owner_lost_access', self::OWNER_LOST, alertOwner: false, pause: 'owner_lost_access',
+            messageBeforeResume: self::OWNER_LOST_BEFORE_RESUME);
     }
 
     /**
      * Mark a queued or running run failed (once): its audit row, its queued deliveries skipped (`run_failed`), the
      * failure counted (R10) and the owner alerted (S5). The status change and the audit rows commit together.
+     * A run planned before the last resume (R15 streak boundary, `resumed_at` read from the locked schedule row) is
+     * recorded and alerted the same way, but not counted, so it never causes the R10 pause. $pause (owner lost, R6
+     * step 2) is skipped for such a run only while the schedule's current owner is an active Super Admin: the run keeps
+     * the owner it was planned with, and a resume may have handed the schedule to another Super Admin. Then the error
+     * becomes $messageBeforeResume and the owner gets the `run_failed` alert instead of S5 `paused`. If the current
+     * owner has lost access too, the schedule is paused as before.
      */
-    public function failRun(ReportScheduleRun $run, string $code, string $message, bool $alertOwner = true, ?string $pause = null, ?\Closure $guard = null): bool
+    public function failRun(ReportScheduleRun $run, string $code, string $message, bool $alertOwner = true, ?string $pause = null,
+        ?\Closure $guard = null, ?string $messageBeforeResume = null): bool
     {
-        $won = DB::transaction(function () use ($run, $code, $message, $pause, $guard) {
+        $alertInsteadOfPause = false;
+        $won = DB::transaction(function () use ($run, $code, $message, $pause, $guard, $messageBeforeResume, &$alertInsteadOfPause) {
             if (! ReportScheduleRun::whereKey($run->id)->whereIn('status', ReportScheduleRun::ACTIVE)->when($guard, $guard)->update([
                 'status' => ReportScheduleRun::FAILED, 'failure_code' => $code, 'error' => $message, 'finished_at' => now(), 'updated_at' => now(),
             ])) {
@@ -446,25 +462,51 @@ class ScheduledReportRuns
             }
             $run->refresh();
             $s = ReportSchedule::whereKey($run->schedule_id)->lockForUpdate()->first();
+            $notCounted = $this->outsideStreak($s, $run->planned_at);
+            // Pause anyway (R6 step 2) unless the current owner, checked now, is an active Super Admin.
+            $pauseAnyway = false;
+            if ($notCounted !== null && $pause !== null) {
+                $owner = User::find($s->owner_id);
+                if ($owner && $owner->status === 'active' && $owner->is_super_admin) {
+                    if ($messageBeforeResume !== null) {
+                        ReportScheduleRun::whereKey($run->id)->update(['error' => $messageBeforeResume, 'updated_at' => now()]);
+                    }
+                    $alertInsteadOfPause = true;
+                } else {
+                    $pauseAnyway = true;
+                }
+            }
             $this->systemAudit('report_schedule.run_failed', $s, ['run_id' => $run->id, 'code' => $code, 'attempts' => $run->attempts,
-                'period' => ['from' => $run->periodFrom(), 'to' => $run->periodTo()]], $run->auditBranchId());
+                'period' => ['from' => $run->periodFrom(), 'to' => $run->periodTo()],
+                'counted' => $notCounted === null, 'not_counted_reason' => $notCounted], $run->auditBranchId());
             foreach (ReportScheduleDelivery::where('run_id', $run->id)->where('status', ReportScheduleDelivery::QUEUED)->pluck('id') as $id) {
                 $this->skip(ReportScheduleDelivery::find($id), 'run_failed');
             }
-            if ($pause !== null && $s->status === ReportSchedule::ACTIVE) {
+            if (($notCounted === null || $pauseAnyway) && $pause !== null && $s->status === ReportSchedule::ACTIVE) {
                 $this->systemPause($s, $pause);
             }
-            $this->countFailure($s, $run->planned_at);
+            if ($notCounted === null) {
+                $this->countFailure($s, $run->planned_at);
+            }
 
             return true;
         });
         $this->deletePart($run);
-        if ($won && $alertOwner) {
+        if ($won && ($alertOwner || $alertInsteadOfPause)) {
             $s = ReportSchedule::find($run->schedule_id);
             $this->alertOwner($s->id, N::SCHEDULE_RUN_FAILED, "Scheduled report {$s->name} could not be sent", (string) $run->fresh()?->error, true);
         }
 
         return $won;
+    }
+
+    /**
+     * R10 / R15: 'planned_before_resume' when a run planned at $planned is outside the current streak because the
+     * schedule was resumed after it was planned (resume reset the count, R11); null when it counts. $s is locked.
+     */
+    private function outsideStreak(ReportSchedule $s, CarbonInterface $planned): ?string
+    {
+        return $s->resumed_at && $planned->lt($s->resumed_at) ? 'planned_before_resume' : null;
     }
 
     /** R10: whether one more failure pauses this schedule. */
@@ -786,10 +828,8 @@ class ScheduledReportRuns
             $s = ReportSchedule::whereKey($run->schedule_id)->lockForUpdate()->first();
             // Not counted when the run is outside the current streak: planned before the last resume (which reset the
             // count, R11), or a later run already sent an email. Still audited and alerted.
-            $notCounted = null;
-            if ($s->resumed_at && $run->planned_at->lt($s->resumed_at)) {
-                $notCounted = 'planned_before_resume';
-            } elseif (ReportScheduleDelivery::where('status', ReportScheduleDelivery::SENT)
+            $notCounted = $this->outsideStreak($s, $run->planned_at);
+            if ($notCounted === null && ReportScheduleDelivery::where('status', ReportScheduleDelivery::SENT)
                 ->whereIn('run_id', ReportScheduleRun::select('id')->where('schedule_id', $s->id)->where('planned_at', '>', $run->planned_at))
                 ->exists()) {
                 $notCounted = 'later_run_sent';
