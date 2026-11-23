@@ -147,6 +147,8 @@ class MigrationTest extends TestCase
         $m->up(); // and once more: nothing to do
         $this->assertTrue(Schema::hasIndex('attachments', 'attachments_replaced_by_id_fk'));
         $this->assertTrue(Schema::hasIndex('attachments', 'attachments_bank_statement_id_removed_at_index'));
+        // Review N6: the foreign key has an index of its own.
+        $this->assertTrue(Schema::hasIndex('attachments', 'attachments_bank_statement_id_fk'));
         if ($mysql) {
             $fks = collect(Schema::getForeignKeys('attachments'))->pluck('columns')->map(fn ($c) => implode(',', $c))->all();
             $this->assertContains('replaced_by_id', $fks);

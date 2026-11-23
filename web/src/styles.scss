@@ -451,7 +451,9 @@ tr.rc-frozen td, .rc-line.rc-frozen { color: var(--muted); }
   .sf-meta > span + span::before { content: '· '; }
   .sf-sha-btn { min-height: 44px; }
   .sf-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; button { min-height: 44px; width: 100%; } }
-  .sf-dialog { left: 16px; right: 16px; width: auto; transform: none; }
+  /* Review M1: the dialogs and their backdrop sit above the full-screen sheet (z-index 12). */
+  .sf-backdrop { z-index: 13; }
+  .sf-dialog { left: 16px; right: 16px; width: auto; transform: none; z-index: 14; }
   .sf-dialog .att-dialog-actions button { flex: 1; min-height: 44px; }
   .bsc-card { border-top: 1px solid var(--line); padding: 8px 0; }
 }

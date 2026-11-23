@@ -92,8 +92,8 @@ class StateTest extends StatementFilesTestCase
         $this->upload(file: $this->file('nov.pdf', self::bytes('nov.pdf')))->assertStatus(422)
             ->assertJsonPath('message', 'This statement was undone. Attach the bank statement to the statement that replaces it.');
         $this->remove($a['id'])->assertStatus(422)->assertJsonPath('message', 'Files of an undone statement cannot be removed.');
-        $this->replace($a['id'], 'nov.pdf')->assertStatus(422)
-            ->assertJsonPath('message', 'This statement was undone. Attach the bank statement to the statement that replaces it.');
+        // R4 (review S2): a replace gets the replace / remove text.
+        $this->replace($a['id'], 'nov.pdf')->assertStatus(422)->assertJsonPath('message', 'Files of an undone statement cannot be removed.');
         $list = $this->listing()->assertOk();
         $this->assertSame('This statement was undone. Attach the bank statement to the statement that replaces it.', $list->json('note'));
         $this->assertFalse($list->json('can_add'));

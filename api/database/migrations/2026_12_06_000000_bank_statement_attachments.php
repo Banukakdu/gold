@@ -15,8 +15,9 @@ use Illuminate\Support\Facades\Schema;
  *  - BEFORE INSERT trigger attachments_one_parent: exactly one of transaction_id / bank_statement_id is set;
  *  - attachments_no_update is rebuilt: bank_statement_id is frozen, replaced_by_id joins the removal columns.
  * On SQLite the nullable change rebuilds the table, which drops its triggers, so all three triggers are (re)created at the
- * end on both drivers. MySQL: each new foreign key gets its index before the constraint, so the constraint uses it and no
- * implicit index is created; down() drops each constraint before its index (no error 1553).
+ * end on both drivers. MySQL: each new foreign key gets its own single-column index (AG-062 rule) before the constraint,
+ * so no implicit index is created; down() checks it can recreate the triggers first, then drops each constraint before
+ * its indexes (no error 1553).
  * Nothing posts money; ledger_entries, balances, marks and the stored statement figures are not touched.
  */
 return new class extends Migration
@@ -30,6 +31,9 @@ return new class extends Migration
     public const FROZEN_COLUMNS = [...self::AG062_FROZEN, 'bank_statement_id'];
 
     public const STATEMENT_INDEX = 'attachments_bank_statement_id_removed_at_index';
+
+    /** The foreign key's own index (AG-062 rule): a later change to the composite index never hits MySQL error 1553. */
+    public const STATEMENT_FK_INDEX = 'attachments_bank_statement_id_fk';
 
     public const REPLACED_INDEX = 'attachments_replaced_by_id_fk';
 
@@ -60,7 +64,10 @@ return new class extends Migration
                 ? DB::statement('ALTER TABLE attachments ADD bank_statement_id BIGINT UNSIGNED NULL AFTER transaction_id')
                 : DB::statement('ALTER TABLE attachments ADD COLUMN bank_statement_id INTEGER NULL REFERENCES bank_statements(id) ON DELETE RESTRICT');
         }
-        // Before the foreign key: MySQL then uses this index for the constraint.
+        // Both indexes before the foreign key: MySQL then backs the constraint with an existing index and adds none.
+        if (! Schema::hasIndex('attachments', self::STATEMENT_FK_INDEX)) {
+            Schema::table('attachments', fn (Blueprint $t) => $t->index('bank_statement_id', self::STATEMENT_FK_INDEX));
+        }
         if (! Schema::hasIndex('attachments', self::STATEMENT_INDEX)) {
             Schema::table('attachments', fn (Blueprint $t) => $t->index(['bank_statement_id', 'removed_at'], self::STATEMENT_INDEX));
         }
@@ -85,6 +92,9 @@ return new class extends Migration
 
     public function down(): void
     {
+        // Review S1: the triggers are dropped and recreated below; refuse before any change if they cannot be recreated
+        // (the table keeps AG-062 entry evidence, which must never be left without its immutability triggers).
+        MigrationPreflight::assertCanCreateTriggers();
         if (Schema::hasColumn('attachments', 'bank_statement_id') && DB::table('attachments')->whereNotNull('bank_statement_id')->exists()) {
             throw new RuntimeException(self::REFUSED);
         }
@@ -94,13 +104,16 @@ return new class extends Migration
             DB::unprepared("DROP TRIGGER IF EXISTS {$trigger}");
         }
 
-        foreach (['replaced_by_id' => self::REPLACED_INDEX, 'bank_statement_id' => self::STATEMENT_INDEX] as $column => $index) {
-            // The constraint before the index that backs it (MySQL error 1553 otherwise).
+        $indexes = ['replaced_by_id' => [self::REPLACED_INDEX], 'bank_statement_id' => [self::STATEMENT_INDEX, self::STATEMENT_FK_INDEX]];
+        foreach ($indexes as $column => $names) {
+            // The constraint before the indexes that back it (MySQL error 1553 otherwise).
             if ($mysql && $this->hasForeignKey($column)) {
                 Schema::table('attachments', fn (Blueprint $t) => $t->dropForeign([$column]));
             }
-            if (Schema::hasIndex('attachments', $index)) {
-                Schema::table('attachments', fn (Blueprint $t) => $t->dropIndex($index));
+            foreach ($names as $index) {
+                if (Schema::hasIndex('attachments', $index)) {
+                    Schema::table('attachments', fn (Blueprint $t) => $t->dropIndex($index));
+                }
             }
         }
         if ($mysql) {

@@ -9,7 +9,6 @@ use App\Models\AuditLog;
 use App\Models\BankStatement;
 use App\Models\PeriodLock;
 use App\Models\User;
-use App\Services\BankReconciliation;
 use App\Services\StatementAttachments;
 use App\Services\YearEnd;
 use App\Support\AttachmentFile;
@@ -23,18 +22,18 @@ use Throwable;
  * AG-033b bank statement copy on a completed reconciliation statement (docs/specs/bank-statement-attachment.md).
  * Reuses the AG-062 machinery: the `attachments` table and disk, AttachmentFile::inspect, the download checks and headers.
  * Evidence only: it posts nothing, so it does not go through LedgerService. {account} resolves through BranchScoped,
- * {statement} and {attachment} through scoped bindings (another account / statement -> 404). The section 2 rules are
+ * {statement} and {attachment} through scoped bindings (another account / statement -> 404; a non-bank account has no
+ * statements, so it is 404 too). The section 2 rules are
  * checked here (the routes are outside the perm:account.reconcile group: list and download also accept report.view).
  */
 class BankStatementAttachmentController extends Controller
 {
-    public function __construct(private StatementAttachments $files, private BankReconciliation $recon) {}
+    public function __construct(private StatementAttachments $files) {}
 
     public function index(Request $request, Account $account, BankStatement $statement)
     {
         $user = $request->user();
         $this->assertRead($user);
-        $this->recon->assertBank($account);
 
         $rows = $statement->attachments()->orderBy('id')->get();
         $active = $rows->whereNull('removed_at');
@@ -59,12 +58,9 @@ class BankStatementAttachmentController extends Controller
     {
         $user = $request->user();
         $this->assertWrite($user);
-        $this->recon->assertBank($account);
+        // Review N7: `reason` is checked only for a replace (a plain upload ignores it).
         $replacing = $request->filled('replaces_id');
-        $d = $request->validate([
-            'replaces_id' => 'nullable|integer',
-            'reason' => ($replacing ? 'required' : 'nullable').'|string|min:3|max:500',
-        ]);
+        $d = $replacing ? $request->validate(['replaces_id' => 'required|integer', 'reason' => 'required|string|min:3|max:500']) : [];
         $replacesId = $replacing ? (int) $d['replaces_id'] : null;
         $reason = $replacing ? trim((string) $d['reason']) : null;
 
@@ -83,7 +79,8 @@ class BankStatementAttachmentController extends Controller
             [$attachment, $replaced] = DB::transaction(function () use ($statement, $user, $file, $name, $mime, $sha, $size, $disk, $dir, $basename, $path, $replacesId, $reason, &$written) {
                 // R3: the statement row lock serialises parallel uploads to one statement (its figures are read only).
                 $st = BankStatement::withoutGlobalScopes()->whereKey($statement->id)->lockForUpdate()->firstOrFail();
-                abort_if($st->status !== BankStatement::COMPLETED, 422, StatementAttachments::UNDONE_ADD);
+                // R4: an undone statement takes no new file; a replace gets the replace / remove text.
+                abort_if($st->status !== BankStatement::COMPLETED, 422, $replacesId !== null ? StatementAttachments::UNDONE_REMOVE : StatementAttachments::UNDONE_ADD);
                 $old = null;
                 if ($replacesId !== null) {
                     $old = Attachment::withoutGlobalScopes()->whereKey($replacesId)->where('bank_statement_id', $st->id)
@@ -94,7 +91,8 @@ class BankStatementAttachmentController extends Controller
                         abort(422, $refused);
                     }
                 }
-                $existing = Attachment::withoutGlobalScopes()->where('bank_statement_id', $st->id)->get(['id', 'sha256', 'removed_at']);
+                // Review N2: a locking read too, so the counts never come from an older snapshot whatever runs before it.
+                $existing = Attachment::withoutGlobalScopes()->where('bank_statement_id', $st->id)->lockForUpdate()->get(['id', 'sha256', 'removed_at']);
                 $active = $existing->whereNull('removed_at');
                 // A replace does not grow the active count.
                 abort_if($old === null && $active->count() >= Attachment::MAX_ACTIVE, 422, 'A statement can have at most 5 files. Remove one first.');
@@ -165,7 +163,6 @@ class BankStatementAttachmentController extends Controller
     {
         $user = $request->user();
         $this->assertRead($user);
-        $this->recon->assertBank($account);
         $removed = $attachment->removed_at !== null;
         abort_if($removed && ! $user->canDo('audit.view'), 403, 'Only auditors can download removed files.');
 
@@ -179,7 +176,6 @@ class BankStatementAttachmentController extends Controller
     {
         $user = $request->user();
         $this->assertWrite($user);
-        $this->recon->assertBank($account);
         $reason = trim((string) $request->validate(['reason' => 'required|string|min:3|max:500'])['reason']);
 
         $row = DB::transaction(function () use ($statement, $attachment, $user, $reason) {

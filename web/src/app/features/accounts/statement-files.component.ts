@@ -106,7 +106,7 @@ interface UploadLine { name: string; pct: number; error?: string }
     </section>
 
     @if (removing(); as r) {
-      <div class="att-backdrop" (click)="removing.set(null)"></div>
+      <div class="att-backdrop sf-backdrop" (click)="removing.set(null)"></div>
       <div class="card att-dialog sf-dialog" role="dialog" aria-modal="true" aria-labelledby="sf-rm-title">
         <h2 id="sf-rm-title">Remove file</h2>
         <p>Remove {{ r.original_name }} from the statement of {{ label(statement().statement_date) }}? The file is kept for the audit trail and can still be seen by auditors.</p>
@@ -120,7 +120,7 @@ interface UploadLine { name: string; pct: number; error?: string }
     }
 
     @if (replacing(); as r) {
-      <div class="att-backdrop" (click)="replacing.set(null)"></div>
+      <div class="att-backdrop sf-backdrop" (click)="replacing.set(null)"></div>
       <div class="card att-dialog sf-dialog" role="dialog" aria-modal="true" aria-labelledby="sf-rp-title">
         <h2 id="sf-rp-title">Replace file</h2>
         <p>Replace {{ r.original_name }}? The old file is kept for the audit trail.</p>

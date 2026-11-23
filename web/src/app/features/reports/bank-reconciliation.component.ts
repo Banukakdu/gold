@@ -148,8 +148,6 @@ export interface BankReport extends ReportMeta {
               <button type="button" class="link bsc-name" [disabled]="busy()" (click)="download(s.account_id, a)">{{ a.original_name }}</button>
               ({{ a.extension.toUpperCase() }}, {{ size(a.size_bytes) }}), uploaded by {{ a.uploaded_by?.name }} on {{ when(a.created_at) }},
               sha256 <span class="mono" [title]="a.sha256">{{ a.sha256.slice(0, 12) }}…</span>{{ tags(a) }}
-              @if (a.added_after === 'close') { <span class="tag att-late">Added after close</span> }
-              @if (a.by_preparer) { <span class="tag">Uploaded by the preparer</span> }
             </div>
           } @empty {
             <div class="bsc-card muted">No bank statement copy attached. File the paper bank statement with this printout.</div>

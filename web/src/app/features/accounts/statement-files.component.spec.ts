@@ -213,6 +213,33 @@ describe('AG-033b bank statement copy (web)', () => {
     frame.remove();
   });
 
+  it('review M1: at 390px the Remove and Replace dialogs sit above the Files sheet and can be used', async () => {
+    const f = await screen([statement({ attachments_count: 1 })]);
+    await openPanel(f, [file()]);
+    const frame = await phoneFrame();
+    frame.adopt(el);
+    await settle(f);
+    for (const action of ['Remove', 'Replace']) {
+      button(el.querySelector('.sf-row:not(.sf-th)')!, action)!.click();
+      await settle(f);
+      const dialog = el.querySelector<HTMLElement>('.sf-dialog')!;
+      expect(dialog).withContext(action).toBeTruthy();
+      const r = dialog.getBoundingClientRect();
+      const hit = frame.doc.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      expect(dialog.contains(hit)).withContext(`${action}: the dialog centre is the dialog`).toBeTrue();
+      const confirm = button(dialog, action)!;
+      const c = confirm.getBoundingClientRect();
+      expect(dialog.contains(frame.doc.elementFromPoint(c.left + c.width / 2, c.top + c.height / 2))).withContext(`${action}: confirm reachable`).toBeTrue();
+      // The backdrop covers the sheet too.
+      const back = el.querySelector<HTMLElement>('.sf-backdrop')!;
+      expect(frame.doc.elementFromPoint(5, 400)).toBe(back);
+      back.click();
+      await settle(f);
+      expect(el.querySelector('.sf-dialog')).toBeNull();
+    }
+    frame.remove();
+  });
+
   it('AC 19: the S3 block on screen, sha256 shortened with a tooltip, removed lines, and "No copy" text', async () => {
     setup();
     http = TestBed.inject(HttpTestingController);
@@ -239,6 +266,7 @@ describe('AG-033b bank statement copy (web)', () => {
     expect(line).toContain('Bank statement attached: oct.pdf (PDF, 1.2 MB), uploaded by ACC on 2026-11-03 10:05');
     expect(line).toContain('sha256 3fa9c01b77de… - uploaded by the preparer - also on the 2026-09-30 statement (completed)');
     expect(cards[0].querySelector('.mono')!.getAttribute('title')).toBe(SHA);
+    expect(line.toLowerCase().split('uploaded by the preparer').length - 1).withContext('each tag once (QA D2)').toBe(1);
     expect(cards[1].textContent).toContain('Replaced by oct.pdf: sep.pdf');
     fixture.componentInstance.r.set(report([]));
     fixture.detectChanges();

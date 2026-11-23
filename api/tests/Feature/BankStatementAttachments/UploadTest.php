@@ -181,6 +181,13 @@ class UploadTest extends StatementFilesTestCase
         $this->assertNull(Attachment::findOrFail($sep['id'])->removed_at);
     }
 
+    public function test_reason_is_ignored_on_a_plain_upload(): void
+    {
+        // Review N7: only a replace validates `reason`.
+        $this->upload(file: $this->file('oct.pdf', self::bytes('oct.pdf')), extra: ['reason' => 'x'])->assertCreated();
+        $this->assertNull(Attachment::sole()->removal_reason);
+    }
+
     public function test_ac23_by_preparer(): void
     {
         $a = $this->attach('oct.pdf', u: $this->acc);

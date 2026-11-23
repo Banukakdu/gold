@@ -80,7 +80,7 @@ A new block **"Bank statement copy"** goes after "Balance per bank statement / D
 - There is no horizontal page scroll at 360px or 390px.
 
 ## 5. API (all under `auth:sanctum` + `branch`)
-`{account}` is bound through `BranchScoped`, as in AG-033. `{statement}` and `{attachment}` use scoped binding (`->scopeBindings()`). A statement that is not on `{account}` returns 404, and an attachment that is not on `{statement}` returns 404. A non-bank account returns 422 "Only bank accounts can be reconciled." These routes go **outside** the existing `perm:account.reconcile` group, because list and download also accept `report.view`. The controller checks the section 2 rules with `canDo`.
+`{account}` is bound through `BranchScoped`, as in AG-033. `{statement}` and `{attachment}` use scoped binding (`->scopeBindings()`). A statement that is not on `{account}` returns 404, and an attachment that is not on `{statement}` returns 404. A non-bank account returns 404: it has no statements, so the scoped binding of `{statement}` fails (review N1). These routes go **outside** the existing `perm:account.reconcile` group, because list and download also accept `report.view`. The controller checks the section 2 rules with `canDo`.
 
 | Method, path | Guard | Request | Response / errors |
 |---|---|---|---|
