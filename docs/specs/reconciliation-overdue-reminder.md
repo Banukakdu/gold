@@ -83,13 +83,14 @@ Schedule::command('reconciliation:remind-overdue')->description('Remind overdue 
 | `branch_id` | FK branches |
 | `account_id` | FK accounts |
 | `overdue_through` | date (E of AG-033e R2) |
+| `round` | unsigned tinyint, 1 for the first reminder for this E, +1 for each re-send after an undo (R6, accounting review 1) |
 | `months_overdue` | unsigned int |
 | `last_statement_date` | date, null = never reconciled |
 | `recipient_ids` | json, sorted user ids |
 | `super_admin_fallback` | bool |
 | `created_at` | timestamp (UTC) |
 
-- **Unique `(account_id, overdue_through)`.** This is the dedupe (R4).
+- **Unique `(account_id, overdue_through, round)`.** This is the dedupe (R4, R6).
 - Model `BankReconciliationReminder` uses `BranchScoped`. The command reads it with `withoutGlobalScopes()`, because it works over every branch by design (R1).
 - Rows are never updated or deleted. There is no route to them, and `notifications:prune` does not touch them.
 
@@ -121,7 +122,7 @@ The texts use `BankReconciliation::label()` dates and AG-033e month wording ("1 
   - The run is daily at 07:15 Asia/Colombo. Running daily, and not only on the 11th, means that an account that becomes overdue later in the month is reminded the next morning. Examples: a statement undone, a closed account reopened, a back-dated first entry on a new account. A day the server was down is also caught up the next day.
   - The first overdue day of month-end M is M + 11 days (AG-033e R2), so the "monthly" reminder lands on the 11th.
 - **R4 Dedupe.**
-  - The key is `(account_id, overdue_through)`, where `overdue_through` = E computed from T. It is a business date, not a timestamp, so the server time zone (UTC or other) and the hour of the run do not matter. A run at 18:30 UTC on 10 Dec is 00:00 on 11 Dec in Colombo, so it already uses E = 30 Nov.
+  - The key is `(account_id, overdue_through, round)` (round 1 unless R6 applies), where `overdue_through` = E computed from T. It is a business date, not a timestamp, so the server time zone (UTC or other) and the hour of the run do not matter. A run at 18:30 UTC on 10 Dec is 00:00 on 11 Dec in Colombo, so it already uses E = 30 Nov.
   - **Per account, in one DB transaction:**
     1. `insertOrIgnore` the reminder row.
     2. When nothing was inserted (already sent), stop.
@@ -131,7 +132,11 @@ The texts use `BankReconciliation::label()` dates and AG-033e month wording ("1 
   - **No back-fill:** only the current E is considered. On the first run after release, each currently overdue account gets one reminder, with its full months count.
   - A reminder row is written even when there are 0 recipients (no holders and no active Super Admin), so the run does not retry every day. Its audit row shows `recipient_ids: []`.
 - **R5 Reconciled before the reminder.** An account that is Up to date, Due or Not required at the run gets nothing. This includes an account reconciled on the 10th that is never overdue.
-- **R6 Undone after the reminder.** The dedupe key does not change, so there is no second reminder for the same E. S7 shows the account as Overdue again. The next reminder comes with the next E (Q5).
+- **R6 Undone after the reminder (accounting review 1, Q5).** Completing a statement closes everyone's reminder (R7 a), so an undo must not leave the account overdue with no unread reminder until the next E.
+  - At the run, for an Overdue account A with E: let P be the reminder row for (A, E) with the highest `round`. A new reminder with `round` = P.round + 1 is sent when a statement of A with `statement_date` >= E has `undone_at` later than P.`created_at`. Otherwise "already sent".
+  - It goes to the R2 recipients at that run. The body adds, before any fallback sentence: " The statement to <statement date, d M Y> was undone on <undone_at date in Asia/Colombo, d M Y>." Unread rows of earlier rounds for (A, E) are closed as in R7 (b).
+  - At most one re-send per run per account, and one per undo. Each undo is already audited (`reconciliation.undone`), so the repeats are bounded by real events.
+  - An undo of a statement dated before E (a partial catch-up) re-sends nothing: that statement never closed the reminder (R7).
 - **R7 Closing old rows.** Only `read_at` changes (AG-094 R6 style). No audit, and the rows are not deleted.
   - **(a) Reconciled.** After a statement for account A is completed with date D, every unread `reconciliation.overdue` row with `data.account_id = A` and `data.overdue_through <= D` gets `read_at = now`, for every user.
   - **(b) Superseded.** When a new reminder for A with E is written, unread rows for A with `overdue_through < E` get `read_at = now`.
@@ -140,7 +145,7 @@ The texts use `BankReconciliation::label()` dates and AG-033e month wording ("1 
 - **R9 Audit.** For each reminder row inserted (not on dry run), the run writes `AuditLog::record('reconciliation.overdue_reminder_sent', $account, null, [...], $account->branch_id, ['user_id' => null, 'ip' => null, 'user_agent' => 'console'])` with these new values:
   - `account`: "KDY Bank 5 (11006)";
   - `overdue_through`, `months_overdue`, `never_reconciled`, `last_statement_date`;
-  - `recipient_ids` (sorted), `super_admin_fallback`;
+  - `recipient_ids` (sorted), `super_admin_fallback`, `round` (and, for round > 1, `undone_statement_id`);
   - `by_system: true`.
 
   Opening, reading, mark-all and R7 auto-read write no audit (AG-094 R10). A branch user with `audit.view` sees the rows of their branch only (the existing audit scoping).
@@ -215,9 +220,12 @@ Users:
    - no KDY user and no Super Admin gets it;
    - one reminder row and one audit row are added.
 10. **Undone after the reminder.** Given AC 7, when BA undoes the KDY Bank 2026-11-30 statement on 2026-12-14, then:
-    - the run on 2026-12-15 creates no new KDY Bank reminder;
     - S7 shows KDY Bank as "Overdue 1 month";
-    - on 2027-01-11 a reminder with `overdue_through` 2026-12-31 and months 2 is created.
+    - the run on 2026-12-15 creates one KDY Bank reminder with `overdue_through` 2026-11-30 and `round` 2 for ACC, VW and BA, body "Not reconciled to 30 Nov 2026. Last statement 31 Oct 2026 · overdue 1 month. The statement to 30 Nov 2026 was undone on 14 Dec 2026.", and one audit row with `round` 2 and `undone_statement_id`;
+    - the runs from 2026-12-16 to 2026-12-31 create nothing more for KDY Bank;
+    - given ACC completes and BA undoes the 30 Nov statement once more on 2026-12-20, the run on 2026-12-21 creates `round` 3, and the unread `round` 2 rows become read;
+    - on 2027-01-11 a reminder with `overdue_through` 2026-12-31, `round` 1 and months 2 is created.
+    - Given instead BA undoes a KDY Bank 5 statement dated 2026-10-31 (AC 8), then no re-send is created for KDY Bank 5 in December.
 11. **Fallback.** Given GACC is deactivated before AC 9's run, then:
     - SA and SA2 each get the GAL Bank row, ending with " No one in GAL can reconcile or check this account.";
     - the reminder row has `super_admin_fallback` true;
@@ -263,8 +271,44 @@ Users:
 - **Q2 (product owner)** Is an email (for example a digest on the 11th) needed? **Not in this story. Bell only.** The recipients are Accountants, Branch Admins and Viewers, who sign in during month-end. An email needs a preference column, a queued mail with a re-check at send time (AG-094 R7 pattern) and its own ACs. It can reuse `bank_reconciliation_reminders` as its dedupe.
 - **Q3 (product owner / accountant)** Should there be a second reminder in the same month, for example on the 20th, if the account is still overdue? **No. One reminder per account per month-end. The next month's reminder, with a higher count, is the re-reminder.** A mid-month nudge would be a second key (`account_id, overdue_through, kind`).
 - **Q4 (product owner)** Should users be able to turn the reminder off? **No. It is a control, there is at most one row per account per month, and it is bell only.** Someone who should not get it should not hold the key: the Branch Admin removes the key from the role. AG-094 has no per-kind bell preference to extend.
-- **Q5 (accountant)** After a statement is undone, should the account be reminded again in the same month? **No (R6). The dedupe key is the month-end, and S7 shows the account as Overdue.** The undo is already audited, and AG-033d tells the checker about it (`reconciliation.check_cancelled`). Adding the last statement id to the key would re-remind, at the cost of possible repeats when someone completes and undoes several times.
+- **Q5 (accountant)** After a statement is undone, should the account be reminded again in the same month? **Decided by the accounting review: yes, once per undo (R6, accounting review 1).** The BA's original assumption was: **No. The dedupe key is the month-end, and S7 shows the account as Overdue.** The undo is already audited, and AG-033d tells the checker about it (`reconciliation.check_cancelled`). Adding the last statement id to the key would re-remind, at the cost of possible repeats when someone completes and undoes several times.
 - **Q6 (product owner)** What time should the reminder arrive? **07:15 Asia/Colombo**, before the working day, and away from the 00:30 to 04:00 maintenance jobs.
 - **Q7 (product owner)** Should a custom role with `account.reconcile` but without `report.view` get the reminder? **No. The link would give a 403.** No default template has this combination.
 - **Q8 (accountant)** Should the reminder go out when an account is first Due (the 1st of the month), and not only when it is Overdue? **No. Only Overdue, after the 10 grace days, so the bell is not noisy every month for accounts that are done on time.**
 - **Q9 (product owner)** A backlog row is needed. **The product owner adds AG-033f to the backlog sheet. This spec does not edit the xlsx.**
+
+## Accounting review
+Reviewed against AG-033e finding 4, AG-033e R2 to R5, AG-033d D1, D2, D4 and R6, AG-094 R2, R5, R6, R10 and R11, and `PermissionSeeder::TEMPLATES` at d311800. Verdict: **approved for development, with finding 1 applied to this spec in this review** (R6, the `round` column, R9, AC 10, Q5). Findings 2 and 3 need a product owner decision. They do not block.
+
+### Answers to the BA's questions
+- **Q5: yes, re-remind once after an undo.** The BA's assumption leaves a gap. Completing a statement auto-reads the reminder for everyone: the preparer, the checker and the Branch Admin (R7 a). If the statement is then undone, the account is overdue again, but nobody has an unread reminder until the 11th of next month, which can be almost a month later. During that time the Super Admin may lock the month. AG-033d tells the checker about an undo only if the statement was already checked. So complete-then-undo before anyone checks silences the control, by mistake or on purpose. Adding the statement id to the key does not fix this: after the undo, the last statement goes back to the one the first reminder was based on. The rule now is one more round per undo of a statement dated on or after E (R6). Each undo is a deliberate, audited act, so the extra rows are information and not noise.
+- **Q1: not every branch every month. But the Super Admins should get persistent cases (finding 2).** A reminder that goes only to the people who have not done the work is a prompt, not an independent control. Head office is the independent layer (AG-033d D1: the Super Admin's lock is the approval of the month). One row per account per month for every branch would be too much. Escalating only accounts overdue 2 months or more keeps the volume to the exceptions. The MAIN-plus-fallback rule is right as the base.
+- **Q8: agree, no reminder for Due.** Due is the normal state for the first 10 days after month-end. The grace period was accepted in AG-033e. Reminding on the 1st would make every account show in the bell every month, and people would learn to ignore it. Due accounts already show amber on S7, and in the S6 coverage sentence.
+
+### Findings
+1. **MUST - Re-send after an undo (R6, Q5). Applied in this review.**
+   - Rule: R6 as now written. The dedupe key becomes `(account_id, overdue_through, round)`. A new round is sent when a statement of the account dated on or after E was undone after the latest reminder for that E.
+   - The audit row records `round` and `undone_statement_id`.
+   - Acceptance criteria: AC 10 (rewritten), AC 4, AC 21 (still one row per round under concurrency).
+2. **SHOULD (product owner) - Escalate to Super Admins from the second overdue month (R2, Q1).**
+   - Rule: for a branch account with `months_overdue` >= 2, every active Super Admin also gets the reminder, besides the branch holders. Add a column `escalated` (bool) to the reminder row and to the audit values. The body adds " Escalated: overdue 2 months or more.".
+   - The R2 one-row-per-user rule still applies. So a Super Admin who holds a role in the branch gets one row only.
+   - If accepted, add these acceptance criteria:
+     - AC 2 changes: SA and SA2 also get the KDY Bank 5 row (months 3). They do not get the KDY Bank or KDY Bank 2 rows (months 1).
+     - AC 12 changes: SA has 4 rows, and KDY Bank 5 appears once.
+     - New AC: on 2026-12-10 (E = 31 Oct), KDY Bank 5 (months 2) is escalated.
+   - Later story, not this one: the S2 Lock confirm should list the accounts that are Overdue for the months being locked, as it already lists unchecked statements (AG-033d S2). Then the Super Admin review no longer depends on opening S7.
+3. **SHOULD - Fall back when the branch has no preparer, not only when it has no holder at all (R2).**
+   - A Viewer with `account.reconcile_check` cannot reconcile. If a branch's only holders are checkers, the reminder reaches nobody who can act on it.
+   - Rule: when no active member of X holds `account.reconcile` and `report.view`, the Super Admins are added as fallback (`super_admin_fallback` true). The body then says " No one in <code> can reconcile this account.". The checkers still get their rows.
+   - AC 11, last sentence, changes to: "Given only a GAL Viewer with `account.reconcile_check` and `report.view` is active, then the Viewer and SA and SA2 are notified, with the fallback sentence."
+
+### Other points checked (fine)
+- **Recipients:** preparers (`account.reconcile`) and checkers (`account.reconcile_check`), each with `report.view`, in the account's branch, active users and active roles only. This matches finding 4 and the seeded templates (Accountant, Viewer, Branch Admin `*`; Cashier excluded). MAIN goes to MAIN holders plus the Super Admins. Fine.
+- **Timing:** daily at 07:15 Asia/Colombo. The run uses the business date, so the server time zone does not matter (AC 5). One reminder per overdue month-end, and the next month's reminder carries the higher count. Fine.
+- **No opt-out:** correct for a control. Removing the key from the role is the way to stop it, and that is a role change, which is audited. "Mark all as read" can clear a row, but S7 and next month's reminder remain. Fine.
+- **Dedupe:** the unique key plus `insertOrIgnore` in one transaction holds against reruns, overlapping runs and two servers (AC 21). Pruned bell rows never resend (AC 22). A row with 0 recipients is still written and audited, so a gap in the recipients stays visible. Fine.
+- **Auto-mark-read:** only `read_at` changes, only for rows with `overdue_through` <= the completed date. A partial catch-up does not close the reminder. Fine. With finding 1, an undo can no longer use this to silence the reminder.
+- **Audit:** one system row per reminder. It records the recipients and the fallback flag, has `user_id` null, and has the account's `branch_id`, so branch audit scoping works. The reminder table is append-only. Reads and auto-reads are not audited, which is consistent with AG-094 R10. Fine.
+- **No postings:** no `LedgerService` call and no change to balances, transactions, marks, statements, checks or settings. `ledger:verify` is part of AC 16. The hook on Complete runs after commit and never fails the Complete. Fine.
+- **Branch isolation and redaction:** follow AG-094 R5, and S7 re-checks access on the server. No amounts or bank account numbers appear in the text. Fine.
