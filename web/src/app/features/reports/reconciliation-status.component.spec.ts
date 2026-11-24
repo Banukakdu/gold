@@ -1,7 +1,8 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, TestRequest, provideHttpClientTesting } from '@angular/common/http/testing';
-import { Router, provideRouter } from '@angular/router';
+import { ActivatedRouteSnapshot, CanActivateFn, Route, Router, RouterStateSnapshot, UrlTree, provideRouter } from '@angular/router';
+import { routes } from '../../app.routes';
 import { Component } from '@angular/core';
 import { AuthService } from '../../core/auth.service';
 import { me } from '../../core/notifications.service.spec';
@@ -16,6 +17,7 @@ class BlankComponent {}
 const VIEWER = { id: 2, code: 'KDY', name: 'Kandy', is_main: false, roles: ['Viewer'], permissions: ['account.view', 'transaction.view', 'report.view'] };
 const ACCOUNTANT = { id: 2, code: 'KDY', name: 'Kandy', is_main: false, roles: ['Accountant'],
   permissions: ['account.view', 'account.reconcile', 'report.view', 'report.export', 'transaction.view'] };
+const CASHIER = { id: 2, code: 'KDY', name: 'Kandy', is_main: false, roles: ['Cashier'], permissions: ['transaction.view', 'transaction.create'] };
 const GALLE = { id: 3, code: 'GAL', name: 'Galle', is_main: false, roles: ['Viewer'], permissions: ['report.view'] };
 const URL = '/api/v1/reports/reconciliation-status';
 
@@ -186,8 +188,7 @@ describe('AG-033e bank reconciliation status (web)', () => {
   });
 
   it('errors: 422 under the Status field, 403 in .alert, network error with Retry', async () => {
-    const req = await open(null, VIEWER, '/reports/reconciliation-status?status=late');
-    expect(req!.request.params.get('status')).toBe('late');
+    const req = await open(null);
     req!.flush({ message: 'x', errors: { status: ['Choose a valid status.'] } }, { status: 422, statusText: 'Unprocessable' });
     await settle(fixture);
     expect(el.querySelector('.rs-panel .field-error')!.textContent).toContain('Choose a valid status.');
@@ -205,6 +206,59 @@ describe('AG-033e bank reconciliation status (web)', () => {
     http.expectOne(r => r.url === URL).flush(report());
     await settle(fixture);
     expect(rows().length).toBe(5);
+  });
+
+  it('review SHOULD 1: an unknown status from a bookmark falls back to All', async () => {
+    const req = await open(null, VIEWER, '/reports/reconciliation-status?status=late');
+    expect(req!.request.params.get('status')).toBe('all');
+    req!.flush(report());
+    await settle(fixture);
+    expect(rows().length).toBe(5);
+    expect(el.querySelector<HTMLSelectElement>('select[name="status"]')!.value).toBe('all');
+  });
+
+  it('review SHOULD 1: a 422 on Status opens the filter sheet at 390px, so the message is visible', async () => {
+    await open();
+    const frame = await phoneFrame();
+    frame.adopt(el);
+    await settle(fixture);
+    const panel = el.querySelector<HTMLElement>('.rs-panel')!;
+    expect(frame.win.getComputedStyle(panel).display).toBe('none');
+    button(el, 'Apply')!.click();
+    http.expectOne(r => r.url === URL).flush({ message: 'x', errors: { status: ['Choose a valid status.'] } }, { status: 422, statusText: 'Unprocessable' });
+    await settle(fixture);
+    expect(frame.win.getComputedStyle(panel).display).toBe('flex');
+    const error = panel.querySelector<HTMLElement>('.field-error')!;
+    expect(error.textContent).toContain('Choose a valid status.');
+    expect(error.getBoundingClientRect().height).toBeGreaterThan(0);
+    frame.remove();
+  });
+
+  it('QA D1: a double click on Apply sends one request', async () => {
+    await open();
+    const apply = button(el, 'Apply')!;
+    apply.click();
+    apply.click();
+    const reqs = http.match(r => r.url === URL);
+    expect(reqs.length).toBe(1);
+    reqs[0].flush(report());
+    await settle(fixture);
+    button(el, 'Apply')!.click();
+    http.expectOne(r => r.url === URL).flush(report());
+  });
+
+  it('AC 11: a Cashier cannot open the hub or S7 (no card to see); a Viewer can', () => {
+    const shell = routes.find(r => r.children)!.children!;
+    const guards = (path: string) => (shell.find((r: Route) => r.path === path)!.canActivate ?? []) as CanActivateFn[];
+    const run = (path: string) => guards(path).map(g => TestBed.runInInjectionContext(() => g({} as ActivatedRouteSnapshot, {} as RouterStateSnapshot)));
+    setup([CASHIER]);
+    for (const path of ['reports', 'reports/reconciliation-status']) {
+      const out = run(path);
+      expect(out.some(o => o instanceof UrlTree)).withContext(path).toBeTrue();
+    }
+    TestBed.resetTestingModule();
+    setup([VIEWER]);
+    for (const path of ['reports', 'reports/reconciliation-status']) expect(run(path).every(o => o === true)).withContext(path).toBeTrue();
   });
 
   it('AC 12: Viewer has no Reconcile links and no export buttons; Statements opens S6 for the account', async () => {
@@ -290,9 +344,14 @@ describe('AG-033e bank reconciliation status (web)', () => {
       expect(button(panel, 'Clear filters')!.getBoundingClientRect().height).toBeGreaterThanOrEqual(44);
       toggle.click();
       await settle(fixture);
-      // Export buttons full width.
+      // QA D2: export buttons full width.
       const pdf = button(el, 'PDF')!;
-      expect(pdf.getBoundingClientRect().height).toBeGreaterThanOrEqual(44);
+      const excel = button(el, 'Excel')!;
+      const head = el.querySelector<HTMLElement>('.rs-head')!.getBoundingClientRect().width;
+      for (const b of [pdf, excel]) {
+        expect(b.getBoundingClientRect().height).toBeGreaterThanOrEqual(44);
+        expect(Math.round(b.getBoundingClientRect().width)).toBe(Math.round(head));
+      }
       expect(frame.doc.documentElement.scrollWidth).toBeLessThanOrEqual(width);
       document.body.appendChild(el);
       frame.remove();

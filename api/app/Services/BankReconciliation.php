@@ -1471,8 +1471,8 @@ class BankReconciliation
         $filter = $p->extra['status'];
         $data = $filter === 'all' ? $rows : $rows->where('status', $filter)->values();
 
-        return array_merge(app(ReportService::class)->meta($p), [
-            'provisional' => false, // a status as at today, not period figures
+        return array_merge(app(ReportService::class)->meta($p, provisional: false), [
+            'provisional' => false, // a status as at today, not period figures (review NIT 3: no lock query)
             'as_at' => $today,
             'grace_days' => $grace,
             'due_month_end' => $due,
@@ -1499,10 +1499,11 @@ class BankReconciliation
         $max = DB::table('bank_statements')->where('status', BankStatement::COMPLETED)->whereIn('account_id', $accountIds)
             ->groupBy('account_id')->selectRaw('account_id as aid, MAX(statement_date) as d');
 
-        return BankStatement::withoutGlobalScopes()->completed()
+        // Review NIT 2: the same guard as lastReconciledDates() (no reconciliation tables yet: no statements).
+        return self::installed(fn () => BankStatement::withoutGlobalScopes()->completed()
             ->joinSub($max, 'mx', fn ($j) => $j->on('mx.aid', '=', 'bank_statements.account_id')->on('mx.d', '=', 'bank_statements.statement_date'))
             ->orderBy('bank_statements.id')->get(['bank_statements.*'])
-            ->keyBy(fn (BankStatement $s) => (int) $s->account_id)->all();
+            ->keyBy(fn (BankStatement $s) => (int) $s->account_id)->all(), []);
     }
 
     /** S7 basis line. */

@@ -219,6 +219,32 @@ class ReconciliationStatusTest extends StatusTestCase
         $this->assertSame($before, $after);
     }
 
+    public function test_review_s2_checker_tags_are_per_branch_in_all_mode(): void
+    {
+        // VW is a member of KDY only. VW's check on GAL's ST4 and a Super Admin's check on KDY Bank 5 (ST7), written
+        // directly (test data: the API would not let VW check in GAL).
+        $insert = fn (BankStatement $s, int $by) => DB::table('bank_statement_checks')->insert(['branch_id' => $s->branch_id, 'bank_statement_id' => $s->id,
+            'account_id' => $s->account_id, 'checked_by' => $by, 'checked_at' => '2026-12-11 04:30:00', 'compared_with' => 'internet_banking',
+            'max_entry_id' => 1_000_000_000, 'status' => 'active', 'created_at' => now(), 'updated_at' => now()]);
+        $insert($this->st4, $this->vw->id);
+        $insert($this->st7, $this->admin->id);
+        $vw = ['id' => $this->vw->id, 'name' => $this->vw->name];
+        $sa = ['id' => $this->admin->id, 'name' => $this->admin->name, 'tag' => null];
+
+        // S7, All mode: the same user, tagged per branch; the Super Admin never tagged.
+        $r = $this->statusReport([], $this->admin, 'all');
+        $this->assertSame($vw + ['tag' => null], $this->rowOf($r, $this->bank4)['check']['checked_by']);
+        $this->assertSame($vw + ['tag' => 'no longer in this branch'], $this->rowOf($r, $this->galBank)['check']['checked_by']);
+        $this->assertSame($sa, $this->rowOf($r, $this->bank5)['check']['checked_by']);
+        $this->assertSame('checked', $this->rowOf($r, $this->galBank)['check_status']);
+
+        // S6, All mode (ReconciliationChecks::statusMap): the same tags.
+        $rows = collect($this->as($this->admin, 'all')->getJson('/api/v1/reports/reconciliation-statements?per_page=100&from=2026-01-01')->assertOk()->json('data'))->keyBy('id');
+        $this->assertSame($vw + ['tag' => null], $rows[$this->st1->id]['check']['checked_by']);
+        $this->assertSame($vw + ['tag' => 'no longer in this branch'], $rows[$this->st4->id]['check']['checked_by']);
+        $this->assertSame($sa, $rows[$this->st7->id]['check']['checked_by']);
+    }
+
     public function test_ac14_same_accounts_as_the_s6_coverage_sentence(): void
     {
         // KDY Bank 6 (AC 21 case) makes the closed-account rule part of the comparison.
@@ -245,7 +271,7 @@ class ReconciliationStatusTest extends StatusTestCase
         $res = $this->exportStatus([], 'pdf')->assertOk();
         $this->assertSame('attachment; filename="reconciliation-status_2026-12-15.pdf"', $res->headers->get('Content-Disposition'));
         // The core-font PDF text is WinAnsi ("·" is one byte).
-        $text = mb_convert_encoding(implode(' ', $this->pdfPages($res->getContent())), 'UTF-8', 'Windows-1252');
+        $text = preg_replace('/\s+/', ' ', mb_convert_encoding(implode(' ', $this->pdfPages($res->getContent())), 'UTF-8', 'Windows-1252'));
         foreach (['Bank reconciliation status', 'Branches: KDY Branch KDY', 'As at: 15 Dec 2026', 'Printed by '.$this->acc->name,
             'As at 15 Dec 2026. A month\'s bank reconciliation is due within 10 days after month-end.',
             'Overdue 2 · Due 0 · Up to date 1 · Not required 2', 'Latest statement not checked 2 · Re-check needed 0', 'Filters: Status: All',

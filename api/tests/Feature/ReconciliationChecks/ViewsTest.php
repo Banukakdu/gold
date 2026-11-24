@@ -60,8 +60,9 @@ class ViewsTest extends ChecksTestCase
     public function test_ac23_list_exports_and_excel_note_as_text(): void
     {
         $this->check($this->st1, $this->vw, ['note' => '=SUM(A1:A9) agreed to the chq book'])->assertCreated();
-        $text = implode(' ', $this->pdfPages($this->as($this->acc, $this->kdy)->postJson('/api/v1/reports/reconciliation-statements/export', ['format' => 'pdf'])
-            ->assertOk()->getContent()));
+        // Whitespace collapsed: a long checker name wraps the cell before the date (the date itself never breaks).
+        $text = preg_replace('/\s+/', ' ', implode(' ', $this->pdfPages($this->as($this->acc, $this->kdy)->postJson('/api/v1/reports/reconciliation-statements/export', ['format' => 'pdf'])
+            ->assertOk()->getContent())));
         foreach (['CHECKED', 'Checked by '.$this->vw->name.', 2026-12-10', 'Not checked', 'Checked: Any'] as $needle) {
             $this->assertStringContainsString($needle, $text);
         }

@@ -503,6 +503,12 @@ class ReportExporter
 
     public const SUPERSEDED = 'This statement is superseded.';
 
+    /** PDF cell text, HTML-escaped, with each Y-m-d date kept on one line (dompdf would break it at a hyphen). */
+    public static function pdfKeepDates(string $text): string
+    {
+        return (string) preg_replace('/\d{4}-\d{2}-\d{2}/', '<span style="white-space: nowrap">$0</span>', e($text));
+    }
+
     /** AG-033e: the summary line, the check line and the filters. */
     public static function statusLines(array $d): array
     {

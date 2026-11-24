@@ -96,7 +96,7 @@ export function checkLine(s: StatusSummary): string {
         <p class="muted rst-basis">{{ r.basis }}</p>
         <p class="rst-summary"><b>{{ summary() }}</b></p>
         <p class="rst-check" [class.warn]="r.summary.not_checked || r.summary.recheck" [class.muted]="!r.summary.not_checked && !r.summary.recheck">{{ checks() }}</p>
-        <div class="rs-export"><ag-export-buttons name="reconciliation-status" [params]="applied()" /></div>
+        <div class="rs-export rst-export"><ag-export-buttons name="reconciliation-status" [params]="applied()" /></div>
       </div>
     }
 
@@ -183,13 +183,16 @@ export class ReconciliationStatusComponent implements OnInit {
 
   ngOnInit() {
     const { q, branches } = readQuery(this.route, this.auth.isAllBranches());
-    this.status = q.get('status') ?? 'all';
+    // Review SHOULD 1: an unknown status from a bookmark falls back to All (a phone never shows a blank page).
+    const status = q.get('status') ?? 'all';
+    this.status = STATUS_OPTIONS.some(o => o.value === status) ? status : 'all';
     this.branches.set(branches);
     this.apply();
   }
 
   /** Apply: the filters into the URL (bookmarkable; Back from S6 or S1 restores them). */
   apply() {
+    if (this.loading()) return; // QA D1: a second click while the request is in flight is ignored
     const params: ReportParams = { branches: this.branches(), status: this.status };
     this.applied.set(params);
     writeQuery(this.router, this.route, params);
@@ -221,6 +224,8 @@ export class ReconciliationStatusComponent implements OnInit {
         // A 422 on Status goes under the field; any other field (branches) to the alert, so a bad bookmark never leaves a blank page.
         const { status, ...rest } = fields;
         this.errs.set(status ? { status } : {});
+        // The Status error sits in the filter sheet: open it, so the message is visible at 390px too.
+        if (status) this.panelOpen.set(true);
         this.msg.set(Object.keys(fields).length ? Object.values(rest).join(' ') : reportError(e));
       },
     });

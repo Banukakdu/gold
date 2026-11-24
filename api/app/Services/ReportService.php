@@ -232,7 +232,8 @@ class ReportService
     }
 
     /** Header data shared by every report (screen, PDF, Excel). */
-    public function meta(ReportParams $p): array
+    /** @param  bool|null  $provisional  null: worked out (provisional()); a status report passes false (no lock query). */
+    public function meta(ReportParams $p, ?bool $provisional = null): array
     {
         return [
             'company' => app(Settings::class)->companyName(),
@@ -242,7 +243,7 @@ class ReportService
             'branches' => $p->branches->map(fn (Branch $b) => ['id' => $b->id, 'code' => $b->code, 'name' => $b->name, 'status' => $b->status])->values()->all(),
             'all_branches' => $p->allBranches,
             'subset' => $p->subset,
-            'provisional' => $this->provisional($p),
+            'provisional' => $provisional ?? $this->provisional($p),
         ];
     }
 

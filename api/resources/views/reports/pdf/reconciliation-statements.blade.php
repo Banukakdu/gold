@@ -29,7 +29,7 @@
             <td>{{ $X::statementStatusText($r) }}</td>
             <td>{{ $r['changed_since_completion'] ? 'Changed since completion' : '' }}</td>
             <td class="num">{{ $X::lateText($r) }}</td>
-            <td>{{ \App\Services\ReconciliationChecks::listText($r, true) }}</td>
+            <td>{!! $X::pdfKeepDates(\App\Services\ReconciliationChecks::listText($r, true)) !!}</td>
             @if ($copies)<td>{{ $X::copyText($r) }}</td>@endif
         </tr>
     @empty

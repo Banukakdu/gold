@@ -129,13 +129,16 @@ Any other parameter (for example `as_at`, `from` or `to`) is ignored.
 
 Response 200:
 ```
-{ meta: {…as other reports: branches, generated_at, generated_by…},
+{ meta: {…as other reports: company, currency, from = to = as_at, branches, all_branches, subset…},
+  provisional: false,            // always: a status as at today, not period figures
   as_at: 'Y-m-d', grace_days: 10,
   due_month_end: 'Y-m-d',        // L, R2
   overdue_through: 'Y-m-d',      // E, R2
+  basis: string,                 // the S7 basis line
+  filters: { status },           // the Status filter applied
   summary: { overdue, due, up_to_date, not_required,
              not_checked, recheck },                // whole scope, ignores `status`; check counts per R7
-  data: [{ account:{id,code,name,status}, branch:{id,code},
+  data: [{ account:{id,code,name,status}, branch:{id,code,is_main},   // is_main: "Reconcile" in All mode (Q8)
            status: 'overdue'|'due'|'up_to_date'|'not_required',
            not_required_reason: 'no_entries'|'closed_nil'|null,
            never_reconciled: bool,
