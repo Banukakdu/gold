@@ -342,3 +342,41 @@ Reviewed against CLAUDE.md, `reconciliation-statements-list.md` (R9, AC 20, sign
 4. **SHOULD (product owner) - A reminder is the next story.** A report is a detective control only if someone opens it. I recommend the bell reminder (Q4) or the monthly email on the 11th (Q5) next, to holders of `account.reconcile` and of `account.reconcile_check` in the branch, deduplicated per account and month. Not blocking for this story.
 
 Fine as specified: read only with `report.exported` as the only write (R9, AC 16), branch isolation (R1), the sort order, the batched check status (R7, AC 17), the export header without "Amounts in LKR" or PROVISIONAL, and the formula-injection prefix.
+
+## Accountant sign-off
+Checked on head 1b66fd5 (build e06ef04, fixes 1b66fd5) against the Accounting review above, by reading `git diff feature/reconciliation-checked-by...HEAD`, the code and the tests. I did not run the tests myself; the developer reports `php artisan test` and MySQL green, and the QA report has all 21 ACs passing.
+
+**Findings**
+1. **MUST, closed nil-balance account until its final month is reconciled: DONE.**
+   - There is one rule, `BankReconciliation::notRequired()`. It returns `closed_nil` only when the account is not active, its book balance at the cut-off is 0, and its latest completed statement is on or after `monthEnd(last line on or before the cut-off)` (F).
+   - S7 `status()` and S6 `coverage()` both call it, with the same `lineSummary()` grouped query. So S6 and S7 cannot drift apart.
+   - `months_overdue` stops at `min(E, F)` for a closed nil account.
+   - Tests:
+     - `test_ac21_closed_account_until_its_final_month_is_reconciled`: overdue 1 on 15 Dec; due on 5 Dec; `closed_nil` after the 30 Nov statement; still not required on 15 Feb; after undo, overdue 1 and not 2 on 15 Jan.
+     - `test_ac21_closed_after_the_cut_off_stays_required_until_reconciled_to_its_final_month`.
+     - `test_ac14_same_accounts_as_the_s6_coverage_sentence` now includes KDY Bank 6, on three dates, in branch and All mode.
+   - AG-033c `test_ac20_coverage_line` was updated, and the amendment note is under AG-033c R9 (`reconciliation-statements-list.md`).
+2. **SHOULD, R10 "closed with a balance at L": DONE.** It is required like an active account. After L moves on it stays required until it is reconciled to F (second AC 21 test: overdue 2 on 15 Jan; a 30 Nov statement at 0.00 is refused; the 31 Dec statement makes it `closed_nil`).
+3. **SHOULD, check line: DONE.**
+   - `summary.not_checked` and `summary.recheck` are counted over all rows in scope from the latest completed statement, and the Status filter does not change them.
+   - The text "Latest statement not checked N · Re-check needed N" is on screen (amber when above 0), in the PDF (amber) and in the Excel header.
+   - Tests: `test_ac1_rows_order_summary_and_check_counts`, `test_ac15_pdf_export`, `test_ac15_excel_export`.
+   - The check does not change the row's Status (`test_ac6_recheck_does_not_change_the_status`).
+4. **SHOULD (product owner), reminder story: NOT DONE, out of scope as agreed.** This is still my recommendation for the next story (bell or the monthly email on the 11th). It does not block this one.
+
+**Other points verified**
+- **Months-overdue counting is correct.** `monthEndsBetween()` counts the month-ends M with start < M <= stop, where start is the last completed statement, or the day before the first line for a never-reconciled account. A mid-month statement counts correctly (2026-09-15 to 2026-11-30 gives 3), and so does a first line on the 1st (MAIN gives 4, Aug to Nov). Leap February also counts correctly (`test_r4_month_counting_helpers`). `lastReconciledDates` / `latestCompleted` read completed statements only, so undone statements never count (`test_ac5_latest_statement_undone`).
+- **The 10-day grace is correct.** `RECONCILE_GRACE_DAYS = 10`, E = `reconciledTo(T - 11 days)` and `due_by` = L + 10. On 10 Dec, GAL Bank is due by 10 Dec; on 11 Dec it is overdue 1 (`test_ac3_grace_period`). On 31 Dec it is due by 10 Jan 2027 (`test_ac4_last_day_of_the_month`). The basis line states the rule.
+- **A closed nil account cannot stay "due" forever.** It can only be due while E < F, which means F = L, so `due_by` is correct.
+- **The account cases match R3/R10 and the tests:**
+  - no entries, and first entry after L (AC 7): not required, `no_entries`;
+  - dormant with entries: required;
+  - reopened: overdue 5 (AC 7);
+  - never reconciled: AC 1, 3, 9;
+  - MAIN in All mode: AC 9.
+- **Minor, no action.** `notRequired()` tests `status !== 'active'` where the spec says `= closed`. Accounts have only these two statuses, so the result is the same.
+- **Read only is confirmed.** No `LedgerService` call and no write in `status()`, `statusParams()` or the export path, apart from the existing `report.exported` audit. `test_ac16_read_only` compares `ledger_entries`, marks, statements, checks, settings, transactions and every `current_balance` before and after, counts exactly 2 `report.exported` rows for 2 exports, and runs `ledger:verify`.
+- **Permissions and roles are unchanged.** The report uses `report.view`, and the export needs `report.view` + `report.export`. Cashier gets 403 (AC 11), Viewer gets no export (AC 15), and branch isolation holds (AC 10).
+- **The report has no money fields.** There is no "Amounts in LKR" line and no PROVISIONAL marker.
+
+**Verdict: SIGNED OFF.** The MUST finding is done. SHOULD findings 2 and 3 are done. SHOULD 4 is carried to the product owner as the next story.
