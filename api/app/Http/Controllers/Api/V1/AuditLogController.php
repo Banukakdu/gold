@@ -187,6 +187,8 @@ class AuditLogController extends Controller
         'reconciliation.checked' => 'Bank statement checked',
         'reconciliation.check_withdrawn' => 'Bank statement check withdrawn',
         'reconciliation.check_cancelled' => 'Bank statement check cancelled',
+        // AG-033f R9 (a system row).
+        'reconciliation.overdue_reminder_sent' => 'Overdue reconciliation reminder sent',
         // AG-066 S4
         'expense_template.created' => 'Expense template created',
         'expense_template.updated' => 'Expense template changed',

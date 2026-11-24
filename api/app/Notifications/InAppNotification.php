@@ -53,6 +53,9 @@ class InAppNotification extends Notification
 
     public const RECONCILIATION_CHECK_CANCELLED = 'reconciliation.check_cancelled';
 
+    /** AG-033f: a bank account of the branch is overdue for reconciliation (data adds account_id, overdue_through, months_overdue). */
+    public const RECONCILIATION_OVERDUE = 'reconciliation.overdue';
+
     public function __construct(public string $kind, public array $data) {}
 
     public function via(object $notifiable): array

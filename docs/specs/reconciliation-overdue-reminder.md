@@ -35,7 +35,7 @@ Source: AG-033e accountant sign-off, finding 4 ("A report is a detective control
 | Accountant | yes | no | yes | yes (the preparer) |
 | Viewer | no | yes | yes | yes (the checker, AG-033d) |
 | Cashier | no | no | no | no |
-| Super Admin | all | all | all | MAIN accounts always; a branch account only as fallback (R2), or through a branch role they hold |
+| Super Admin | all | all | all | MAIN accounts always; a branch account only as fallback, when no active member of the branch can reconcile it (R2, accounting review 3), or through a branch role they hold |
 
 `report.view` is required because the link opens S7 and every AG-033d check route needs it too. A custom role with `account.reconcile` but without `report.view` gets nothing (Q7).
 
@@ -49,7 +49,7 @@ Source: AG-033e accountant sign-off, finding 4 ("A report is a detective control
 - **F2 Checker (VW, Viewer KDY).** VW gets the same three rows. VW follows up with ACC, and checks the statements on S6 once they are completed.
 - **F3 Reconciled.** On 12 Dec ACC completes KDY Bank to 30 Nov 2026. The unread KDY Bank reminder of ACC, VW and BA becomes read (R7). The other two stay unread. No new KDY Bank reminder is sent in December.
 - **F4 Still overdue next month.** KDY Bank 5 is not done. On 11 Jan 2027 everyone in F1 gets "KDY Bank 5 (11006)" · "Not reconciled to 31 Dec 2026. Last statement 15 Sep 2026 · overdue 4 months." If the December row is still unread, it becomes read (superseded).
-- **F5 Super Admin, All branches mode (SA).** SA gets the MAIN Main Account reminder (tag MAIN), and a branch reminder only when nobody in that branch can receive it (R2), with the extra sentence "No one in GAL can reconcile or check this account." Clicking switches from All branches to the tagged branch and opens S7 there (AG-094 F6). SA can switch back to All branches and see every branch on S7.
+- **F5 Super Admin, All branches mode (SA).** SA gets the MAIN Main Account reminder (tag MAIN), and a branch reminder only when nobody in that branch can reconcile the account (R2, accounting review 3), with the extra sentence "No one in GAL can reconcile this account." Any checkers of the branch still get their rows. Clicking switches from All branches to the tagged branch and opens S7 there (AG-094 F6). SA can switch back to All branches and see every branch on S7.
 - **F6 Lost access.** VW is removed from KDY. VW's old KDY reminders are shown redacted (AG-094 R5). VW gets no new KDY reminder.
 - **F7 Operations.** The command runs from the scheduler. It needs no queue worker. `php artisan reconciliation:remind-overdue --dry-run` shows what would be sent and writes nothing.
 
@@ -99,7 +99,7 @@ Schedule::command('reconciliation:remind-overdue')->description('Remind overdue 
 | Field | Value |
 |---|---|
 | `title` | "Bank reconciliation overdue: <account name> (<code>)" |
-| `body` | "Not reconciled to <E, d M Y>. " + ("Last statement <date> · overdue N month(s)." or "Never reconciled · overdue N month(s).") + (fallback only) " No one in <branch code> can reconcile or check this account." |
+| `body` | "Not reconciled to <E, d M Y>. " + ("Last statement <date> · overdue N month(s)." or "Never reconciled · overdue N month(s).") + (fallback only) " No one in <branch code> can reconcile this account." |
 | `branch_id`, `branch_code` | the account's branch |
 | `url` | `/reports/reconciliation-status?status=overdue` |
 | `account_id`, `overdue_through`, `months_overdue` | for R7 and tests |
@@ -116,7 +116,8 @@ The texts use `BankReconciliation::label()` dates and AG-033e month wording ("1 
 - **R2 Recipients for an account in branch X** (read at run time):
   - **Holders:** active users who are members of X and hold `account.reconcile` or `account.reconcile_check` **and** `report.view` through active roles in X. Use `InAppNotifications::holderIdsOf([...], X)` for the first set, intersected with `holderIdsOf(['report.view'], X)`, then active users only.
   - **X is MAIN:** holders plus every active Super Admin.
-  - **X is another branch:** holders. When there are none, every active Super Admin instead (`super_admin_fallback = true`, extra body sentence). A Super Admin who holds a role in X counts as a holder.
+  - **Preparers:** the holders who hold `account.reconcile` (and `report.view`) through active roles in X.
+  - **X is another branch:** holders. When there is no preparer (no holder at all, or only checkers), every active Super Admin as well (`super_admin_fallback = true`, extra body sentence " No one in <code> can reconcile this account."). The checkers still get their rows. A Super Admin who holds a role in X counts as a holder (and as a preparer when that role has `account.reconcile`). (Accounting review 3, product owner decision.)
   - Inactive users are never notified. One row per user per account (AG-094 R2). There is no actor.
 - **R3 Timing.**
   - The run is daily at 07:15 Asia/Colombo. Running daily, and not only on the 11th, means that an account that becomes overdue later in the month is reminded the next morning. Examples: a statement undone, a closed account reopened, a back-dated first entry on a new account. A day the server was down is also caught up the next day.
@@ -226,12 +227,12 @@ Users:
     - given ACC completes and BA undoes the 30 Nov statement once more on 2026-12-20, the run on 2026-12-21 creates `round` 3, and the unread `round` 2 rows become read;
     - on 2027-01-11 a reminder with `overdue_through` 2026-12-31, `round` 1 and months 2 is created.
     - Given instead BA undoes a KDY Bank 5 statement dated 2026-10-31 (AC 8), then no re-send is created for KDY Bank 5 in December.
-11. **Fallback.** Given GACC is deactivated before AC 9's run, then:
-    - SA and SA2 each get the GAL Bank row, ending with " No one in GAL can reconcile or check this account.";
+11. **Fallback (accounting review 3).** Given GACC is deactivated before AC 9's run, then:
+    - SA and SA2 each get the GAL Bank row, ending with " No one in GAL can reconcile this account.";
     - the reminder row has `super_admin_fallback` true;
     - SA3 gets nothing.
 
-    Given a GAL Viewer with `account.reconcile_check` and `report.view` is active, then the Super Admins get nothing and only that Viewer is notified.
+    Given only a GAL Viewer with `account.reconcile_check` and `report.view` is active, then the Viewer and SA and SA2 are notified, with the fallback sentence, and `super_admin_fallback` is true. Given GACC is active as well, then only GACC and the Viewer are notified, without the sentence.
 12. **Super Admin as a branch holder.** Given SA also holds the Branch Admin role in KDY, then after AC 1's run SA has exactly 4 rows: 3 KDY and 1 MAIN.
 13. **Open flow (UI).**
     - Given ACC clicks the KDY Bank 5 row in the bell, then the row is marked read and `/reports/reconciliation-status?status=overdue` shows only Overdue rows of KDY.
@@ -267,7 +268,7 @@ Users:
 23. **Build checks.** `php artisan test`, `./vendor/bin/pint --test` and `npx ng build` pass.
 
 ## 8. Open questions (assumption in bold; work proceeds on it)
-- **Q1 (product owner)** Should Super Admins get every branch's overdue reminders? **No. Super Admins get MAIN accounts, plus a branch account only when nobody in that branch can receive it (R2).** With 20 branches and 5 accounts each, every branch row would mean up to 100 rows a month. A Super Admin reviews all branches on S7 in All mode before locking (AG-033d D4). A later option is one monthly summary row per Super Admin ("Bank reconciliations overdue: 7 accounts in 3 branches").
+- **Q1 (product owner)** Should Super Admins get every branch's overdue reminders? **No. Super Admins get MAIN accounts, plus a branch account only when nobody in that branch can reconcile it (R2, accounting review 3).** With 20 branches and 5 accounts each, every branch row would mean up to 100 rows a month. A Super Admin reviews all branches on S7 in All mode before locking (AG-033d D4). A later option is one monthly summary row per Super Admin ("Bank reconciliations overdue: 7 accounts in 3 branches").
 - **Q2 (product owner)** Is an email (for example a digest on the 11th) needed? **Not in this story. Bell only.** The recipients are Accountants, Branch Admins and Viewers, who sign in during month-end. An email needs a preference column, a queued mail with a re-check at send time (AG-094 R7 pattern) and its own ACs. It can reuse `bank_reconciliation_reminders` as its dedupe.
 - **Q3 (product owner / accountant)** Should there be a second reminder in the same month, for example on the 20th, if the account is still overdue? **No. One reminder per account per month-end. The next month's reminder, with a higher count, is the re-reminder.** A mid-month nudge would be a second key (`account_id, overdue_through, kind`).
 - **Q4 (product owner)** Should users be able to turn the reminder off? **No. It is a control, there is at most one row per account per month, and it is bell only.** Someone who should not get it should not hold the key: the Branch Admin removes the key from the role. AG-094 has no per-kind bell preference to extend.
@@ -276,9 +277,10 @@ Users:
 - **Q7 (product owner)** Should a custom role with `account.reconcile` but without `report.view` get the reminder? **No. The link would give a 403.** No default template has this combination.
 - **Q8 (accountant)** Should the reminder go out when an account is first Due (the 1st of the month), and not only when it is Overdue? **No. Only Overdue, after the 10 grace days, so the bell is not noisy every month for accounts that are done on time.**
 - **Q9 (product owner)** A backlog row is needed. **The product owner adds AG-033f to the backlog sheet. This spec does not edit the xlsx.**
+- **Q10 (product owner, open)** Accounting review finding 2: should every active Super Admin also get a branch account's reminder from the second overdue month (`months_overdue` >= 2), with an `escalated` column and the body sentence " Escalated: overdue 2 months or more."? **Not built in this story (product owner decision at development); the question stays open.** If accepted later, it adds a column to `bank_reconciliation_reminders`, changes R2 and the ACs listed in finding 2.
 
 ## Accounting review
-Reviewed against AG-033e finding 4, AG-033e R2 to R5, AG-033d D1, D2, D4 and R6, AG-094 R2, R5, R6, R10 and R11, and `PermissionSeeder::TEMPLATES` at d311800. Verdict: **approved for development, with finding 1 applied to this spec in this review** (R6, the `round` column, R9, AC 10, Q5). Findings 2 and 3 need a product owner decision. They do not block.
+Reviewed against AG-033e finding 4, AG-033e R2 to R5, AG-033d D1, D2, D4 and R6, AG-094 R2, R5, R6, R10 and R11, and `PermissionSeeder::TEMPLATES` at d311800. Verdict: **approved for development, with finding 1 applied to this spec in this review** (R6, the `round` column, R9, AC 10, Q5). Findings 2 and 3 need a product owner decision. They do not block. **Product owner decision at development:** finding 3 is built (R2, F5, AC 11); finding 2 is not built and stays open (Q10).
 
 ### Answers to the BA's questions
 - **Q5: yes, re-remind once after an undo.** The BA's assumption leaves a gap. Completing a statement auto-reads the reminder for everyone: the preparer, the checker and the Branch Admin (R7 a). If the statement is then undone, the account is overdue again, but nobody has an unread reminder until the 11th of next month, which can be almost a month later. During that time the Super Admin may lock the month. AG-033d tells the checker about an undo only if the statement was already checked. So complete-then-undo before anyone checks silences the control, by mistake or on purpose. Adding the statement id to the key does not fix this: after the undo, the last statement goes back to the one the first reminder was based on. The rule now is one more round per undo of a statement dated on or after E (R6). Each undo is a deliberate, audited act, so the extra rows are information and not noise.
@@ -290,7 +292,7 @@ Reviewed against AG-033e finding 4, AG-033e R2 to R5, AG-033d D1, D2, D4 and R6,
    - Rule: R6 as now written. The dedupe key becomes `(account_id, overdue_through, round)`. A new round is sent when a statement of the account dated on or after E was undone after the latest reminder for that E.
    - The audit row records `round` and `undone_statement_id`.
    - Acceptance criteria: AC 10 (rewritten), AC 4, AC 21 (still one row per round under concurrency).
-2. **SHOULD (product owner) - Escalate to Super Admins from the second overdue month (R2, Q1).**
+2. **SHOULD (product owner) - Escalate to Super Admins from the second overdue month (R2, Q1).** *Not built (product owner decision); open as Q10.*
    - Rule: for a branch account with `months_overdue` >= 2, every active Super Admin also gets the reminder, besides the branch holders. Add a column `escalated` (bool) to the reminder row and to the audit values. The body adds " Escalated: overdue 2 months or more.".
    - The R2 one-row-per-user rule still applies. So a Super Admin who holds a role in the branch gets one row only.
    - If accepted, add these acceptance criteria:
@@ -298,7 +300,7 @@ Reviewed against AG-033e finding 4, AG-033e R2 to R5, AG-033d D1, D2, D4 and R6,
      - AC 12 changes: SA has 4 rows, and KDY Bank 5 appears once.
      - New AC: on 2026-12-10 (E = 31 Oct), KDY Bank 5 (months 2) is escalated.
    - Later story, not this one: the S2 Lock confirm should list the accounts that are Overdue for the months being locked, as it already lists unchecked statements (AG-033d S2). Then the Super Admin review no longer depends on opening S7.
-3. **SHOULD - Fall back when the branch has no preparer, not only when it has no holder at all (R2).**
+3. **SHOULD - Fall back when the branch has no preparer, not only when it has no holder at all (R2).** *Built (product owner decision): R2, F5, AC 11.*
    - A Viewer with `account.reconcile_check` cannot reconcile. If a branch's only holders are checkers, the reminder reaches nobody who can act on it.
    - Rule: when no active member of X holds `account.reconcile` and `report.view`, the Super Admins are added as fallback (`super_admin_fallback` true). The body then says " No one in <code> can reconcile this account.". The checkers still get their rows.
    - AC 11, last sentence, changes to: "Given only a GAL Viewer with `account.reconcile_check` and `report.view` is active, then the Viewer and SA and SA2 are notified, with the fallback sentence."

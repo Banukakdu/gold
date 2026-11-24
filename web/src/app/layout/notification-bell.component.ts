@@ -22,6 +22,8 @@ export const KIND_ICON: Record<string, string> = {
   'reconciliation.checked': '✓',
   'reconciliation.check_withdrawn': '!',
   'reconciliation.check_cancelled': '!',
+  // AG-033f overdue bank reconciliation reminder.
+  'reconciliation.overdue': '!',
 };
 
 export function kindIcon(kind: string): string { return KIND_ICON[kind] ?? '•'; }
