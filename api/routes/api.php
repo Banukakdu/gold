@@ -119,6 +119,8 @@ Route::prefix('v1')->group(function () {
             Route::get('reports/bank-reconciliation', [ReportController::class, 'bankReconciliation'])->middleware('perm:report.view');
             // AG-033c S6 bank reconciliation statements list (export through reports/{name}/export).
             Route::get('reports/reconciliation-statements', [ReportController::class, 'reconciliationStatements'])->middleware('perm:report.view');
+            // AG-033e S7 bank reconciliation status per account (export through reports/{name}/export).
+            Route::get('reports/reconciliation-status', [ReportController::class, 'reconciliationStatus'])->middleware('perm:report.view');
             Route::post('reports/{name}/export', [ReportController::class, 'export'])->middleware('perm:report.view,report.export');
 
             Route::get('branches', [BranchController::class, 'index']);

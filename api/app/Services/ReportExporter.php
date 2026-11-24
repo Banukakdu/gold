@@ -35,6 +35,7 @@ class ReportExporter
         'cash-flow' => 'Cash Flow Summary',
         'bank-reconciliation' => 'Unreconciled bank entries',
         'reconciliation-statements' => 'Bank reconciliation statements',
+        'reconciliation-status' => 'Bank reconciliation status',
     ];
 
     /** AG-033 S3 opened with a statement_id: the printable bank reconciliation statement. */
@@ -84,6 +85,8 @@ class ReportExporter
             'bank-reconciliation' => BankReconciliation::reportRows($data ?? $this->bankReconciliation($p)),
             // AG-033c: one row per statement (at most BankReconciliation::LIST_CAP).
             'reconciliation-statements' => count(($data ?? $this->statementList($p))['data']),
+            // AG-033e: one row per bank account.
+            'reconciliation-status' => count(($data ?? $this->reconciliationStatus($p))['data']),
         };
     }
 
@@ -108,7 +111,7 @@ class ReportExporter
                 abort(response()->json(['message' => 'This export has '.number_format($rows).' rows; the limit is '
                     .number_format(ReportService::EXPORT_CAP).'. Narrow the branches or accounts, or use Older than.'], 422));
             }
-            if ($format === 'xlsx' && $rows > BackgroundExports::syncRows() && ! in_array($name, ['cash-flow', 'bank-reconciliation', 'reconciliation-statements'], true)) {
+            if ($format === 'xlsx' && $rows > BackgroundExports::syncRows() && ! in_array($name, ['cash-flow', 'bank-reconciliation', 'reconciliation-statements', 'reconciliation-status'], true)) {
                 if ($rows > BackgroundExports::maxRows() || ! $queue) {
                     $cap = $queue ? BackgroundExports::maxRows() : BackgroundExports::syncRows();
                     abort(response()->json(['message' => 'This export has '.number_format($rows).' rows; the limit is '.number_format($cap).'. Narrow the date range or branches.'], 422));
@@ -147,8 +150,8 @@ class ReportExporter
 
     public static function fileName(string $name, ReportParams $p, string $format = 'xlsx'): string
     {
-        if ($name === 'bank-reconciliation') {
-            return "{$name}_{$p->to}.{$format}"; // AG-033: bank-reconciliation_<as_at>.<ext>
+        if (in_array($name, ['bank-reconciliation', 'reconciliation-status'], true)) {
+            return "{$name}_{$p->to}.{$format}"; // AG-033 / AG-033e: <name>_<as_at>.<ext>
         }
 
         return "{$name}_{$p->from}_{$p->to}.{$format}";
@@ -166,6 +169,7 @@ class ReportExporter
             'cash-flow' => count($d['months']),
             'bank-reconciliation' => BankReconciliation::reportRows($d),
             'reconciliation-statements' => count($d['data']),
+            'reconciliation-status' => count($d['data']),
         };
     }
 
@@ -177,6 +181,7 @@ class ReportExporter
             'trial-balance' => $this->reports->trialBalance($p),
             'bank-reconciliation' => $this->bankReconciliation($p),
             'reconciliation-statements' => $this->statementList($p),
+            'reconciliation-status' => $this->reconciliationStatus($p),
             default => null,
         };
     }
@@ -192,7 +197,14 @@ class ReportExporter
             'trial-balance' => $this->reports->trialBalance($p),
             'bank-reconciliation' => $this->bankReconciliation($p),
             'reconciliation-statements' => $this->statementList($p),
+            'reconciliation-status' => $this->reconciliationStatus($p),
         };
+    }
+
+    /** AG-033e: every row that matches the filters. */
+    private function reconciliationStatus(ReportParams $p): array
+    {
+        return app(BankReconciliation::class)->status($p);
     }
 
     private function bankReconciliation(ReportParams $p): array
@@ -371,7 +383,8 @@ class ReportExporter
         // AG-092 R3: built from the stored file after its sha256 check; null (no logo, no error for the user) otherwise.
         $logo = (string) $settings->logoDataUri();
         $printed ??= 'Printed by '.$user->name.' at '.self::printedAt();
-        $currency = 'Amounts in '.$settings->currencyCode();
+        // AG-033e: the reconciliation status has no amounts, so no "Amounts in" line.
+        $currency = $name === 'reconciliation-status' ? null : 'Amounts in '.$settings->currencyCode();
         $basis = $data['basis'] ?? ReportService::basis($name);
         $title = self::TITLES[$name];
         $fy = $data['fiscal_year'] ?? null;
@@ -422,9 +435,14 @@ class ReportExporter
             $periodWord = 'Statement dates';
             $listLines = [BankReconciliation::listFilterText($data), self::coverageLine($data)];
         }
+        if ($name === 'reconciliation-status') {
+            // AG-033e: as at today; the summary, check and filter lines (Excel header; the PDF prints them under its page header).
+            $periodWord = 'As at';
+            $listLines = self::statusLines($data);
+        }
         // AG-086 R7: the cash flow sends its own label (a range over two fiscal years names both).
         $period = match ($name) {
-            'bank-reconciliation' => $settings->formatDate($p->to),
+            'bank-reconciliation', 'reconciliation-status' => $settings->formatDate($p->to),
             'reconciliation-statements' => $settings->formatDate($p->from).' to '.$settings->formatDate($p->to),
             default => $data['period_label'] ?? self::periodLabel($p->from, $p->to),
         };
@@ -484,6 +502,27 @@ class ReportExporter
     }
 
     public const SUPERSEDED = 'This statement is superseded.';
+
+    /** PDF cell text, HTML-escaped, with each Y-m-d date kept on one line (dompdf would break it at a hyphen). */
+    public static function pdfKeepDates(string $text): string
+    {
+        return (string) preg_replace('/\d{4}-\d{2}-\d{2}/', '<span style="white-space: nowrap">$0</span>', e($text));
+    }
+
+    /** AG-033e: the summary line, the check line and the filters. */
+    public static function statusLines(array $d): array
+    {
+        return [BankReconciliation::statusSummaryText($d['summary']), BankReconciliation::statusCheckText($d['summary']),
+            BankReconciliation::statusFilterText($d)];
+    }
+
+    /** AG-033e: "Last reconciled" text, "30 Nov 2026 by BA" or "Never". */
+    public static function lastReconciledText(array $r): string
+    {
+        $s = $r['last_statement'];
+
+        return $s ? app(Settings::class)->formatDate($s['statement_date']).' by '.self::personText($s['completed_by']) : 'Never';
+    }
 
     /** AG-033c R9 line of an export, as on S6. */
     public static function coverageLine(array $d): string
@@ -602,9 +641,10 @@ class ReportExporter
             'cash-flow' => ['reports.pdf.cash-flow', ['data' => $data, 'notes' => self::cashFlowNotes($data)]],
             'bank-reconciliation' => ['reports.pdf.bank-reconciliation', ['data' => $data]],
             'reconciliation-statements' => ['reports.pdf.reconciliation-statements', ['data' => $data]],
+            'reconciliation-status' => ['reports.pdf.reconciliation-status', ['data' => $data]],
         };
         $pdf = Pdf::loadView($view[0], $view[1] + ['head' => $head])
-            ->setPaper('a4', in_array($name, ['transfers', 'branch-comparison', 'trial-balance', 'cash-flow', 'reconciliation-statements'], true) ? 'landscape' : 'portrait');
+            ->setPaper('a4', in_array($name, ['transfers', 'branch-comparison', 'trial-balance', 'cash-flow', 'reconciliation-statements', 'reconciliation-status'], true) ? 'landscape' : 'portrait');
         $pdf->render();
         $dompdf = $pdf->getDomPDF();
         $canvas = $dompdf->getCanvas();
@@ -750,6 +790,8 @@ class ReportExporter
             'bank-reconciliation' => $this->bankReconciliationSheets($d, $row),
 
             'reconciliation-statements' => [$this->statementListSheet($d, $row)],
+
+            'reconciliation-status' => [$this->statusSheet($d, $row)],
 
             // AG-086: the screen columns (finding 2 order) plus Eliminated; Month is a date cell "mmm yyyy" (finding 7).
             'cash-flow' => [[
@@ -901,6 +943,39 @@ class ReportExporter
             'notes' => [$d['total'] ? "{$d['total']} ".($d['total'] === 1 ? 'statement' : 'statements') : 'No statements match these filters.',
                 'Late entries: entries dated on or before the statement date that were recorded or voided after completion (as listed on the statement).'],
         ];
+    }
+
+    /**
+     * AG-033e: one sheet, the S7 columns; Months overdue a number, Due by and Last statement date date cells, Checked
+     * at a date-time cell, Re-check needed Yes/No. Text cells carry the formula prefix (ReportSheet).
+     */
+    private function statusSheet(array $d, callable $row): array
+    {
+        $statuses = ['active' => 'Active', 'closed' => 'Inactive'];
+        $rows = array_map(function ($r) use ($row, $d, $statuses) {
+            $s = $r['last_statement'];
+            $c = $r['check'];
+
+            return $row([$r['branch']['code'], (string) $r['account']['code'], $r['account']['name'], $statuses[$r['account']['status']] ?? $r['account']['status'],
+                BankReconciliation::statusTagText($r, $d['due_month_end']), $r['months_overdue'], $r['due_by'], $s['statement_date'] ?? null,
+                $s ? self::personText($s['completed_by']) : '', ReconciliationChecks::STATUS_LABELS[$r['check_status'] ?? ''] ?? '',
+                $c ? self::personText($c['checked_by']) : '', $c ? ReconciliationChecks::at($c['checked_at']) : '', $r['recheck_needed'] ? 'Yes' : 'No']);
+        }, $d['data']);
+
+        return [
+            'title' => 'Reconciliation status',
+            'columns' => [['Branch', 'text'], ['Account code', 'text'], ['Account', 'text'], ['Account status', 'text'], ['Status', 'text'],
+                ['Months overdue', 'integer'], ['Due by', 'date'], ['Last statement date', 'date'], ['Last completed by', 'text'],
+                ['Check status', 'text'], ['Checked by', 'text'], ['Checked at', 'datetime'], ['Re-check needed', 'text']],
+            'rows' => $rows,
+            'notes' => [$d['data'] ? count($d['data']).' '.(count($d['data']) === 1 ? 'bank account' : 'bank accounts') : self::statusEmptyText($d)],
+        ];
+    }
+
+    /** AG-033e empty states. */
+    public static function statusEmptyText(array $d): string
+    {
+        return $d['filters']['status'] === 'all' ? 'No bank accounts in this branch.' : 'No bank accounts with this status.';
     }
 
     /** Trial balance sheets: one per branch section (by branch), or one consolidated sheet. */

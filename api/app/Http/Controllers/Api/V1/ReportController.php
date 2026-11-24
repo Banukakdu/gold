@@ -66,6 +66,12 @@ class ReportController extends Controller
         return $recon->statementList($recon->statementListParams($request->all()));
     }
 
+    /** AG-033e S7 bank reconciliation status per account (docs/specs/reconciliation-overdue.md). Read only. */
+    public function reconciliationStatus(Request $request, BankReconciliation $recon)
+    {
+        return $recon->status($recon->statusParams($request->all()));
+    }
+
     /** AG-087 R1: validation first, then the count; a large Excel export is queued (202), anything else downloads. */
     public function export(Request $request, string $name, BackgroundExports $exports)
     {
@@ -75,6 +81,8 @@ class ReportController extends Controller
             'bank-reconciliation' => app(BankReconciliation::class)->reportParams($request->except('format')),
             // AG-033c: the list filters without paging (every matching row).
             'reconciliation-statements' => app(BankReconciliation::class)->statementListParams($request->except('format'), paging: false),
+            // AG-033e: always as at today.
+            'reconciliation-status' => app(BankReconciliation::class)->statusParams($request->except('format')),
             default => $this->reports->params($name, $request->except('format')),
         };
 

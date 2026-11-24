@@ -57,6 +57,9 @@ export const routes: Routes = [
       // AG-033c S6: the statements list for checkers (report.view, the same as the reprint each row opens).
       { path: 'reports/reconciliation-statements', canActivate: [permissionGuard('report.view')],
         loadComponent: () => import('./features/reports/reconciliation-statements.component').then(m => m.ReconciliationStatementsComponent) },
+      // AG-033e S7: bank reconciliation status per account (report.view, the same keys as S6).
+      { path: 'reports/reconciliation-status', canActivate: [permissionGuard('report.view')],
+        loadComponent: () => import('./features/reports/reconciliation-status.component').then(m => m.ReconciliationStatusComponent) },
       { path: 'reports/trial-balance', canActivate: [permissionGuard('report.view')],
         loadComponent: () => import('./features/reports/trial-balance.component').then(m => m.TrialBalanceComponent) },
       // AG-087 S2: any signed-in user (their own background exports only).

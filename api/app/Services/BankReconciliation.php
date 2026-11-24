@@ -445,6 +445,39 @@ class BankReconciliation
         ]])->all();
     }
 
+    /**
+     * people() for several branches in a fixed number of queries (AG-033e R8): the controls R10 tag is still worked out
+     * per branch (membership of that branch).
+     *
+     * @param  array<int, int[]>  $idsByBranch  branch id => user ids
+     * @return array<int, array<int, array{id: int, name: string, tag: ?string}>> branch id => user id => person
+     */
+    public function peopleByBranch(array $idsByBranch): array
+    {
+        $idsByBranch = array_filter(array_map(fn ($ids) => array_values(array_unique(array_map('intval', array_filter($ids)))), $idsByBranch));
+        if (! $idsByBranch) {
+            return [];
+        }
+        $all = array_values(array_unique(array_merge(...array_values($idsByBranch))));
+        $members = [];
+        foreach (DB::table('branch_user')->whereIn('user_id', $all)->whereIn('branch_id', array_keys($idsByBranch))->get(['user_id', 'branch_id']) as $m) {
+            $members[(int) $m->branch_id][(int) $m->user_id] = true;
+        }
+        $users = User::whereIn('id', $all)->get(['id', 'name', 'status', 'is_super_admin'])->keyBy('id');
+        $out = [];
+        foreach ($idsByBranch as $branchId => $ids) {
+            foreach ($ids as $id) {
+                $u = $users[$id] ?? null;
+                if ($u) {
+                    $out[(int) $branchId][$id] = ['id' => $u->id, 'name' => $u->name,
+                        'tag' => $u->status !== 'active' ? 'inactive' : (! $u->is_super_admin && ! isset($members[(int) $branchId][$id]) ? 'no longer in this branch' : null)];
+                }
+            }
+        }
+
+        return $out;
+    }
+
     /** History rows (S1), latest first. */
     private function presentAll(Collection $statements, Account $account, User $user, ?BankStatement $last): array
     {
@@ -1215,9 +1248,12 @@ class BankReconciliation
     }
 
     /**
-     * R9 coverage line: bank accounts in the branch set and the Accounts filter, with a line dated on or before the cut-off,
-     * active or with a non-zero book balance there, whose latest completed statement is before the cut-off (or none).
-     * Not affected by from, status, changed, late, copy or paging. Information only.
+     * R9 coverage line: bank accounts in the branch set and the Accounts filter that are required at the cut-off (the
+     * AG-033e R3 rule, notRequired()) and whose latest completed statement is before the cut-off (or none). Not
+     * affected by from, status, changed, late, copy or paging. Information only.
+     *
+     * AG-033e accounting review finding 1: a closed account with a 0.00 book balance at the cut-off is left out only
+     * once its latest completed statement is on or after F (the month-end of its last line on or before the cut-off).
      *
      * @param  Collection<int, Account>  $accounts  listAccounts() of the branch set
      */
@@ -1226,16 +1262,13 @@ class BankReconciliation
         $cut = self::reconciledTo($p->to);
         $ids = $p->extra['account_ids'];
         $scope = $ids ? $accounts->filter(fn (Account $a) => in_array($a->id, $ids, true))->values() : $accounts;
-        $books = $scope->isEmpty() ? collect() : DB::table('ledger_entries as le')->whereIn('le.account_id', $scope->pluck('id')->all())
-            ->whereDate('le.entry_date', '<=', $cut)->groupBy('le.account_id')
-            ->selectRaw("le.account_id as aid, COALESCE(SUM({$this->dr()} - {$this->cr()}), 0) as c")
-            ->get()->mapWithKeys(fn ($r) => [(int) $r->aid => (int) $r->c]);
+        $lines = $this->lineSummary($scope->pluck('id')->all(), $cut);
         $out = [];
         foreach ($scope as $a) {
-            if (! $books->has($a->id) || ($a->status !== 'active' && $books[$a->id] === 0)) {
+            $last = $a->getAttribute('last_statement_date');
+            if (self::notRequired($a->status, $lines[$a->id] ?? null, $last) !== null) {
                 continue;
             }
-            $last = $a->getAttribute('last_statement_date');
             if ($last !== null && $last >= $cut) {
                 continue;
             }
@@ -1276,6 +1309,246 @@ class BankReconciliation
         $parts[] = 'Accounts: '.$accounts;
 
         return 'Filters: '.implode(' · ', $parts);
+    }
+
+    // ------------------------------------------------------------------ AG-033e S7 reconciliation status per account
+
+    /** R2: a month's bank reconciliation is due within this many days after month-end (Q1: fixed). */
+    public const RECONCILE_GRACE_DAYS = 10;
+
+    public const STATUS_LABELS = ['all' => 'All', 'overdue' => 'Overdue', 'due' => 'Due', 'up_to_date' => 'Up to date', 'not_required' => 'Not required'];
+
+    public const STATUS_INVALID = 'Choose a valid status.';
+
+    /** R6 status order. */
+    private const STATUS_RANK = ['overdue' => 0, 'due' => 1, 'up_to_date' => 2, 'not_required' => 3];
+
+    /**
+     * R8: per account, the first and last line dated on or before $cut (voided lines and contras included) and the
+     * book balance at $cut, in one grouped query. Accounts with no such line are absent.
+     *
+     * @param  int[]  $accountIds
+     * @return array<int, array{first: string, last: string, book: int}>
+     */
+    private function lineSummary(array $accountIds, string $cut): array
+    {
+        if (! $accountIds) {
+            return [];
+        }
+
+        return DB::table('ledger_entries as le')->whereIn('le.account_id', $accountIds)->whereDate('le.entry_date', '<=', $cut)
+            ->groupBy('le.account_id')
+            ->selectRaw("le.account_id as aid, MIN(le.entry_date) as first_line, MAX(le.entry_date) as last_line, COALESCE(SUM({$this->dr()} - {$this->cr()}), 0) as c")
+            ->get()->mapWithKeys(fn ($r) => [(int) $r->aid => ['first' => substr((string) $r->first_line, 0, 10),
+                'last' => substr((string) $r->last_line, 0, 10), 'book' => (int) $r->c]])->all();
+    }
+
+    /** "2026-11-20" -> "2026-11-30". */
+    public static function monthEnd(string $date): string
+    {
+        return CarbonImmutable::parse($date)->endOfMonth()->format('Y-m-d');
+    }
+
+    /**
+     * R3 (and AG-033c R9, as amended by accounting review finding 1): null when the account is required at the cut-off,
+     * else why not: `no_entries` (no line on or before the cut-off) or `closed_nil` (not active, 0.00 at the cut-off,
+     * and its latest completed statement is on or after F, the month-end of its last line).
+     *
+     * @param  array{first: string, last: string, book: int}|null  $lines  lineSummary() of the account at the cut-off
+     */
+    public static function notRequired(string $status, ?array $lines, ?string $last): ?string
+    {
+        if ($lines === null) {
+            return 'no_entries';
+        }
+        if ($status !== 'active' && $lines['book'] === 0 && $last !== null && $last >= self::monthEnd($lines['last'])) {
+            return 'closed_nil';
+        }
+
+        return null;
+    }
+
+    /** R4: the number of month-ends M with $start < M <= $stop (0 when $stop <= $start). */
+    public static function monthEndsBetween(string $start, string $stop): int
+    {
+        $index = function (string $d): int {
+            $c = CarbonImmutable::parse($d);
+
+            return $c->year * 12 + $c->month - ($c->isLastOfMonth() ? 0 : 1);
+        };
+
+        return max(0, $index($stop) - $index($start));
+    }
+
+    /** Validate the S7 filters (section 5). Any other parameter (as_at, from, to, ...) is ignored: always as at today. */
+    public function statusParams(array $input): ReportParams
+    {
+        $d = validator($input, [
+            'branches' => 'nullable|array',
+            'branches.*' => 'integer|distinct',
+            'status' => 'nullable|string|in:'.implode(',', array_keys(self::STATUS_LABELS)),
+        ], ['status.in' => self::STATUS_INVALID, 'status.string' => self::STATUS_INVALID])->validate();
+        $today = BusinessDate::today();
+        [$branches, $all, $subset] = app(ReportService::class)->branchScope(array_map('intval', $d['branches'] ?? []));
+
+        return new ReportParams($today, $today, $branches, $all, $subset, ['as_at' => $today, 'status' => $d['status'] ?? 'all']);
+    }
+
+    /**
+     * S7 data (section 5). Read only, a fixed number of queries whatever the number of accounts (R8): bank accounts,
+     * the latest completed statement per account, the line summary, the checks (and their people).
+     */
+    public function status(ReportParams $p): array
+    {
+        $today = $p->extra['as_at'];
+        $grace = self::RECONCILE_GRACE_DAYS;
+        $due = self::reconciledTo($today); // L
+        $overdue = self::reconciledTo(CarbonImmutable::parse($today)->subDays($grace + 1)->format('Y-m-d')); // E
+        $dueBy = CarbonImmutable::parse($due)->addDays($grace)->format('Y-m-d');
+
+        // R1: the branch scope in branch mode (plus the explicit set); in All mode the set resolved by branchScope().
+        $ctx = app(BranchContext::class);
+        $accounts = ($ctx->isScoped() ? Account::query() : Account::withoutGlobalScopes())
+            ->with('branch:id,code,is_main')->where('type', 'bank')->whereIn('accounts.branch_id', $p->branchIds())
+            ->get(['id', 'code', 'name', 'status', 'branch_id', 'type']);
+        $ids = $accounts->pluck('id')->all();
+        $latest = $this->latestCompleted($ids);
+        $lines = $this->lineSummary($ids, $due);
+        $checks = app(ReconciliationChecks::class)->statusMap(collect(array_values($latest)));
+        $people = $this->peopleByBranch(collect($latest)->groupBy('branch_id')->map(fn ($g) => $g->pluck('completed_by')->all())->all());
+
+        $rows = $accounts->map(function (Account $a) use ($latest, $lines, $checks, $people, $due, $overdue, $dueBy) {
+            $st = $latest[$a->id] ?? null;
+            $last = $st?->statement_date->format('Y-m-d');
+            $l = $lines[$a->id] ?? null;
+            $closed = $a->status !== 'active';
+            $final = $closed && $l ? self::monthEnd($l['last']) : null; // F
+            $reason = self::notRequired($a->status, $l, $last);
+            $months = null;
+            if ($reason !== null) {
+                $status = 'not_required';
+            } else {
+                $start = $last ?? CarbonImmutable::parse($l['first'])->subDay()->format('Y-m-d');
+                $stop = $closed && $l['book'] === 0 ? min($overdue, $final) : $overdue;
+                $months = self::monthEndsBetween($start, $stop);
+                $status = $last !== null && $last >= $due ? 'up_to_date' : ($months >= 1 ? 'overdue' : 'due');
+                if ($status === 'up_to_date') {
+                    $months = 0;
+                }
+            }
+            $c = $st ? ($checks[$st->id] ?? null) : null;
+            $check = $c['check'] ?? null;
+
+            return [
+                'account' => ['id' => $a->id, 'code' => $a->code, 'name' => $a->name, 'status' => $a->status],
+                // is_main: the web shows "Reconcile" in All mode for MAIN accounts only (Q8).
+                'branch' => ['id' => $a->branch->id, 'code' => $a->branch->code, 'is_main' => (bool) $a->branch->is_main],
+                'status' => $status,
+                'not_required_reason' => $reason,
+                'never_reconciled' => $last === null,
+                'months_overdue' => $months,
+                'final_month_end' => $final,
+                'due_by' => $status === 'due' ? $dueBy : null,
+                'last_statement' => $st ? ['id' => $st->id, 'statement_date' => $last,
+                    'completed_by' => $people[(int) $st->branch_id][(int) $st->completed_by] ?? null,
+                    'completed_at' => $st->completed_at?->toIso8601String()] : null,
+                'check_status' => $c['status'] ?? null,
+                'check' => $check ? ['id' => $check['id'], 'checked_by' => $check['checked_by'], 'checked_at' => $check['checked_at'],
+                    'late_since_check' => $check['late_since_check']] : null,
+                'recheck_needed' => ($c['status'] ?? null) === 'recheck',
+            ];
+        })->sort(fn ($x, $y) => [self::STATUS_RANK[$x['status']], -($x['months_overdue'] ?? 0), $x['branch']['is_main'] ? 0 : 1, $x['branch']['code'], (string) $x['account']['code'], $x['account']['name']]
+            <=> [self::STATUS_RANK[$y['status']], -($y['months_overdue'] ?? 0), $y['branch']['is_main'] ? 0 : 1, $y['branch']['code'], (string) $y['account']['code'], $y['account']['name']])
+            ->values();
+
+        $summary = ['overdue' => 0, 'due' => 0, 'up_to_date' => 0, 'not_required' => 0, 'not_checked' => 0, 'recheck' => 0];
+        foreach ($rows as $r) {
+            $summary[$r['status']]++;
+            if (in_array($r['check_status'], ['not_checked', 'recheck'], true)) {
+                $summary[$r['check_status']]++;
+            }
+        }
+        $filter = $p->extra['status'];
+        $data = $filter === 'all' ? $rows : $rows->where('status', $filter)->values();
+
+        return array_merge(app(ReportService::class)->meta($p, provisional: false), [
+            'provisional' => false, // a status as at today, not period figures (review NIT 3: no lock query)
+            'as_at' => $today,
+            'grace_days' => $grace,
+            'due_month_end' => $due,
+            'overdue_through' => $overdue,
+            'basis' => self::statusBasis($today, $overdue),
+            'filters' => ['status' => $filter],
+            'summary' => $summary,
+            'data' => $data->all(),
+        ]);
+    }
+
+    /**
+     * The latest completed statement per account, in one query (completed statement dates of an account are unique:
+     * Complete refuses a date on or before the last completed one).
+     *
+     * @param  int[]  $accountIds
+     * @return array<int, BankStatement> account id => statement
+     */
+    private function latestCompleted(array $accountIds): array
+    {
+        if (! $accountIds) {
+            return [];
+        }
+        $max = DB::table('bank_statements')->where('status', BankStatement::COMPLETED)->whereIn('account_id', $accountIds)
+            ->groupBy('account_id')->selectRaw('account_id as aid, MAX(statement_date) as d');
+
+        // Review NIT 2: the same guard as lastReconciledDates() (no reconciliation tables yet: no statements).
+        return self::installed(fn () => BankStatement::withoutGlobalScopes()->completed()
+            ->joinSub($max, 'mx', fn ($j) => $j->on('mx.aid', '=', 'bank_statements.account_id')->on('mx.d', '=', 'bank_statements.statement_date'))
+            ->orderBy('bank_statements.id')->get(['bank_statements.*'])
+            ->keyBy(fn (BankStatement $s) => (int) $s->account_id)->all(), []);
+    }
+
+    /** S7 basis line. */
+    public static function statusBasis(string $asAt, string $overdueThrough): string
+    {
+        return 'As at '.self::label($asAt).'. A month\'s bank reconciliation is due within '.self::RECONCILE_GRACE_DAYS.' days after month-end. '
+            .'Overdue counts the month-ends after the last completed statement, up to '.self::label($overdueThrough).'. Undone statements do not count.';
+    }
+
+    /** S7 summary line: "Overdue 2 · Due 0 · Up to date 1 · Not required 2". */
+    public static function statusSummaryText(array $s): string
+    {
+        return "Overdue {$s['overdue']} · Due {$s['due']} · Up to date {$s['up_to_date']} · Not required {$s['not_required']}";
+    }
+
+    /** S7 check line (accounting review finding 3). */
+    public static function statusCheckText(array $s): string
+    {
+        return "Latest statement not checked {$s['not_checked']} · Re-check needed {$s['recheck']}";
+    }
+
+    /** "Filters: Status: All". */
+    public static function statusFilterText(array $d): string
+    {
+        return 'Filters: Status: '.self::STATUS_LABELS[$d['filters']['status']];
+    }
+
+    private static function monthsText(int $n): string
+    {
+        return $n.' '.($n === 1 ? 'month' : 'months');
+    }
+
+    /** The S7 Status tag text of a row. */
+    public static function statusTagText(array $r, string $dueMonthEnd): string
+    {
+        $never = $r['never_reconciled'];
+
+        return match ($r['status']) {
+            'overdue' => ($never ? 'Never reconciled · overdue ' : 'Overdue ').self::monthsText((int) $r['months_overdue']),
+            'due' => ($never ? 'Never reconciled · due by ' : 'Due by ').self::label($r['due_by']),
+            'up_to_date' => 'Up to date',
+            default => $r['not_required_reason'] === 'closed_nil'
+                ? 'Not required: inactive, nil balance, reconciled to its last month ('.self::label($r['final_month_end']).')'
+                : 'Not required: no entries up to '.self::label($dueMonthEnd),
+        };
     }
 
     // ------------------------------------------------------------------ S4 period lock review
