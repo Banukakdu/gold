@@ -24,5 +24,7 @@ export class ReportsHubComponent {
     { link: '/reports/bank-reconciliation', title: 'Unreconciled bank entries', question: 'Which bank entries have not cleared yet?' },
     { link: '/reports/reconciliation-statements', title: 'Bank reconciliation statements',
       question: 'Which bank reconciliations were completed or undone, and has anything changed since?' },
+    { link: '/reports/reconciliation-status', title: 'Bank reconciliation status',
+      question: 'Which bank accounts are behind with reconciliation, and is the last statement checked?' },
   ];
 }

@@ -138,6 +138,8 @@ let lastBranch: string | null = null;
         <p><b>{{ r.total }} {{ r.total === 1 ? 'statement' : 'statements' }}</b></p>
         <p class="muted">{{ r.basis }}</p>
         <p class="rs-coverage" [class.warn]="r.coverage.not_reconciled.length" [class.ok]="!r.coverage.not_reconciled.length">{{ coverage() }}</p>
+        <!-- AG-033e: the status per account (S7), with the same Branches selection in All mode. -->
+        <p class="rs-status-link"><a [routerLink]="['/reports/reconciliation-status']" [queryParams]="statusQuery()">Status per account</a></p>
         <div class="rs-export"><ag-export-buttons name="reconciliation-statements" [params]="applied()" /></div>
       </div>
     }
@@ -360,6 +362,12 @@ export class ReconciliationStatementsComponent implements OnInit {
         this.msg.set(Object.keys(fields).length ? rest.join(' ') : reportError(e));
       },
     });
+  }
+
+  /** AG-033e F6: S7 with the current Branches (All mode only). */
+  statusQuery() {
+    const b = (this.applied()['branches'] as number[] | undefined) ?? [];
+    return this.auth.isAllBranches() && b.length ? { branches: b } : {};
   }
 
   open(s: StatementRow) {

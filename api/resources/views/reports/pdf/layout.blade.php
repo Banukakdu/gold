@@ -50,7 +50,9 @@
     <div class="title">{{ $head['title'] }}</div>
     <div class="line">Branches: {{ $head['branches'] }}</div>
     <div class="line">{{ $head['period_word'] ?? 'Period' }}: {{ $head['period'] }}</div>
-    <div class="line">{{ $head['currency'] ?? 'Amounts in LKR' }} &middot; {{ $head['basis'] ?? \App\Services\ReportService::BASIS }}</div>
+    {{-- AG-033e: a report without amounts sends currency null (no "Amounts in" line). --}}
+    @php($currencyLine = array_key_exists('currency', $head) ? $head['currency'] : 'Amounts in LKR')
+    <div class="line">@if ($currencyLine){{ $currencyLine }} &middot; @endif{{ $head['basis'] ?? \App\Services\ReportService::BASIS }}</div>
     <div class="line">{{ $head['printed'] }}</div>
     @if (! empty($head['extracted']))<div class="line">{{ $head['extracted'] }}</div>@endif
     @foreach ($head['notes'] ?? [] as $note)<div class="line"><b>{{ $note }}</b></div>@endforeach

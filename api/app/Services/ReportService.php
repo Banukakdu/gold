@@ -64,7 +64,7 @@ class ReportService
     }
 
     public const NAMES = ['income-expense', 'branch-comparison', 'transfers', 'cash-book', 'trial-balance', 'cash-flow', 'bank-reconciliation',
-        'reconciliation-statements'];
+        'reconciliation-statements', 'reconciliation-status'];
 
     /** Excel export and cash book screen cap (detail rows). */
     public const EXPORT_CAP = 5000;

@@ -317,7 +317,7 @@ class StatementListTest extends StatementListTestCase
         $this->assertSame([['account' => ['id' => $this->kdyBank->id, 'code' => $this->kdyBank->code, 'name' => 'KDY Bank', 'status' => 'active'],
             'branch' => ['id' => $this->kdy->id, 'code' => 'KDY'], 'last_statement_date' => '2026-10-31']], $this->list()->json('coverage.not_reconciled'));
 
-        // A second KDY bank account with lines and no statement: never reconciled; closed with 0.00 at the cut-off: left out.
+        // A second KDY bank account with lines and no statement: never reconciled.
         Carbon::setTestNow('2026-11-20 10:00:00');
         $two = $this->bankIn($this->kdy, 'KDY Bank 2');
         $this->allocate($two, '1000.00', '2026-10-02');
@@ -325,7 +325,13 @@ class StatementListTest extends StatementListTestCase
         Carbon::setTestNow('2026-12-10 10:00:00');
         $row = collect($this->list()->json('coverage.not_reconciled'))->firstWhere('account.id', $two->id);
         $this->assertNull($row['last_statement_date']);
+        // AG-033e accounting review finding 1 (amends R9): closed with 0.00 at the cut-off, it is still named "never
+        // reconciled" until a statement to the month-end of its last line (31 Oct 2026) is completed; then it is left out.
         $this->sa($this->kdy)->putJson("/api/v1/accounts/{$two->id}", ['status' => 'closed'])->assertOk();
+        $row = collect($this->list()->json('coverage.not_reconciled'))->firstWhere('account.id', $two->id);
+        $this->assertSame(['status' => 'closed', 'last_statement_date' => null], ['status' => $row['account']['status'], 'last_statement_date' => $row['last_statement_date']]);
+        $this->assertStringContainsString('KDY Bank 2 ('.$two->code.'), never reconciled', BankReconciliation::coverageText($this->list()->json('coverage')));
+        $this->complete('2026-10-31', '0.00', $this->acc, $two)->assertCreated();
         $this->assertNull(collect($this->list()->json('coverage.not_reconciled'))->firstWhere('account.id', $two->id));
         // A bank account with no line on or before the cut-off is not in scope.
         $this->bankIn($this->kdy, 'KDY Bank 3');

@@ -309,10 +309,8 @@ class ReconciliationChecks
         $active = $checks->where('status', BankStatementCheck::ACTIVE)->keyBy('bank_statement_id');
         $cancelled = $checks->where('status', BankStatementCheck::CANCELLED)->pluck('bank_statement_id')->map(fn ($v) => (int) $v)->flip();
         $late = $this->lateSinceMap($active->values());
-        $people = [];
-        foreach ($active->groupBy('branch_id') as $branchId => $group) {
-            $people[(int) $branchId] = $this->recon->people($group->pluck('checked_by')->unique()->values()->all(), (int) $branchId);
-        }
+        // Per branch (controls R10 tag), in a fixed number of queries (AG-033e R8).
+        $people = $this->recon->peopleByBranch($active->groupBy('branch_id')->map(fn ($g) => $g->pluck('checked_by')->all())->all());
         foreach ($statements as $s) {
             $c = $active[$s->id] ?? null;
             $n = $c ? ($late[$c->id] ?? 0) : null;
