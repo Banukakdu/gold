@@ -8,6 +8,9 @@ use App\Models\User;
 use App\Services\BankReconciliation;
 use App\Services\InAppNotifications;
 use App\Services\ReconciliationReminders;
+use App\Services\YearEnd;
+use App\Support\BranchContext;
+use App\Support\ReportParams;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
@@ -166,7 +169,7 @@ class OperationsTest extends RemindersTestCase
         // unique key and insertOrIgnore stop the second one, so each reminder exists once.
         $this->app->bind(ReconciliationReminders::class, fn ($app) => new class($app->make(BankReconciliation::class), $app->make(InAppNotifications::class)) extends ReconciliationReminders
         {
-            protected function send(array $plan): bool
+            protected function send(array $plan): string
             {
                 parent::send($plan); // the other run
 
@@ -237,5 +240,106 @@ class OperationsTest extends RemindersTestCase
         $this->statement($this->complete('2026-11-30', '469500.00'));
         Exceptions::assertReported(fn (\RuntimeException $e) => $e->getMessage() === 'close failed');
         $this->assertNull($this->rows($this->acc, $this->kdyBank)->sole()->read_at);
+    }
+
+    public function test_s1_an_account_completed_during_the_run_gets_no_reminder(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-12-11 07:00', 'Asia/Colombo'));
+        $this->tick([[$this->i2, '2026-11-02'], [$this->e2, '2026-11-03']])->assertOk();
+        Carbon::setTestNow(Carbon::parse(self::T, 'UTC'));
+        $kdyBank = $this->kdyBank;
+        $acc = $this->acc;
+        // ACC completes KDY Bank to E after status() was read and before this account's send().
+        $this->app->bind(ReconciliationReminders::class, fn ($app) => new class($app->make(BankReconciliation::class), $app->make(InAppNotifications::class), $kdyBank, $acc) extends ReconciliationReminders
+        {
+            public function __construct(BankReconciliation $r, InAppNotifications $n, private Account $target, private User $by)
+            {
+                parent::__construct($r, $n);
+            }
+
+            protected function send(array $plan): string
+            {
+                if ((int) $plan['account']->id === (int) $this->target->id) {
+                    app(BankReconciliation::class)->complete($this->target, '2026-11-30', '469500.00', $this->by);
+                }
+
+                return parent::send($plan);
+            }
+        });
+        [$code, $out] = $this->remind();
+        $this->assertSame(0, $code);
+        $this->assertStringContainsString('reconciled during the run, not sent', $out);
+        $this->assertStringContainsString('Sent 3 reminder(s), skipped 1 already sent, 0 failed.', $out);
+        $this->assertCount(0, $this->reminders($this->kdyBank));
+        foreach ([$this->acc, $this->vw, $this->ba] as $u) {
+            $this->assertCount(0, $this->rows($u, $this->kdyBank));
+            $this->assertCount(2, $this->unread($u));
+        }
+        $this->assertSame(0, AuditLog::where('event', 'reconciliation.overdue_reminder_sent')->where('auditable_id', $this->kdyBank->id)->count());
+    }
+
+    public function test_s2_the_branch_context_is_restored(): void
+    {
+        $ctx = app(BranchContext::class);
+        $ctx->set($this->kdy->id, false);
+        $r = app(ReconciliationReminders::class)->run();
+        $this->assertSame(4, $r['sent']);
+        $this->assertSame([$this->kdy->id, false], [$ctx->branchId, $ctx->allBranches]);
+
+        $ctx->set(null, true);
+        $this->app->bind(BankReconciliation::class, fn ($app) => new class($app->make(YearEnd::class)) extends BankReconciliation
+        {
+            public function status(ReportParams $p): array
+            {
+                throw new \RuntimeException('status failed');
+            }
+        });
+        try {
+            app(ReconciliationReminders::class)->run();
+            $this->fail('The exception was swallowed.');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('status failed', $e->getMessage());
+        }
+        $this->assertSame([null, true], [$ctx->branchId, $ctx->allBranches]);
+    }
+
+    public function test_n6_n7_counts_and_names_only_when_asked(): void
+    {
+        $r = app(ReconciliationReminders::class)->run(true);
+        $this->assertSame([4, 0, 0, 0], [$r['would'], $r['sent'], $r['skipped'], $r['failed']]);
+        [, $out] = $this->remind();
+        $this->assertStringContainsString(': sent to 3 user(s)', $out);
+        $this->assertStringNotContainsString("{$this->acc->name} (#{$this->acc->id})", $out);
+    }
+
+    public function test_n8_a_rolled_back_complete_leaves_the_reminders_unread(): void
+    {
+        $this->remind();
+        Carbon::setTestNow(Carbon::parse('2026-12-12 09:00', 'Asia/Colombo'));
+        $this->tick([[$this->i2, '2026-11-02'], [$this->e2, '2026-11-03']])->assertOk();
+        try {
+            DB::transaction(function () {
+                app(BankReconciliation::class)->complete($this->kdyBank, '2026-11-30', '469500.00', $this->acc);
+                throw new \RuntimeException('outer failure');
+            });
+        } catch (\RuntimeException) {
+        }
+        $this->assertSame(0, DB::table('bank_statements')->where('account_id', $this->kdyBank->id)->whereDate('statement_date', '2026-11-30')->count());
+        foreach ([$this->acc, $this->vw, $this->ba] as $u) {
+            $this->assertNull($this->rows($u, $this->kdyBank)->sole()->read_at);
+        }
+    }
+
+    public function test_n8_inactive_branch_included_and_inactive_role_does_not_qualify(): void
+    {
+        DB::table('branches')->where('id', $this->gal->id)->update(['status' => 'inactive']);
+        DB::table('roles')->where('branch_id', $this->kdy->id)->where('name', 'Viewer')->update(['status' => 'inactive']);
+        Carbon::setTestNow(Carbon::parse('2026-12-15 10:00', 'Asia/Colombo'));
+        $this->undoOn($this->galBank, $this->galNov, $this->gacc);
+        $this->remindAtColombo('2026-12-16 07:15');
+        $this->assertCount(1, $this->reminders($this->galBank));
+        $this->assertCount(1, $this->rows($this->gacc, $this->galBank));
+        $this->assertCount(0, $this->rows($this->vw));
+        $this->assertCount(3, $this->rows($this->acc));
     }
 }

@@ -125,8 +125,8 @@ The texts use `BankReconciliation::label()` dates and AG-033e month wording ("1 
 - **R4 Dedupe.**
   - The key is `(account_id, overdue_through, round)` (round 1 unless R6 applies), where `overdue_through` = E computed from T. It is a business date, not a timestamp, so the server time zone (UTC or other) and the hour of the run do not matter. A run at 18:30 UTC on 10 Dec is 00:00 on 11 Dec in Colombo, so it already uses E = 30 Nov.
   - **Per account, in one DB transaction:**
-    1. `insertOrIgnore` the reminder row.
-    2. When nothing was inserted (already sent), stop.
+    1. Lock the account row (the lock Complete and Undo take). When a statement completed to E or later now exists (completed during the run), stop: nothing is sent (review S1).
+    2. Insert the reminder row. On a duplicate key (already sent), stop. (Implemented as a plain insert that catches the duplicate-key error, not `INSERT IGNORE`, so other errors are not hidden: review N2.)
     3. Otherwise write the bell rows, close the superseded rows (R7), write the audit row (R9) and commit.
 
     Reruns, a manual run during the scheduled one, and two servers therefore produce one reminder at most. A crash before the commit leaves nothing, and the next run sends it.

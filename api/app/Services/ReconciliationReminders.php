@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Account;
 use App\Models\AuditLog;
+use App\Models\BankReconciliationReminder;
 use App\Models\BankStatement;
 use App\Models\Branch;
 use App\Models\User;
@@ -11,6 +12,7 @@ use App\Notifications\InAppNotification;
 use App\Support\BranchContext;
 use App\Support\BusinessDate;
 use App\Support\ReportParams;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Notifications\DatabaseNotification;
 use Illuminate\Support\Facades\DB;
 
@@ -32,17 +34,25 @@ class ReconciliationReminders
 
     public const REPORT = 'report.view';
 
+    /** send() results. */
+    public const SENT = 'sent';
+
+    public const ALREADY_SENT = 'already_sent';
+
+    public const RECONCILED = 'reconciled';
+
     /** @var array<int, array{ids: int[], fallback: bool}> recipients per branch id, cached for one run (R13) */
     private array $recipients = [];
 
     public function __construct(private BankReconciliation $reconciliation, private InAppNotifications $notifications) {}
 
     /**
-     * One run (R1 to R12). Returns `lines` (one per overdue account), and the `sent`, `skipped` and `failed` counts.
+     * One run (R1 to R12). Returns `lines` (one per overdue account), and the `would` (dry run), `sent`, `skipped` and
+     * `failed` counts. Recipient names are looked up for the output only on a dry run or when $names is set (verbose).
      *
-     * @return array{today: string, overdue_through: string, lines: string[], sent: int, skipped: int, failed: int}
+     * @return array{today: string, overdue_through: string, lines: string[], would: int, sent: int, skipped: int, failed: int}
      */
-    public function run(bool $dryRun = false): array
+    public function run(bool $dryRun = false, bool $names = false): array
     {
         $this->recipients = [];
         $ctx = app(BranchContext::class);
@@ -56,7 +66,7 @@ class ReconciliationReminders
             $e = $status['overdue_through'];
             $byBranch = $branches->keyBy('id');
 
-            $out = ['today' => $today, 'overdue_through' => $e, 'lines' => [], 'sent' => 0, 'skipped' => 0, 'failed' => 0];
+            $out = ['today' => $today, 'overdue_through' => $e, 'lines' => [], 'would' => 0, 'sent' => 0, 'skipped' => 0, 'failed' => 0];
             foreach ($status['data'] as $row) {
                 $branch = $byBranch[(int) $row['branch']['id']];
                 $prefix = "{$branch->code} · {$row['account']['name']} ({$row['account']['code']}) · overdue through {$e} · ".self::monthsText((int) $row['months_overdue']);
@@ -68,19 +78,21 @@ class ReconciliationReminders
 
                         continue;
                     }
-                    $who = $this->names($plan['recipient_ids']);
+                    $who = $dryRun || $names ? $this->names($plan['recipient_ids']) : count($plan['recipient_ids']).' user(s)';
                     $round = $plan['round'] > 1 ? " (round {$plan['round']}, re-send after an undo)" : '';
                     if ($dryRun) {
+                        $out['would']++;
                         $out['lines'][] = "{$prefix}{$round}: would send to {$who}";
 
                         continue;
                     }
-                    if ($this->send($plan)) {
+                    $result = $this->send($plan);
+                    if ($result === self::SENT) {
                         $out['sent']++;
                         $out['lines'][] = "{$prefix}{$round}: sent to {$who}";
                     } else {
                         $out['skipped']++;
-                        $out['lines'][] = "{$prefix}: already sent";
+                        $out['lines'][] = $result === self::RECONCILED ? "{$prefix}: reconciled during the run, not sent" : "{$prefix}: already sent";
                     }
                 } catch (\Throwable $ex) {
                     // R8: this account's transaction rolled back; report and go on with the next one.
@@ -100,15 +112,16 @@ class ReconciliationReminders
      * R4 / R6: what to send for an Overdue row, or null when it was already sent for this E (and no later undo of a
      * statement dated on or after E calls for a new round).
      */
-    protected function plan(array $row, Branch $branch, string $e): ?array
+    private function plan(array $row, Branch $branch, string $e): ?array
     {
         $accountId = (int) $row['account']['id'];
-        $latest = DB::table('bank_reconciliation_reminders')->where('account_id', $accountId)->whereDate('overdue_through', $e)
+        // R1: the command works over every branch by design, so the branch scope is not applied here.
+        $latest = BankReconciliationReminder::withoutGlobalScopes()->where('account_id', $accountId)->whereDate('overdue_through', $e)
             ->orderByDesc('round')->first(['round', 'created_at']);
         $undone = null;
         if ($latest !== null) {
             $undone = BankStatement::withoutGlobalScopes()->where('account_id', $accountId)->where('status', BankStatement::UNDONE)
-                ->whereDate('statement_date', '>=', $e)->where('undone_at', '>', $latest->created_at)
+                ->whereDate('statement_date', '>=', $e)->where('undone_at', '>=', $latest->created_at)
                 ->orderByDesc('undone_at')->orderByDesc('id')->first();
             if ($undone === null) {
                 return null;
@@ -130,27 +143,37 @@ class ReconciliationReminders
     }
 
     /**
-     * R4 steps 1 to 3 in one transaction: insertOrIgnore the reminder row; when it was already there, stop; otherwise
-     * close the superseded rows (R7 b), write the bell rows and the audit row (R9). Returns whether it was sent.
+     * R4 steps 1 to 3 in one transaction. The account row is locked first (the lock Complete and Undo take), and a
+     * statement completed to E or later since status() was read means the account is no longer Overdue: nothing is sent
+     * (review S1). Then the reminder row is inserted; a duplicate key means it was already sent; otherwise close the
+     * superseded rows (R7 b), write the bell rows and the audit row (R9).
+     *
+     * @return string self::SENT, self::ALREADY_SENT or self::RECONCILED
      */
-    protected function send(array $plan): bool
+    protected function send(array $plan): string
     {
         return DB::transaction(function () use ($plan) {
             /** @var Account $account */
-            $account = $plan['account'];
-            $inserted = DB::table('bank_reconciliation_reminders')->insertOrIgnore([
-                'branch_id' => $account->branch_id,
-                'account_id' => $account->id,
-                'overdue_through' => $plan['overdue_through'],
-                'round' => $plan['round'],
-                'months_overdue' => $plan['months_overdue'],
-                'last_statement_date' => $plan['last_statement_date'],
-                'recipient_ids' => json_encode($plan['recipient_ids']),
-                'super_admin_fallback' => $plan['super_admin_fallback'],
-                'created_at' => now(),
-            ]);
-            if ($inserted === 0) {
-                return false;
+            $account = Account::withoutGlobalScopes()->lockForUpdate()->findOrFail($plan['account']->id);
+            $last = $this->reconciliation->lastCompleted((int) $account->id);
+            if ($last !== null && $last->statement_date->format('Y-m-d') >= $plan['overdue_through']) {
+                return self::RECONCILED;
+            }
+            try {
+                // A plain insert (not INSERT IGNORE, which would also hide out-of-range or FK errors, review N2).
+                DB::table('bank_reconciliation_reminders')->insert([
+                    'branch_id' => $account->branch_id,
+                    'account_id' => $account->id,
+                    'overdue_through' => $plan['overdue_through'],
+                    'round' => $plan['round'],
+                    'months_overdue' => $plan['months_overdue'],
+                    'last_statement_date' => $plan['last_statement_date'],
+                    'recipient_ids' => json_encode($plan['recipient_ids']),
+                    'super_admin_fallback' => $plan['super_admin_fallback'],
+                    'created_at' => now(),
+                ]);
+            } catch (UniqueConstraintViolationException) {
+                return self::ALREADY_SENT; // another run (or server) sent it; nothing else was written
             }
 
             // R7 (b): unread rows of earlier month-ends, and of earlier rounds of this one, become read.
@@ -179,7 +202,7 @@ class ReconciliationReminders
             AuditLog::record('reconciliation.overdue_reminder_sent', $account, null, $new, (int) $account->branch_id,
                 ['user_id' => null, 'ip' => null, 'user_agent' => 'console']);
 
-            return true;
+            return self::SENT;
         }, LedgerService::ATTEMPTS);
     }
 
@@ -282,10 +305,14 @@ class ReconciliationReminders
 
     private function closeWhere(int $accountId, string $through): int
     {
+        // Review N1: a plain read of the ids first, then an update by primary key, so the update locks only those rows.
+        $ids = DatabaseNotification::query()->where('type', InAppNotification::RECONCILIATION_OVERDUE)->whereNull('read_at')
+            ->where('data->account_id', $accountId)->where('data->overdue_through', '<=', $through)->pluck('id')->all();
+        if ($ids === []) {
+            return 0;
+        }
         $now = now();
 
-        return DatabaseNotification::query()->where('type', InAppNotification::RECONCILIATION_OVERDUE)->whereNull('read_at')
-            ->where('data->account_id', $accountId)->where('data->overdue_through', '<=', $through)
-            ->update(['read_at' => $now, 'updated_at' => $now]);
+        return DatabaseNotification::query()->whereIn('id', $ids)->whereNull('read_at')->update(['read_at' => $now, 'updated_at' => $now]);
     }
 }

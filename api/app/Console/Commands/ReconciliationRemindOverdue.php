@@ -19,14 +19,13 @@ class ReconciliationRemindOverdue extends Command
     public function handle(ReconciliationReminders $reminders): int
     {
         $dry = (bool) $this->option('dry-run');
-        $r = $reminders->run($dry);
+        $r = $reminders->run($dry, $this->output->isVerbose());
         $this->line("As at {$r['today']} (business date), overdue through {$r['overdue_through']}".($dry ? ' (dry run: nothing is written)' : '').'.');
         foreach ($r['lines'] as $line) {
             $this->line($line);
         }
         if ($dry) {
-            $would = count(array_filter($r['lines'], fn ($l) => str_contains($l, ': would send to ')));
-            $this->info("Would send {$would} reminder(s), skipped {$r['skipped']} already sent, {$r['failed']} failed.");
+            $this->info("Would send {$r['would']} reminder(s), skipped {$r['skipped']} already sent, {$r['failed']} failed.");
         } else {
             $this->info("Sent {$r['sent']} reminder(s), skipped {$r['skipped']} already sent, {$r['failed']} failed.");
         }
