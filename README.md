@@ -327,6 +327,15 @@ the statement 'Re-check needed'. Undoing a statement cancels its check.
    "Not checked" until it is corrected or checked.
 4. `php artisan ledger:verify` now also runs V11 (check rows consistent with their statements); it must exit 0.
 
+### Deploying the overdue reconciliation reminder (AG-033f, docs/specs/reconciliation-overdue-reminder.md)
+
+1. **MySQL privilege.** The migration `2026_12_08_000000_bank_reconciliation_reminders` creates two triggers on
+   `bank_reconciliation_reminders` (no update, no delete). Same trigger privilege as the controls release.
+2. `php artisan migrate --force`. No permission changes.
+3. The scheduler (`php artisan schedule:run` every minute) runs `reconciliation:remind-overdue` daily at 07:15
+   Asia/Colombo. It needs no queue worker. On the first run every account that is Overdue on the status report gets one
+   bell reminder. `php artisan reconciliation:remind-overdue --dry-run` shows what would be sent and writes nothing.
+
 ## How it works
 
 **Branch context.** The app sends the active branch in an `X-Branch-Id` header. Middleware checks the user belongs

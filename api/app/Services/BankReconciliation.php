@@ -723,6 +723,15 @@ class BankReconciliation
                 'lines_count' => $marks->count(),
                 'self_count' => $self,
             ]);
+            // AG-033f R7 (a): the overdue reminders up to this date become read, after the commit. It never fails the Complete.
+            $accountId = (int) $acc->id;
+            DB::afterCommit(function () use ($accountId, $s) {
+                try {
+                    app(ReconciliationReminders::class)->closeFor($accountId, $s);
+                } catch (\Throwable $e) {
+                    report($e);
+                }
+            });
 
             return $statement;
         }, LedgerService::ATTEMPTS);
