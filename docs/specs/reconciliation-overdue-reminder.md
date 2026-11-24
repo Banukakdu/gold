@@ -314,3 +314,33 @@ Reviewed against AG-033e finding 4, AG-033e R2 to R5, AG-033d D1, D2, D4 and R6,
 - **Audit:** one system row per reminder. It records the recipients and the fallback flag, has `user_id` null, and has the account's `branch_id`, so branch audit scoping works. The reminder table is append-only. Reads and auto-reads are not audited, which is consistent with AG-094 R10. Fine.
 - **No postings:** no `LedgerService` call and no change to balances, transactions, marks, statements, checks or settings. `ledger:verify` is part of AC 16. The hook on Complete runs after commit and never fails the Complete. Fine.
 - **Branch isolation and redaction:** follow AG-094 R5, and S7 re-checks access on the server. No amounts or bank account numbers appear in the text. Fine.
+
+## Accountant sign-off
+Checked the finished build at a5914ce (build ebb096d, fixes a5914ce), diff `feature/reconciliation-overdue...HEAD`, against the Accounting review above. Code and tests were read. The test suite was not re-run here: the developer reports SQLite 1180 passed and MySQL 1181 passed. QA reports 22 of 23 ACs pass and none fail (AC 23 is partial only because the full suite was not run by QA).
+
+### Findings
+1. **MUST, re-send after an undo (R6): DONE.**
+   - `ReconciliationReminders::plan()` (api/app/Services/ReconciliationReminders.php:115-143) takes the highest `round` for (account, E). A new round is sent only when a statement of the account dated on or after E has `undone_at` on or after that round's `created_at`. Otherwise the result is "already sent".
+   - The key is unique `(account_id, overdue_through, round)` (migration 2026_12_08_000000, `bank_reconciliation_reminders_key_unique`).
+   - The body adds " The statement to <d M Y> was undone on <undone_at in Asia/Colombo, d M Y>." before the fallback sentence (lines 220-228). The audit row carries `round` and, for round > 1, `undone_statement_id` (lines 196-200).
+   - Evidence: `LifecycleTest::test_ac10_undone_after_the_reminder_sends_a_new_round` covers round 2 for ACC, VW and BA. It checks the exact text "...was undone on 14 Dec 2026." with a UTC/Colombo date boundary, and the audit `round` 2 with `undone_statement_id`. It checks that daily reruns add nothing, and that a second complete and undo gives round 3 with the round 2 rows read ("...undone on 20 Dec 2026."). It checks that January moves on to round 1 for E = 31 Dec. `test_ac10_undo_of_a_statement_before_e_sends_nothing_more` covers the partial catch-up case.
+2. **SHOULD (product owner), escalation to Super Admins from the second overdue month: NOT DONE, accepted as open.** This was a product owner decision. It is recorded as **Q10** in section 8, and the review text says "Not built ... open as Q10". The build matches: there is no `escalated` column and no escalation branch in `recipientsOf()`. This does not block. I still recommend it, together with the later S2 Lock-confirm listing of Overdue accounts, so that a Super Admin's month lock is not given blind on persistent cases.
+3. **SHOULD, Super Admin fallback when no active member can reconcile: DONE.**
+   - `recipientsOf()` (lines 250-272) falls back when no active holder also holds `account.reconcile` + `report.view` in the branch. Checkers keep their rows. The sentence " No one in <code> can reconcile this account." is added, and `super_admin_fallback` is stored on the reminder row and in the audit values.
+   - Evidence: `test_ac11_super_admin_fallback_when_nobody_can_receive_it`, `test_ac11_finding3_a_branch_with_only_a_checker_also_falls_back` and `test_ac11_a_preparer_in_the_branch_means_no_fallback`. The inactive SA3 is excluded.
+
+### Other points checked
+- **Recipients: fine.** Holders = `holderIdsOf([reconcile, reconcile_check])` ∩ `holderIdsOf([report.view])`, through active roles of the branch while a member (InAppNotifications.php:66-76), then active users only. MAIN gets holders plus active Super Admins. One id per user, sorted. A Super Admin with a branch role counts as a holder (`test_ac12_...`). This matches the seeded templates: Branch Admin, Accountant and Viewer get the reminder; Cashier does not. `PermissionSeeder` is unchanged.
+- **Dedupe: fine.**
+  - It is a plain insert that catches `UniqueConstraintViolationException`, inside one transaction that also locks the account row. This is stricter than the `insertOrIgnore` named in my review and in the QA note on AC 21, because other errors are not hidden (review N2).
+  - An account completed to E during the run gets nothing (`test_s1_...`). Pruned bell rows are never re-sent (`test_ac22_...`). The reminder rows are append-only by trigger (`test_reminder_rows_are_never_updated_or_deleted`), and rollback refuses while rows exist.
+  - QA ran 3 processes at once, 8 times, with no duplicates.
+- **Auto-mark-read on Complete: fine.**
+  - `BankReconciliation::complete()` calls `closeFor()` in `DB::afterCommit`, inside a try/catch, so it never fails the Complete (`test_a_failing_close_never_fails_the_complete`). A rolled-back Complete leaves the reminders unread (`test_n8_a_rolled_back_complete_...`).
+  - Only `read_at` changes, and only for rows with `overdue_through` <= the statement date. A partial catch-up closes nothing (`test_ac8_...`). No audit row is written (`test_ac15_...`, last block).
+- **Audit rows: fine.** There is one `reconciliation.overdue_reminder_sent` row per reminder, written in the same transaction. It has `user_id` null, user agent `console`, the account's `branch_id`, and all R9 values, including `recipient_ids` (an empty list stays visible) and `by_system`. It is labelled in the audit log, and branch scoping is checked: the KDY Branch Admin does not see the MAIN row (`test_ac15_one_system_audit_row_per_reminder`).
+- **Nothing posts: fine.** There is no `LedgerService` call; only its `ATTEMPTS` constant is used. The account row is only locked and read, never written. `test_ac16_the_command_posts_nothing` takes snapshots of `ledger_entries`, `transactions`, marks, statements, checks, settings and every `current_balance` across 5 run dates plus a dry run, and checks that `ledger:verify` passes. A dry run writes nothing (`test_ac19_...`).
+- **Failure isolation: fine.** One failing account rolls back alone, the exit code is 1, and the next run retries it (`test_ac18_...`, and the QA real-fault run).
+
+### Verdict
+**SIGNED OFF.** The MUST finding 1 is fully built and tested, finding 3 is built, and finding 2 is an open product owner question (Q10) that does not block. The build posts nothing, keeps the audit trail, and does not weaken segregation of duties.
